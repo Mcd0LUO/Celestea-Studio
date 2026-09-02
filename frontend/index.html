@@ -1,12 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="night">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Celestea Studio</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230d0f12'/%3E%3Crect x='5' y='5' width='6' height='6' rx='1.2' fill='none' stroke='%237f93b0' stroke-width='1.4'/%3E%3C/svg%3E" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css" />
-  <link rel="stylesheet" href="/assets/style.css" />
 </head>
 <body>
   <div id="app">
@@ -16,10 +14,11 @@
       <div class="topbar-left">
         <span class="logo" aria-hidden="true"><span></span></span>
         <span class="brand">Celestea Studio</span>
-        <span class="brand-tag">v2</span>
+        <span class="brand-tag">v2 · TS</span>
       </div>
       <div class="topbar-right">
         <span id="modelChip" class="chip" title="模型">—</span>
+        <button id="btnTheme" class="btn btn-quiet btn-theme" title="切换主题（夜航黑 / 樱花粉 / 克莱因蓝）">夜航</button>
         <button id="btnSidebar" class="btn btn-quiet" title="折叠/展开左侧面板">面板</button>
         <button id="btnConfig" class="btn btn-quiet" title="查看运行配置">配置</button>
       </div>
@@ -126,6 +125,30 @@
           </div>
         </div>
 
+        <!-- ---------- statusline（模型 / 上下文环 / 吞吐，发送栏正上方） ---------- -->
+        <div id="statusline" class="statusline" title="上下文化用 · 模型 · 思考强度 · 吞吐（GET /api/status + SSE 增量）">
+          <div class="sl-row sl-row-main">
+            <span class="sl-ring" id="slRing" title="上下文占用">
+              <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true">
+                <circle class="sl-ring-track" cx="7" cy="7" r="5.2" transform="rotate(-90 7 7)"></circle>
+                <circle class="sl-ring-prog" cx="7" cy="7" r="5.2" transform="rotate(-90 7 7)"></circle>
+              </svg>
+            </span>
+            <span class="sl-ctx" id="slCtx">—/—</span>
+            <span class="sl-sep">·</span>
+            <span class="sl-model" id="slModel" title="当前模型">—</span>
+            <span class="sl-sep">·</span>
+            <span class="sl-effort" id="slEffort" title="思考强度">—</span>
+            <span class="sl-spacer"></span>
+            <span class="sl-hint" id="slHint"></span>
+          </div>
+          <div class="sl-row sl-row-sub">
+            <span class="sl-tps" id="slTps">— tok/s</span>
+            <span class="sl-sep">·</span>
+            <span class="sl-steps" id="slSteps">step —</span>
+          </div>
+        </div>
+
         <footer id="statusbar">
           <div class="sb-left">
             <span class="dot" id="statusDot"></span>
@@ -162,8 +185,6 @@
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
-  <script src="/assets/app.js"></script>
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

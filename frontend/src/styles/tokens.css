@@ -1,0 +1,164 @@
+/* ============================================================================
+ * Celestea Studio · 设计令牌（单一事实源）
+ * 默认主题 = DSH 夜航黑灰（OKLCH，近中性、无蓝紫；色相 255°，chroma≈0.01）
+ * 色卡（可切换，<html data-theme> 单属性）：
+ *   night   夜航黑灰（暗，默认）
+ *   sakura  樱花粉（亮，≈356°）
+ *   klein   克莱因蓝（亮，≈262°）
+ * 组件层禁止写死颜色：一律引用本文件 --c-* token。
+ * ============================================================================ */
+
+:root {
+  --mono: "SF Mono", "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+  --sans: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --radius: 8px;
+}
+
+/* ------------------------------------------------ night（默认）：夜航黑灰 */
+:root,
+[data-theme="night"] {
+  color-scheme: dark;
+  --c-accent-h: 255;
+  --c-accent-chroma: 0.01;
+
+  --c-accent: oklch(0.8 0.015 var(--c-accent-h));
+  --c-accent-strong: oklch(0.88 0.01 calc(var(--c-accent-h) + 18));
+  --c-accent-soft: oklch(0.8 0.015 var(--c-accent-h) / 0.12);
+  --c-accent-ring: oklch(0.8 0.015 var(--c-accent-h) / 0.32);
+  --c-accent-fg: oklch(0.17 0.008 var(--c-accent-h));
+
+  --c-bg: oklch(0.17 0.008 var(--c-accent-h));
+  --c-surface: oklch(0.215 0.01 var(--c-accent-h));
+  --c-surface-raised: oklch(0.255 0.012 var(--c-accent-h));
+
+  --c-border-subtle: oklch(0.32 0.012 var(--c-accent-h));
+  --c-border-strong: oklch(0.42 0.014 var(--c-accent-h));
+
+  --c-text-1: oklch(0.93 0.004 var(--c-accent-h));
+  --c-text-2: oklch(0.76 0.006 var(--c-accent-h));
+  --c-text-3: oklch(0.58 0.008 var(--c-accent-h));
+
+  --c-code-bg: oklch(0.145 0.007 var(--c-accent-h));
+  --c-scroll-thumb: oklch(0.3 0.012 var(--c-accent-h));
+  --c-overlay: oklch(0.12 0.006 var(--c-accent-h) / 0.78);
+
+  --c-ok: oklch(0.63 0.15 155);
+  --c-warn: oklch(0.72 0.15 75);
+  --c-err: oklch(0.58 0.2 25);
+  --c-ok-dim: oklch(0.63 0.15 155 / 0.12);
+  --c-err-dim: oklch(0.58 0.2 25 / 0.12);
+  --c-warn-dim: oklch(0.72 0.15 75 / 0.14);
+
+  --shadow-panel: 0 1px 2px oklch(0.1 0.005 var(--c-accent-h) / 0.4),
+    0 10px 30px oklch(0.08 0.005 var(--c-accent-h) / 0.45);
+
+  /* 代码高亮 token 色（克制冷灰系，无蓝紫霓虹） */
+  --hl-comment: oklch(0.58 0.008 var(--c-accent-h));
+  --hl-keyword: oklch(0.8 0.05 235);
+  --hl-string: oklch(0.76 0.1 150);
+  --hl-number: oklch(0.78 0.1 70);
+  --hl-title: oklch(0.82 0.04 225);
+  --hl-attr: oklch(0.74 0.08 140);
+  --hl-builtin: oklch(0.78 0.06 200);
+  --hl-literal: oklch(0.78 0.08 255);
+  --hl-meta: oklch(0.74 0.05 240);
+  --hl-type: oklch(0.79 0.05 230);
+}
+
+/* ------------------------------------------------ sakura：樱花粉（亮） */
+[data-theme="sakura"] {
+  color-scheme: light;
+  --c-accent-h: 356;
+  --c-accent-chroma: 0.16;
+
+  --c-accent: oklch(0.62 0.19 var(--c-accent-h));
+  --c-accent-strong: oklch(0.54 0.21 var(--c-accent-h));
+  --c-accent-soft: oklch(0.62 0.19 var(--c-accent-h) / 0.12);
+  --c-accent-ring: oklch(0.62 0.19 var(--c-accent-h) / 0.35);
+  --c-accent-fg: oklch(0.985 0.008 var(--c-accent-h));
+
+  --c-bg: oklch(0.972 0.008 var(--c-accent-h));
+  --c-surface: oklch(0.987 0.005 var(--c-accent-h));
+  --c-surface-raised: oklch(0.998 0.003 var(--c-accent-h));
+
+  --c-border-subtle: oklch(0.905 0.02 var(--c-accent-h));
+  --c-border-strong: oklch(0.84 0.035 var(--c-accent-h));
+
+  --c-text-1: oklch(0.25 0.03 var(--c-accent-h));
+  --c-text-2: oklch(0.46 0.03 var(--c-accent-h));
+  --c-text-3: oklch(0.62 0.025 var(--c-accent-h));
+
+  --c-code-bg: oklch(0.955 0.014 var(--c-accent-h));
+  --c-scroll-thumb: oklch(0.86 0.025 var(--c-accent-h));
+  --c-overlay: oklch(0.35 0.06 var(--c-accent-h) / 0.35);
+
+  --c-ok: oklch(0.63 0.15 155);
+  --c-warn: oklch(0.72 0.15 75);
+  --c-err: oklch(0.58 0.2 25);
+  --c-ok-dim: oklch(0.63 0.15 155 / 0.14);
+  --c-err-dim: oklch(0.58 0.2 25 / 0.14);
+  --c-warn-dim: oklch(0.72 0.15 75 / 0.16);
+
+  --shadow-panel: 0 1px 2px oklch(0.4 0.05 var(--c-accent-h) / 0.06),
+    0 8px 24px oklch(0.4 0.05 var(--c-accent-h) / 0.08);
+
+  --hl-comment: oklch(0.62 0.025 var(--c-accent-h));
+  --hl-keyword: oklch(0.45 0.13 330);
+  --hl-string: oklch(0.44 0.12 145);
+  --hl-number: oklch(0.45 0.13 55);
+  --hl-title: oklch(0.42 0.11 262);
+  --hl-attr: oklch(0.42 0.1 155);
+  --hl-builtin: oklch(0.45 0.1 200);
+  --hl-literal: oklch(0.45 0.12 275);
+  --hl-meta: oklch(0.48 0.08 var(--c-accent-h));
+  --hl-type: oklch(0.43 0.12 262);
+}
+
+/* ------------------------------------------------ klein：克莱因蓝（亮） */
+[data-theme="klein"] {
+  color-scheme: light;
+  --c-accent-h: 262;
+  --c-accent-chroma: 0.18;
+
+  --c-accent: oklch(0.56 0.21 var(--c-accent-h));
+  --c-accent-strong: oklch(0.48 0.22 var(--c-accent-h));
+  --c-accent-soft: oklch(0.56 0.21 var(--c-accent-h) / 0.12);
+  --c-accent-ring: oklch(0.56 0.21 var(--c-accent-h) / 0.35);
+  --c-accent-fg: oklch(0.985 0.005 var(--c-accent-h));
+
+  --c-bg: oklch(0.973 0.007 var(--c-accent-h));
+  --c-surface: oklch(0.988 0.004 var(--c-accent-h));
+  --c-surface-raised: oklch(0.999 0.002 var(--c-accent-h));
+
+  --c-border-subtle: oklch(0.905 0.018 var(--c-accent-h));
+  --c-border-strong: oklch(0.83 0.04 var(--c-accent-h));
+
+  --c-text-1: oklch(0.24 0.03 var(--c-accent-h));
+  --c-text-2: oklch(0.45 0.03 var(--c-accent-h));
+  --c-text-3: oklch(0.6 0.025 var(--c-accent-h));
+
+  --c-code-bg: oklch(0.955 0.012 var(--c-accent-h));
+  --c-scroll-thumb: oklch(0.86 0.03 var(--c-accent-h));
+  --c-overlay: oklch(0.3 0.08 var(--c-accent-h) / 0.35);
+
+  --c-ok: oklch(0.63 0.15 155);
+  --c-warn: oklch(0.72 0.15 75);
+  --c-err: oklch(0.58 0.2 25);
+  --c-ok-dim: oklch(0.63 0.15 155 / 0.14);
+  --c-err-dim: oklch(0.58 0.2 25 / 0.14);
+  --c-warn-dim: oklch(0.72 0.15 75 / 0.16);
+
+  --shadow-panel: 0 1px 2px oklch(0.35 0.06 var(--c-accent-h) / 0.07),
+    0 8px 24px oklch(0.35 0.06 var(--c-accent-h) / 0.09);
+
+  --hl-comment: oklch(0.6 0.025 var(--c-accent-h));
+  --hl-keyword: oklch(0.42 0.11 255);
+  --hl-string: oklch(0.42 0.12 145);
+  --hl-number: oklch(0.45 0.13 55);
+  --hl-title: oklch(0.4 0.12 240);
+  --hl-attr: oklch(0.42 0.1 155);
+  --hl-builtin: oklch(0.44 0.1 200);
+  --hl-literal: oklch(0.44 0.13 280);
+  --hl-meta: oklch(0.4 0.08 var(--c-accent-h));
+  --hl-type: oklch(0.4 0.11 245);
+}

@@ -1,0 +1,71 @@
+/* ============================================================================
+ * Statusline — 发送栏正上方两行紧凑状态条（借鉴 DSH SessionStatusBar）
+ *   第 1 行  上下文占用环(≥90% 警告) + 用量 + 模型 + 思考强度
+ *   第 2 行  tokens/s + step
+ * 数据：GET /api/status 轮询 + SSE status 事件增量字段。
+ * ============================================================================ */
+
+#statusline,
+.statusline {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: 5px 14px 4px;
+  background: var(--c-surface);
+  border-top: 1px solid var(--c-border-subtle);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--c-text-2);
+  flex: 0 0 auto;
+  user-select: none;
+}
+
+.sl-row {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 16px;
+}
+.sl-row-main { flex-wrap: wrap; }
+.sl-row-sub { color: var(--c-text-3); }
+
+.sl-sep { color: var(--c-text-3); opacity: .6; }
+.sl-spacer { flex: 1 1 auto; }
+
+.sl-ctx { font-variant-numeric: tabular-nums; color: var(--c-text-1); }
+.sl-model {
+  color: var(--c-text-1);
+  max-width: 46ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sl-effort {
+  color: var(--c-text-2);
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  line-height: 14px;
+}
+.sl-effort:empty { display: none; }
+.sl-tps { font-variant-numeric: tabular-nums; }
+.sl-steps { font-variant-numeric: tabular-nums; }
+.sl-hint { color: var(--c-warn); font-size: 10.5px; }
+
+.sl-ring {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px;
+}
+.sl-ring svg { display: block; }
+.sl-ring circle { fill: none; stroke-width: 2; }
+.sl-ring .sl-ring-track { stroke: var(--c-border-subtle); }
+.sl-ring .sl-ring-prog {
+  stroke: var(--c-ok);
+  transition: stroke-dashoffset .35s ease, stroke .2s ease;
+}
+.sl-ring.warn .sl-ring-prog {
+  stroke: var(--c-warn);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* /api/status 不可用时整条降低对比并显示提示 */
+#statusline.sl-stale .sl-model,
+#statusline.sl-stale .sl-ctx,
+#statusline.sl-stale .sl-effort,
+#statusline.sl-stale .sl-tps,
+#statusline.sl-stale .sl-steps { opacity: .55; }

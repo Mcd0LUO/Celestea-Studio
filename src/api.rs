@@ -5,6 +5,9 @@
 //! New routes (all mounted on the same axum router in main):
 //!   GET  /api/tools             -> {"tools":[{"name","description"}]}
 //!   GET  /api/config            -> sanitized Profile (never exposes api_key)
+//!   GET  /api/status            -> statusline snapshot (W218: model /
+//!                                  reasoning_effort / steps / tokens_per_sec /
+//!                                  context_usage; SSE fallback channel)
 //!   GET  /api/sessions          -> {"sessions":[...]}
 //!   POST /api/clear             -> {"ok":true,"cleared":true}
 //!   POST /api/worker/spawn      -> {"ok","sessionId","title","wid"}
@@ -47,6 +50,17 @@ pub async fn get_tools(State(st): State<Shared>) -> Json<Value> {
 /// Sanitized profile JSON (pre-computed at startup; no api_key / api_key_file).
 pub async fn get_config(State(st): State<Shared>) -> Json<Value> {
     Json(st.config_json.clone())
+}
+
+// ---- GET /api/status --------------------------------------------------------
+
+/// W218 statusline snapshot — the fallback channel for the SSE status
+/// payloads: {model, reasoning_effort, steps, tokens_per_sec, context_usage}.
+/// The same shape rides the SSE status events (start / progress / completed /
+/// cancelled / error / lagged); a client that missed (or reconnects to) the
+/// stream reads the current values here.
+pub async fn get_status(State(st): State<Shared>) -> Json<Value> {
+    Json(st.statusline())
 }
 
 // ---- GET /api/sessions -----------------------------------------------------
