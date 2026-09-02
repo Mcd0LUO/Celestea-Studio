@@ -1,0 +1,19 @@
+[package]
+name = "celestea-studio"
+version = "0.1.0"
+edition = "2021"
+description = "Celestea Studio - local web UI over celestea-runtime (SSE streaming turn events)"
+license = "MIT"
+
+[dependencies]
+# Engine (API frozen): turns are driven by Runtime::compose + Runtime::run_turn.
+celestea-runtime = { path = "/src/celestea_harness/crates/runtime" }
+# Core types not re-exported by runtime (Content / ToolDecision) used by the LoopEvent -> SSE mapper.
+celestea-core = { path = "/src/celestea_harness/crates/core" }
+
+axum = "0.8"
+tokio = { version = "1.53", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }

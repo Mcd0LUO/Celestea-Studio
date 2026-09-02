@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Celestea Studio</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand"><span class="logo">◆</span> Celestea Studio</div>
+    <div id="model" class="model" title="base_url: -">…</div>
+  </header>
+
+  <main id="messages"></main>
+
+  <footer id="statusbar">
+    <span id="status">connecting…</span>
+    <span id="step"></span>
+  </footer>
+
+  <div id="inputbar">
+    <textarea id="input" rows="2" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+    <button id="send">发送</button>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/lib/common.min.js"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

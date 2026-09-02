@@ -1,0 +1,4 @@
+/target
+.env
+nohup.out
+*.log
