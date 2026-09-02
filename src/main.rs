@@ -37,6 +37,8 @@ use celestea_runtime::{
     load_dotenv, resolve_base_url, resolve_profile, EventSink, LoopEvent, Runtime,
     TurnOutcome,
 };
+mod api;
+
 /// Default bind address (loopback only; access via ssh -L tunnel).
 const DEFAULT_BIND: &str = "127.0.0.1:3777";
 /// Engine default config names, resolved from the process cwd.
@@ -54,18 +56,20 @@ struct BusEvent {
     data: Value,
 }
 
-struct AppState {
-    runtime: Arc<Runtime>,
-    bcast: broadcast::Sender<BusEvent>,
+pub(crate) struct AppState {
+    pub(crate) runtime: Arc<Runtime>,
+    pub(crate) bcast: broadcast::Sender<BusEvent>,
     /// Active turn's cancel sender (single concurrent turn for the MVP).
-    busy: Arc<Mutex<Option<watch::Sender<bool>>>>,
-    next_turn: Arc<AtomicU64>,
-    seq: Arc<AtomicU64>,
-    model: String,
-    base_url: String,
+    pub(crate) busy: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    pub(crate) next_turn: Arc<AtomicU64>,
+    pub(crate) seq: Arc<AtomicU64>,
+    pub(crate) model: String,
+    pub(crate) base_url: String,
+    /// Sanitized profile JSON for GET /api/config (never carries the api key).
+    pub(crate) config_json: Value,
 }
 
-type Shared = Arc<AppState>;
+pub(crate) type Shared = Arc<AppState>;
 
 #[derive(Deserialize)]
 struct TurnReq {
@@ -273,6 +277,19 @@ async fn main() {
         }
     };
 
+    // Sanitized profile for GET /api/config: every engine-relevant field,
+    // never api_key / api_key_file / the resolved key value itself.
+    let config_json = json!({
+        "model": profile.model.clone(),
+        "base_url": base_url.clone(),
+        "max_steps": profile.max_steps,
+        "max_parallel_tool_calls": profile.max_parallel_tool_calls,
+        "reasoning_effort": serde_json::to_value(profile.reasoning_effort)
+            .unwrap_or(Value::Null),
+        "max_output_tokens": profile.max_output_tokens,
+        "system_prompt": profile.system_prompt.clone(),
+    });
+
     let state = Arc::new(AppState {
         runtime: Arc::new(runtime),
         bcast: broadcast::channel(512).0,
@@ -281,6 +298,7 @@ async fn main() {
         seq: Arc::new(AtomicU64::new(0)),
         model: model.clone(),
         base_url: base_url.clone(),
+        config_json,
     });
 
     let app = Router::new()
@@ -291,6 +309,13 @@ async fn main() {
         .route("/api/events", get(get_events))
         .route("/api/turn", post(post_turn))
         .route("/api/cancel", post(post_cancel))
+        .route("/api/tools", get(api::get_tools))
+        .route("/api/config", get(api::get_config))
+        .route("/api/sessions", get(api::get_sessions))
+        .route("/api/clear", post(api::post_clear))
+        .route("/api/worker/spawn", post(api::post_worker_spawn))
+        .route("/api/worker/send", post(api::post_worker_send))
+        .route("/api/worker/status", get(api::get_worker_status))
         .with_state(state);
 
     let bind = std::env::var("STUDIO_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
