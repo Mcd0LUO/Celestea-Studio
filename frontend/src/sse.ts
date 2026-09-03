@@ -1,6 +1,7 @@
 // ============================================================================
 // SSE client — typed wrappers around the /api/events stream.
 // Event names preserved: status/text/thinking/tool/tool_result/done.
+// 责任边界：仅解析/分发事件，不做状态归并（归并在 chat.ts）。
 // Each event: {"turn":N,"seq":M,"payload":{...}, ...}
 // ============================================================================
 import type {

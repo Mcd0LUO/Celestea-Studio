@@ -2,11 +2,13 @@
 // Celestea Studio — shared type contracts
 // SSE  GET /api/events  event: status|text|thinking|tool|tool_result|done
 //      data 为 {"turn":N,"seq":M,"payload":{...}}
-//   HTTP  POST /api/turn {input}  ·  POST /api/cancel  ·  GET /api/health
-//         GET  /api/tools  ·  GET /api/config  ·  GET /api/sessions  ·  GET /api/status
-//         POST /api/clear  ·  POST /api/worker/spawn  ·  POST /api/worker/send
-//         GET  /api/worker/status?wid=
+//   HTTP  POST /api/turn {input} · POST /api/cancel · POST /api/config {patch}
+//         GET /api/health · GET /api/tools · GET /api/config · GET /api/sessions
+//         GET /api/status · POST /api/clear
+// 视图层合同（AssistantView / ToolOpView）见 ui/view.ts（与 API 合同分离）。
 // ============================================================================
+
+// ---- SSE -------------------------------------------------------------------
 
 /** SSE envelope: every event carries { turn, seq, payload }. */
 export interface SseEnvelope {
@@ -28,10 +30,7 @@ export interface ContextUsage {
   ratio: number;
 }
 
-/**
- * Statusline snapshot: what the backend publishes on GET /api/status and
- * incrementally inside SSE status events (shared contract).
- */
+/** Statusline snapshot (GET /api/status + SSE status 增量字段，共享合同). */
 export interface StatusSnapshot {
   model?: string;
   reasoning_effort?: string | null;
@@ -132,53 +131,38 @@ export interface TurnResp {
   error?: string;
 }
 
-export interface WorkerInfo {
-  wid?: string;
-  title?: string;
-  status?: string;
-  phase?: string;
-  sessionId?: string;
+// ---- 配置（GET /api/config · POST /api/config） ----------------------------
+
+/** 可选清单（后端发布时携带；缺失则前端降级为手输/预置档位）。 */
+export interface ConfigAvailable {
+  models?: string[];
+  efforts?: string[];
+}
+
+/** GET /api/config 返回的安全 Profile（永不携带 api_key 明文）。 */
+export interface ConfigInfo {
   model?: string;
-  workspace?: string;
-  cwd?: string;
-  live?: boolean;
+  base_url?: string;
+  /** 后端通过 env/file 配密钥时返回 null；前端永不显示/回传真实值。 */
+  api_key?: string | null;
+  context_window?: number | null;
+  context_window_tokens?: number | null;
+  max_steps?: number | null;
+  max_parallel_tool_calls?: number | null;
+  reasoning_effort?: string | null;
+  max_output_tokens?: number | null;
+  system_prompt?: string | null;
+  available?: ConfigAvailable;
 }
 
-export interface WorkerStatusResp {
-  ok?: boolean;
-  total?: number;
-  by_status?: Record<string, number>;
-  workers?: WorkerInfo[];
-  error?: string;
-}
-
-export interface WorkerSpawnReq {
-  wid: string;
-  brief: string;
-  title?: string;
+/** POST /api/config 热调补丁：只携带用户改动的键（空值=不改）。 */
+export interface ConfigPatch {
   model?: string;
+  base_url?: string;
+  api_key?: string;
+  context_window?: number | null;
+  max_steps?: number | null;
+  reasoning_effort?: string | null;
+  max_output_tokens?: number | null;
+  system_prompt?: string;
 }
-
-export interface WorkerSpawnResp {
-  ok?: boolean;
-  sessionId?: string;
-  title?: string;
-  wid?: string;
-  step?: string;
-  error?: string;
-}
-
-export interface WorkerSendReq {
-  target?: string;
-  content?: string;
-}
-
-export interface WorkerSendResp {
-  ok?: boolean;
-  delivered?: boolean;
-  step?: string;
-  error?: string;
-}
-
-/** /api/config returns a flat JSON object of sanitized keys. */
-export type ConfigInfo = Record<string, unknown>;

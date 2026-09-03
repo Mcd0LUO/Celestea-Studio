@@ -27,9 +27,9 @@
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::{OriginalUri, State};
@@ -47,8 +47,8 @@ use tokio_stream::StreamExt;
 
 use celestea_core::{Content, ToolDecision};
 use celestea_runtime::{
-    load_dotenv, resolve_base_url, resolve_profile, EventSink, LoopEvent, Runtime,
-    SessionEvent, SessionLog, TurnOutcome,
+    load_dotenv, resolve_base_url, resolve_profile, EventSink, LoopEvent, Profile,
+    Runtime, SessionEvent, SessionLog, TurnOutcome,
 };
 mod api;
 
@@ -71,6 +71,104 @@ const CONTEXT_WINDOW: u64 = 1_000_000;
 const STATUS_TICK: Duration = Duration::from_secs(2);
 /// W218: sliding-window length for tokens_per_sec.
 const RATE_WINDOW: Duration = Duration::from_secs(5);
+
+// ---- W225: deployment model / effort catalog -------------------------------
+
+/// W225: one entry of the deployment model catalog — the models the studio
+/// offers (snapshot of the local provider's "celestea" group; mirrors the
+/// DSH session.models listing). The 'reasoning' flag marks models that
+/// accept a reasoning effort; efforts are meaningful only for those. The
+/// catalog is static on purpose: deterministic, no upstream dependency at
+/// startup; extend AVAILABLE_MODELS to add a model.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ModelMeta {
+    pub(crate) id: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) reasoning: bool,
+}
+
+pub(crate) const AVAILABLE_MODELS: &[ModelMeta] = &[
+    ModelMeta { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", reasoning: true },
+    ModelMeta { id: "deepseek-v4-flash-vision-exp", name: "DeepSeek V4 Flash Vision Exp", reasoning: true },
+    ModelMeta { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", reasoning: true },
+    ModelMeta { id: "mimo-v2.5", name: "Mimo V2.5", reasoning: false },
+    ModelMeta { id: "muse-spark-1.2-contributor", name: "Muse Spark", reasoning: false },
+    ModelMeta { id: "glm-5.3", name: "GLM 5.3", reasoning: false },
+    ModelMeta { id: "glm-5.3-flash", name: "GLM 5.3 Flash", reasoning: false },
+];
+
+/// W225: effort tiers the studio exposes. Engine mapping: low -> Low,
+/// high -> High, max -> High (the engine's ceiling; POST also accepts the
+/// engine-native "medium" and "off"/null for back-compat with celestea.toml).
+pub(crate) const AVAILABLE_EFFORTS: &[&str] = &["low", "high", "max"];
+
+/// W225: engine default system prompt (restored when system_prompt is cleared).
+pub(crate) const DEFAULT_SYSTEM_PROMPT: &str =
+    "You are celestea, an AI agent. You are concise, accurate and direct.";
+
+/// W225: reasoning-capability lookup (None = unknown id on a custom endpoint;
+/// POST validation treats unknown ids as reasoning-capable).
+pub(crate) fn model_reasoning(id: &str) -> Option<bool> {
+    AVAILABLE_MODELS.iter().find(|m| m.id == id).map(|m| m.reasoning)
+}
+
+/// W225: the 'available' block of the config contract — models + effort tiers.
+pub(crate) fn available_json() -> Value {
+    json!({
+        "models": AVAILABLE_MODELS
+            .iter()
+            .map(|m| json!({"id": m.id, "name": m.name, "reasoning": m.reasoning}))
+            .collect::<Vec<Value>>(),
+        "efforts": AVAILABLE_EFFORTS,
+    })
+}
+
+/// W225: sanitized config JSON — the shared body of GET /api/config and the
+/// POST /api/config response. Never carries an api key (only the KEY's
+/// env-var NAME is exposed) and never persists one.
+pub(crate) fn sanitized_config(profile: &Profile, base_url: &str) -> Value {
+    json!({
+        "model": profile.model.clone(),
+        "base_url": base_url,
+        "max_steps": profile.max_steps,
+        "max_parallel_tool_calls": profile.max_parallel_tool_calls,
+        "reasoning_effort": serde_json::to_value(profile.reasoning_effort).unwrap_or(Value::Null),
+        "max_output_tokens": profile.max_output_tokens,
+        "context_window": profile.context_window_tokens,
+        "system_prompt": profile.system_prompt.clone(),
+        "api_key_env": profile.api_key_env.clone(),
+        "available": available_json(),
+    })
+}
+
+/// W225: the current Profile as full profile JSON (every documented key;
+/// optional None fields omitted), so POST /api/config can merge partial
+/// overrides through the engine's own lenient merge before re-composing.
+pub(crate) fn profile_to_json(profile: &Profile) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("model".to_string(), Value::String(profile.model.clone()));
+    m.insert("system_prompt".to_string(), Value::String(profile.system_prompt.clone()));
+    m.insert("max_steps".to_string(), json!(profile.max_steps));
+    m.insert("max_parallel_tool_calls".to_string(), json!(profile.max_parallel_tool_calls));
+    m.insert("context_window_tokens".to_string(), json!(profile.context_window_tokens));
+    m.insert("context_trim_threshold".to_string(), json!(profile.context_trim_threshold));
+    m.insert("context_keep_recent".to_string(), json!(profile.context_keep_recent));
+    if let Some(b) = &profile.base_url {
+        m.insert("base_url".to_string(), Value::String(b.clone()));
+    }
+    if let Some(e) = profile.reasoning_effort {
+        // engine-level serialization: "low" | "medium" | "high"
+        m.insert("reasoning_effort".to_string(), serde_json::to_value(e).unwrap_or(Value::Null));
+    }
+    if let Some(t) = profile.max_output_tokens {
+        m.insert("max_output_tokens".to_string(), json!(t));
+    }
+    m.insert("api_key_env".to_string(), Value::String(profile.api_key_env.clone()));
+    if let Some(f) = &profile.api_key_file {
+        m.insert("api_key_file".to_string(), Value::String(f.clone()));
+    }
+    Value::Object(m)
+}
 
 /// One turn-level event on the broadcast bus; kind is the SSE event name.
 #[derive(Clone, Debug)]
@@ -172,21 +270,51 @@ pub(crate) struct StatusView {
     pub(crate) reasoning_effort: Value,
     pub(crate) status: Arc<StatusTracker>,
     pub(crate) session: Arc<dyn SessionLog>,
+    /// W225: live profile context window (0 = trimming off -> display default).
+    pub(crate) context_window: u64,
+}
+
+/// W225: one engine generation — the hot-swappable unit behind /api/config.
+/// Every field derives from the same Profile, so readers never observe a
+/// mixed state (model from one compose, session from another).
+pub(crate) struct Gen {
+    pub(crate) runtime: Arc<Runtime>,
+    pub(crate) profile: Profile,
+    pub(crate) model: String,
+    pub(crate) base_url: String,
+    /// profile reasoning_effort serialized (null | "low" | "medium" | "high").
+    pub(crate) reasoning_effort: Value,
+    /// Sanitized config JSON (GET/POST /api/config response body).
+    pub(crate) config_json: Value,
+}
+
+/// W225: compose one engine generation from a profile. With
+/// CELESTEA_SESSION_DIR set the engine replays <dir>/cli-main.jsonl into the
+/// new Runtime, so the host conversation survives the swap.
+pub(crate) fn build_gen(profile: Profile) -> Result<Gen, String> {
+    let runtime = Runtime::compose(&profile).map_err(|e| format!("{e:#}"))?;
+    let base_url = resolve_base_url(
+        profile.base_url.as_deref(),
+        std::env::var("DEEPSEEK_BASE_URL").ok().as_deref(),
+    );
+    Ok(Gen {
+        runtime: Arc::new(runtime),
+        model: profile.model.clone(),
+        base_url: base_url.clone(),
+        reasoning_effort: serde_json::to_value(profile.reasoning_effort).unwrap_or(Value::Null),
+        config_json: sanitized_config(&profile, &base_url),
+        profile,
+    })
 }
 
 pub(crate) struct AppState {
-    pub(crate) runtime: Arc<Runtime>,
+    /// W225: current engine generation (hot-swapped by POST /api/config).
+    pub(crate) gen: RwLock<Gen>,
     pub(crate) bcast: broadcast::Sender<BusEvent>,
     /// Active turn's cancel sender (single concurrent turn for the MVP).
     pub(crate) busy: Arc<Mutex<Option<watch::Sender<bool>>>>,
     pub(crate) next_turn: Arc<AtomicU64>,
     pub(crate) seq: Arc<AtomicU64>,
-    pub(crate) model: String,
-    pub(crate) base_url: String,
-    /// Sanitized profile JSON for GET /api/config (never carries the api key).
-    pub(crate) config_json: Value,
-    /// W218: profile reasoning_effort as JSON (null | "low" | "medium" | "high").
-    pub(crate) reasoning_effort: Value,
     /// W218: shared statusline tracker (steps / token rate), fed by the turn
     /// sink and read by SSE status payloads + GET /api/status.
     pub(crate) status: Arc<StatusTracker>,
@@ -195,11 +323,13 @@ pub(crate) struct AppState {
 impl AppState {
     /// W218: snapshot view for statusline computation (turn task / API).
     pub(crate) fn status_view(&self) -> StatusView {
+        let gen = self.gen.read().unwrap_or_else(|p| p.into_inner());
         StatusView {
-            model: self.model.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
+            model: gen.model.clone(),
+            reasoning_effort: gen.reasoning_effort.clone(),
             status: self.status.clone(),
-            session: self.runtime.session.clone(),
+            session: gen.runtime.session.clone(),
+            context_window: gen.profile.context_window_tokens,
         }
     }
 
@@ -219,7 +349,13 @@ pub(crate) type Shared = Arc<AppState>;
 /// frames — the response marks the estimate (`estimated:true`).
 pub(crate) fn statusline_of(view: &StatusView) -> Value {
     let used = estimated_context_chars(&view.session.events());
-    let ratio = (used as f64 / CONTEXT_WINDOW as f64 * 10_000.0).round() / 10_000.0;
+    // W225: live profile window (0 = trimming off -> contract display default).
+    let window = if view.context_window > 0 {
+        view.context_window
+    } else {
+        CONTEXT_WINDOW
+    };
+    let ratio = (used as f64 / window as f64 * 10_000.0).round() / 10_000.0;
     json!({
         "model": view.model,
         "reasoning_effort": view.reasoning_effort,
@@ -227,7 +363,7 @@ pub(crate) fn statusline_of(view: &StatusView) -> Value {
         "tokens_per_sec": (view.status.rate() * 100.0).round() / 100.0,
         "context_usage": {
             "used": used,
-            "window": CONTEXT_WINDOW,
+            "window": window,
             "ratio": ratio.min(1.0),
             "estimated": true,
             "method": "session_event_chars",
@@ -460,11 +596,12 @@ fn not_found_response() -> Response {
 // ---- handlers -------------------------------------------------------------
 
 async fn get_health(State(st): State<Shared>) -> Json<Value> {
+    let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
     Json(json!({
         "ok": true,
         "name": "celestea-studio",
-        "model": st.model,
-        "base_url": st.base_url,
+        "model": gen.model,
+        "base_url": gen.base_url,
         "bind": DEFAULT_BIND,
     }))
 }
@@ -526,7 +663,10 @@ async fn post_turn(State(st): State<Shared>, Json(req): Json<TurnReq>) -> impl I
         json!({"phase": "start", "statusline": st.statusline()}),
     );
 
-    let runtime = st.runtime.clone();
+    let runtime = {
+        let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+        gen.runtime.clone()
+    };
     let bcast = st.bcast.clone();
     let seq = st.seq.clone();
     let busy_slot = st.busy.clone();
@@ -616,6 +756,24 @@ async fn post_cancel(State(st): State<Shared>) -> Json<Value> {
 #[tokio::main]
 async fn main() {
     load_dotenv();
+    // W225: hot config reload keeps the host conversation alive by
+    // re-composing the engine onto the SAME persistent session: force the
+    // CELESTEA_SESSION_DIR switch (engine default is in-memory) before the
+    // first compose. A user-supplied value wins; otherwise <cwd>/sessions.
+    if std::env::var("CELESTEA_SESSION_DIR")
+        .ok()
+        .map(|d| d.trim().is_empty())
+        .unwrap_or(true)
+    {
+        let dir = std::env::current_dir()
+            .map(|cwd| cwd.join("sessions"))
+            .unwrap_or_else(|_| PathBuf::from("sessions"));
+        std::env::set_var("CELESTEA_SESSION_DIR", &dir);
+        eprintln!(
+            "[celestea-studio] CELESTEA_SESSION_DIR unset; host session persisted at {}",
+            dir.display()
+        );
+    }
     let mut profile = match resolve_profile(
         None,
         false,
@@ -628,8 +786,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    // W218: remove the step limit. The agent loop runs `for _step in
-    // 0..max_steps`, so max_steps=0 means *zero* steps (not unlimited);
+    // W218: remove the step limit. The agent loop runs _step over
+    // 0..max_steps, so max_steps=0 means *zero* steps (not unlimited);
     // "no limit" is expressed as a high floor (4096). A config may only
     // raise the cap, never lower it below MIN_STEPS.
     profile.max_steps = profile.max_steps.max(MIN_STEPS);
@@ -638,38 +796,20 @@ async fn main() {
         profile.base_url.as_deref(),
         std::env::var("DEEPSEEK_BASE_URL").ok().as_deref(),
     );
-    let runtime = match Runtime::compose(&profile) {
-        Ok(rt) => rt,
+    let gen = match build_gen(profile) {
+        Ok(g) => g,
         Err(e) => {
-            eprintln!("[celestea-studio] compose error: {e:#}");
+            eprintln!("[celestea-studio] compose error: {e}");
             std::process::exit(1);
         }
     };
 
-    // Sanitized profile for GET /api/config: every engine-relevant field,
-    // never api_key / api_key_file / the resolved key value itself.
-    let config_json = json!({
-        "model": profile.model.clone(),
-        "base_url": base_url.clone(),
-        "max_steps": profile.max_steps,
-        "max_parallel_tool_calls": profile.max_parallel_tool_calls,
-        "reasoning_effort": serde_json::to_value(profile.reasoning_effort)
-            .unwrap_or(Value::Null),
-        "max_output_tokens": profile.max_output_tokens,
-        "system_prompt": profile.system_prompt.clone(),
-    });
-
     let state = Arc::new(AppState {
-        runtime: Arc::new(runtime),
+        gen: RwLock::new(gen),
         bcast: broadcast::channel(512).0,
         busy: Arc::new(Mutex::new(None)),
         next_turn: Arc::new(AtomicU64::new(1)),
         seq: Arc::new(AtomicU64::new(0)),
-        model: model.clone(),
-        base_url: base_url.clone(),
-        config_json,
-        reasoning_effort: serde_json::to_value(profile.reasoning_effort)
-            .unwrap_or(Value::Null),
         status: StatusTracker::new(),
     });
 
@@ -684,7 +824,7 @@ async fn main() {
         .route("/api/turn", post(post_turn))
         .route("/api/cancel", post(post_cancel))
         .route("/api/tools", get(api::get_tools))
-        .route("/api/config", get(api::get_config))
+        .route("/api/config", get(api::get_config).post(api::post_config))
         .route("/api/sessions", get(api::get_sessions))
         .route("/api/clear", post(api::post_clear))
         .route("/api/worker/spawn", post(api::post_worker_spawn))

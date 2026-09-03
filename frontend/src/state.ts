@@ -1,26 +1,9 @@
 // ============================================================================
-// Global UI state (single conversation turn + panels)
+// state.ts — 状态层（单一职责）：当前 turn 的全局 UI 状态，纯数据、无 DOM。
+// 视图句柄（AssistantView 等）在 ui/view.ts；布局状态在 ui/sidebar.ts 内部。
 // ============================================================================
 import type { ConnState, SessionInfo } from './types';
-
-export interface ToolOpView {
-  card: HTMLDivElement;
-  state: HTMLElement;
-  label: HTMLElement;
-}
-
-export interface AssistantView {
-  root: HTMLElement;
-  bubble: HTMLDivElement;
-  think: HTMLDetailsElement;
-  thinkBody: HTMLElement;
-  cards: HTMLDivElement;
-  content: HTMLDivElement;
-  text: string;
-  thinkText: string;
-  ops: Map<string, ToolOpView>;
-  steps: number;
-}
+import type { AssistantView } from './ui/view';
 
 export interface AppState {
   /** current turn id (null when idle) */
@@ -34,8 +17,6 @@ export interface AppState {
   selSession: string | null;
   /** elapsed-seconds timer for the bottom statusbar */
   msgTimer: number | null;
-  /** auto-refresh timer for the worker status panel */
-  workerAutoTimer: number | null;
 }
 
 export const S: AppState = {
@@ -47,5 +28,4 @@ export const S: AppState = {
   sessions: [],
   selSession: null,
   msgTimer: null,
-  workerAutoTimer: null,
 };

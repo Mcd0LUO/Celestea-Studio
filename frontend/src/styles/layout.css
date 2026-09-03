@@ -48,7 +48,29 @@
   overflow-y: auto;
   display: flex; flex-direction: column;
 }
-#app.no-sidebar #sidebar { display: none; }
+/* ---- 侧栏收起 / 拖宽（状态由 ui/sidebar.ts 持久化） ---- */
+#app.sidebar-collapsed #sidebar,
+#app.sidebar-collapsed #sidebarResizer { display: none; }
+
+.sidebar-resizer {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 5;
+  transition: background .12s ease;
+  touch-action: none;
+}
+/* 扩大命中区（视觉 6px，命中 ~12px） */
+.sidebar-resizer::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: -3px; right: -3px;
+}
+.sidebar-resizer:hover,
+body.resizing .sidebar-resizer {
+  background: var(--c-accent-soft);
+  box-shadow: inset 1px 0 0 var(--c-accent-ring), inset -1px 0 0 var(--c-accent-ring);
+}
+body.resizing { cursor: col-resize; user-select: none; }
 
 .side-sec { border-bottom: 1px solid var(--c-border-subtle); padding: 4px 0 10px; }
 .side-sec-foot { border-bottom: none; padding: 8px 12px; }
@@ -123,13 +145,4 @@
 }
 #btnSend, #btnCancel { min-width: 88px; padding: 9px 14px; }
 
-/* ---- 响应式（窄屏默认收起面板） ---- */
-@media (max-width: 880px) {
-  #app:not(.no-sidebar) #sidebar { display: none; }
-  #app:not(.no-sidebar) #btnSidebar::before { content: "展开"; }
-  #app.no-sidebar #btnSidebar::before { content: "收起"; }
-  #sidebar { width: 100%; }
-}
-@media (min-width: 881px) {
-  #app.no-sidebar #btnSidebar::before { content: "面板"; }
-}
+/* 响应式：窄屏默认收起由 ui/sidebar.ts 依据 localStorage/视口宽度处理 */

@@ -73,7 +73,7 @@ button { font: inherit; }
 .btn-theme { font-family: var(--mono); font-size: 12px; }
 
 /* ---- 表单控件 ---- */
-input, textarea {
+input, textarea, select {
   background: var(--c-code-bg);
   border: 1px solid var(--c-border-subtle);
   border-radius: 7px;
@@ -84,8 +84,9 @@ input, textarea {
   outline: none;
   transition: border-color .12s ease;
 }
-input:focus, textarea:focus { border-color: var(--c-accent); }
+input:focus, textarea:focus, select:focus { border-color: var(--c-accent); }
 input::placeholder, textarea::placeholder { color: var(--c-text-3); }
+select { cursor: pointer; }
 
 /* ---- 动画 ---- */
 @keyframes pulse { 50% { opacity: .35; } }

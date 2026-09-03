@@ -1,5 +1,7 @@
 // ============================================================================
-// 会话主循环：发送/取消、SSE 事件归并（turn 生命周期）、底部状态栏。
+// chat.ts — turn 生命周期 + SSE 接线（编排层）：
+//   收到 SSE 事件 → 更新 state → 驱动 ui/messages · ui/toolcards · ui/statusbar。
+//   发送/取消：读输入（ui/inputbar 回调）→ POST /api/turn | /api/cancel。
 // ============================================================================
 import { api } from './api';
 import { SseClient } from './sse';
@@ -13,59 +15,25 @@ import type {
   ToolResultPayload,
 } from './types';
 import { S } from './state';
-import { el, fmtTime, need } from './utils/dom';
+import { el } from './utils/dom';
 import {
   addUserMessage,
-  applyFinalText,
+  appendText,
   appendThinking,
+  applyFinalText,
   autoscroll,
   ensureAssistant,
   finalizeAssistant,
-  renderAssistantText,
 } from './ui/messages';
 import { applyToolResult, pushToolCard } from './ui/toolcards';
-
-// ---- bottom statusbar ------------------------------------------------------------
-
-const StatusText = need<HTMLElement>('#statusText');
-const StatusDot = need<HTMLElement>('#statusDot');
-const StatusTurn = need<HTMLElement>('#statusTurn');
-const StatusStep = need<HTMLElement>('#statusStep');
-const StatusTime = need<HTMLElement>('#statusTime');
-
-export function setStatus(text: string, cls?: string): void {
-  StatusText.textContent = text;
-  StatusDot.className = 'dot' + (cls ? ' ' + cls : '');
-}
-
-export function setStatusTurn(n: number | null): void {
-  StatusTurn.textContent = typeof n === 'number' && n >= 1 ? 'turn ' + n : 'turn —';
-}
-
-export function setStatusStep(n: number | string | null): void {
-  StatusStep.textContent = 'step ' + (n && String(n) !== '' ? String(n) : '—');
-}
-
-function tickTimer(): void {
-  if (!S.streaming) return;
-  StatusTime.textContent = fmtTime((Date.now() - S.t0) / 1000);
-}
-
-function startTimer(): void {
-  S.t0 = Date.now();
-  stopTimer();
-  S.msgTimer = window.setInterval(tickTimer, 500);
-  tickTimer();
-}
-
-function stopTimer(): void {
-  if (S.msgTimer !== null) {
-    window.clearInterval(S.msgTimer);
-    S.msgTimer = null;
-  }
-}
-
-// ---- turn lifecycle ----------------------------------------------------------------
+import { clearInput, initInputBar, setBusy } from './ui/inputbar';
+import {
+  setStatus,
+  setStatusStep,
+  setStatusTurn,
+  startElapsedTimer,
+  stopElapsedTimer,
+} from './ui/statusbar';
 
 const PHASE_LABELS: Record<string, string> = {
   completed: '完成',
@@ -73,15 +41,14 @@ const PHASE_LABELS: Record<string, string> = {
   error: '出错',
 };
 
+// ---- turn lifecycle ----------------------------------------------------------------
+
 function finalizeTurn(phase: string): void {
   const wasStreaming = S.streaming;
   S.streaming = false;
   S.turn = null;
-  const sendBtn = need<HTMLButtonElement>('#btnSend');
-  const cancelBtn = need<HTMLButtonElement>('#btnCancel');
-  sendBtn.disabled = false;
-  cancelBtn.classList.add('hidden');
-  stopTimer();
+  setBusy(false);
+  stopElapsedTimer();
   setStatus(
     PHASE_LABELS[phase] || phase,
     phase === 'error' || phase === 'cancelled' ? 'err' : 'ok',
@@ -99,12 +66,11 @@ function onStatus(p: StatusPayload): void {
     if (S.streaming && S.assistant) finalizeTurn('completed');
     S.turn = p.turn ?? null;
     S.streaming = true;
-    need<HTMLButtonElement>('#btnSend').disabled = true;
-    need<HTMLButtonElement>('#btnCancel').classList.remove('hidden');
+    setBusy(true);
     setStatus('运行中…', 'busy');
     setStatusTurn(p.turn ?? null);
     setStatusStep(null);
-    startTimer();
+    startElapsedTimer();
     ensureAssistant();
     return;
   }
@@ -131,13 +97,10 @@ function onText(p: TextPayload): void {
   if (p.turn !== undefined && p.turn !== S.turn) return;
   if (S.streaming === false) {
     S.streaming = true;
-    need<HTMLButtonElement>('#btnSend').disabled = true;
-    need<HTMLButtonElement>('#btnCancel').classList.remove('hidden');
+    setBusy(true);
   }
   const a = ensureAssistant();
-  a.text += p.delta || '';
-  renderAssistantText(a);
-  autoscroll();
+  appendText(a, p.delta || '');
 }
 
 function onThinking(p: ThinkingPayload): void {
@@ -145,7 +108,6 @@ function onThinking(p: ThinkingPayload): void {
   if (p.turn !== undefined && p.turn !== S.turn) return;
   const a = ensureAssistant();
   appendThinking(a, p.delta || '');
-  autoscroll();
 }
 
 function onTool(p: ToolPayload): void {
@@ -237,61 +199,41 @@ export function connectSse(statusline: Statusline): SseClient {
 
 // ---- send / cancel -------------------------------------------------------------
 
-function autoGrowInput(input: HTMLTextAreaElement): void {
-  input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 240) + 'px';
-}
-
-export function initChatInput(): void {
-  const input = need<HTMLTextAreaElement>('#input');
-  const sendBtn = need<HTMLButtonElement>('#btnSend');
-  const cancelBtn = need<HTMLButtonElement>('#btnCancel');
-
-  function send(): void {
-    const text = input.value.trim();
-    if (!text || S.streaming) return;
-    addUserMessage(text);
-    input.value = '';
-    autoGrowInput(input);
-    S.streaming = true;
-    S.turn = null;
-    sendBtn.disabled = true;
-    cancelBtn.classList.remove('hidden');
-    setStatus('启动中…', 'busy');
-    setStatusStep(null);
-    void api
-      .turn(text)
-      .then((r) => {
-        if (S.turn === null && r.turn !== undefined) S.turn = r.turn;
-        setStatusTurn(S.turn !== null ? S.turn : r.turn ?? 0);
-        if (S.turn === null) startTimer();
-        ensureAssistant();
-        setStatus('运行中…', 'busy');
-      })
-      .catch((err: unknown) => {
-        // 403/409/… 直接展示
-        S.streaming = false;
-        sendBtn.disabled = false;
-        cancelBtn.classList.add('hidden');
-        stopTimer();
-        setStatus('发送失败：' + (err instanceof Error ? err.message : String(err)), 'err');
+export function initChat(): void {
+  initInputBar({
+    send(text) {
+      const t = text.trim();
+      if (!t || S.streaming) return;
+      addUserMessage(t);
+      clearInput();
+      S.streaming = true;
+      S.turn = null;
+      setBusy(true);
+      setStatus('启动中…', 'busy');
+      setStatusStep(null);
+      void api
+        .turn(t)
+        .then((r) => {
+          if (S.turn === null && r.turn !== undefined) S.turn = r.turn;
+          setStatusTurn(S.turn !== null ? S.turn : r.turn ?? 0);
+          if (S.turn === null) startElapsedTimer();
+          ensureAssistant();
+          setStatus('运行中…', 'busy');
+        })
+        .catch((err: unknown) => {
+          // 403/409/… 直接展示
+          S.streaming = false;
+          setBusy(false);
+          stopElapsedTimer();
+          setStatus('发送失败：' + (err instanceof Error ? err.message : String(err)), 'err');
+        });
+    },
+    cancel() {
+      if (!S.streaming) return;
+      setStatus('取消中…', 'busy');
+      void api.cancel().catch((err: unknown) => {
+        setStatus('取消失败：' + (err instanceof Error ? err.message : String(err)), 'err');
       });
-  }
-
-  sendBtn.addEventListener('click', send);
-  cancelBtn.addEventListener('click', () => {
-    if (!S.streaming) return;
-    setStatus('取消中…', 'busy');
-    void api.cancel().catch((err: unknown) => {
-      setStatus('取消失败：' + (err instanceof Error ? err.message : String(err)), 'err');
-    });
+    },
   });
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
-  });
-  input.addEventListener('input', () => autoGrowInput(input));
-  window.setTimeout(() => autoGrowInput(input), 0);
 }

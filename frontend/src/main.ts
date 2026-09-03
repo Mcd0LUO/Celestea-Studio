@@ -1,6 +1,8 @@
 // ============================================================================
-// Celestea Studio — bootstrap / wiring (TS + Vite).
-// 主题 → statusline → 面板 → 聊天主循环 → SSE。
+// Celestea Studio — bootstrap / wiring (TS + Vite)。
+// 主题 → 侧栏(收起/拖宽) → statusline → 面板(工具/会话) → 配置弹层 →
+// 聊天主循环 → SSE。所有具体职责均在 api/sse/state/statusline/theme/ui 模块内，
+// 本文件只做初始化与模块装配。
 // ============================================================================
 import './styles/tokens.css';
 import './styles/base.css';
@@ -9,17 +11,19 @@ import './styles/components.css';
 import './styles/statusline.css';
 
 import { api } from './api';
-import { connectSse, initChatInput, setStatus } from './chat';
+import { connectSse, initChat } from './chat';
+import { setStatus } from './ui/statusbar';
 import { initConfigModal } from './ui/config';
 import { initSessionsPanel } from './ui/sessions';
+import { initSidebar } from './ui/sidebar';
 import { initToolsPanel } from './ui/tools';
-import { initWorkerPanel } from './ui/workerPanel';
 import { Statusline } from './statusline';
 import { S } from './state';
 import { initTheme, setupThemeSwitcher } from './theme';
 import { need } from './utils/dom';
 
-function initHealth(statusline: Statusline): void {
+/** 健康信息 → 顶栏模型币 + 侧栏脚注 + statusline（模型兜底）。 */
+function refreshHealthChip(statusline: Statusline): void {
   void api
     .health()
     .then((h) => {
@@ -33,7 +37,7 @@ function initHealth(statusline: Statusline): void {
     })
     .catch(() => {
       need<HTMLElement>('#modelChip').textContent = '离线';
-      setStatus('后端不可达', 'err');
+      if (!S.streaming) setStatus('后端不可达', 'err');
     });
 }
 
@@ -42,28 +46,28 @@ function init(): void {
   initTheme('night');
   setupThemeSwitcher(need<HTMLButtonElement>('#btnTheme'));
 
-  // 2) statusline（/api/status 轮询 + SSE 增量，发送栏正上方）
+  // 2) 侧栏：收起/展开 + 拖宽（状态持久）
+  initSidebar();
+
+  // 3) statusline（/api/status 轮询 + SSE 增量，发送栏正上方）
   const statusline = new Statusline();
   statusline.start();
 
-  // 3) 左侧面板
+  // 4) 左侧面板（瘦身后：工具清单 + 会话列表）
   const sideFoot = need<HTMLElement>('#sideFoot');
   initToolsPanel(sideFoot);
   initSessionsPanel();
-  initWorkerPanel();
 
-  // 4) 配置弹层
+  // 5) 配置弹层（热调；保存成功后刷新健康信息）
   initConfigModal();
 
-  // 5) 聊天主循环 + SSE
-  initChatInput();
-  initHealth(statusline);
+  // 6) 聊天主循环 + SSE
+  initChat();
+  refreshHealthChip(statusline);
   connectSse(statusline);
 
-  // 6) 侧栏开关
-  need<HTMLButtonElement>('#btnSidebar').addEventListener('click', () => {
-    need<HTMLElement>('#app').classList.toggle('no-sidebar');
-  });
+  // 配置保存成功 → 顶栏/statusline 反映新模型
+  window.addEventListener('studio:config-saved', () => refreshHealthChip(statusline));
 
   need<HTMLTextAreaElement>('#input').focus();
 }

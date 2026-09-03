@@ -144,6 +144,3 @@ function pickStatusFields(p: StatusPayload): StatusSnapshot {
   if (p.context_usage !== undefined) out.context_usage = p.context_usage;
   return out;
 }
-
-/* keep the $ import referenced for future layout hooks */
-

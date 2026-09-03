@@ -19,8 +19,8 @@
       <div class="topbar-right">
         <span id="modelChip" class="chip" title="模型">—</span>
         <button id="btnTheme" class="btn btn-quiet btn-theme" title="切换主题（夜航黑 / 樱花粉 / 克莱因蓝）">夜航</button>
-        <button id="btnSidebar" class="btn btn-quiet" title="折叠/展开左侧面板">面板</button>
-        <button id="btnConfig" class="btn btn-quiet" title="查看运行配置">配置</button>
+        <button id="btnSidebar" class="btn btn-quiet" title="收起/展开左侧面板">收起</button>
+        <button id="btnConfig" class="btn btn-quiet" title="运行配置（热调 model/推理档位/密钥等）">配置</button>
       </div>
     </header>
 
@@ -48,72 +48,13 @@
           <div class="side-body" id="sessionList"><div class="side-note">加载中…</div></div>
         </section>
 
-        <section class="side-sec" id="sec-worker">
-          <header class="side-sec-head"><h3>Worker 编排</h3></header>
-          <div class="side-body worker-body">
-
-            <details class="wf-card" open>
-              <summary>spawn · 创建 worker</summary>
-              <form id="spawnForm" class="wf-form">
-                <div class="wrow">
-                  <label>编号</label>
-                  <input name="wid" id="spawnWid" type="text" value="W101" spellcheck="false" />
-                </div>
-                <div class="wrow">
-                  <label>标题</label>
-                  <input name="title" id="spawnTitle" type="text" placeholder="可选，≤20 字" />
-                </div>
-                <div class="wrow">
-                  <label>模型</label>
-                  <input name="model" id="spawnModel" type="text" placeholder="可选，如 qwen3-coder" spellcheck="false" />
-                </div>
-                <div class="wrow wrow-tall">
-                  <label>简报</label>
-                  <textarea name="brief" id="spawnBrief" rows="3" placeholder="自包含任务简报，必填"></textarea>
-                </div>
-                <button type="submit" class="btn btn-soft wf-submit">创建</button>
-                <div class="wf-result" id="spawnResult"></div>
-              </form>
-            </details>
-
-            <details class="wf-card" open>
-              <summary>send · 发送消息</summary>
-              <form id="sendForm" class="wf-form">
-                <div class="wrow">
-                  <label>目标</label>
-                  <input name="target" id="sendTarget" type="text" placeholder="session id 或会话命名" spellcheck="false" />
-                </div>
-                <div class="wrow wrow-tall">
-                  <label>内容</label>
-                  <textarea name="content" id="sendContent" rows="3" placeholder="消息正文，必填"></textarea>
-                </div>
-                <button type="submit" class="btn btn-soft wf-submit">发送</button>
-                <div class="wf-result" id="sendResult"></div>
-              </form>
-            </details>
-
-            <details class="wf-card" open>
-              <summary>status · worker 状态</summary>
-              <div class="wf-form">
-                <div class="wrow">
-                  <label>编号</label>
-                  <input id="statusWid" type="text" value="W217" spellcheck="false" />
-                </div>
-                <div class="wtools">
-                  <button class="btn btn-soft" id="btnStatusQuery">查询</button>
-                  <label class="check"><input type="checkbox" id="statusAuto" /> 自动刷新</label>
-                </div>
-                <div class="wf-result" id="statusResult"></div>
-              </div>
-            </details>
-
-          </div>
-        </section>
-
         <section class="side-sec side-sec-foot">
           <div class="side-note" id="sideFoot">—</div>
         </section>
       </aside>
+
+      <!-- ---------- 侧栏/主区分隔条（可拖动调宽 · 双击复位） ---------- -->
+      <div id="sidebarResizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" title="拖动调整侧栏宽度 · 双击复位"></div>
 
       <!-- ---------- 主区 ---------- -->
       <main id="main">
@@ -179,9 +120,15 @@
     <div class="modal-box">
       <div class="modal-head">
         <h3 id="modalTitle">运行配置</h3>
-        <button class="btn-mini" id="btnModalClose">关闭</button>
+        <div class="modal-actions">
+          <button class="btn-mini" id="btnConfigReload" title="重新载入后端当前配置">重新载入</button>
+          <button class="btn-mini" id="btnModalClose">关闭</button>
+        </div>
       </div>
-      <div class="modal-body" id="configBody"><div class="side-note">加载中…</div></div>
+      <div class="modal-body">
+        <div id="configBody"><div class="side-note">加载中…</div></div>
+        <div class="cfg-hintline" id="cfgHint"></div>
+      </div>
     </div>
   </div>
 

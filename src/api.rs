@@ -4,7 +4,8 @@
 //!
 //! New routes (all mounted on the same axum router in main):
 //!   GET  /api/tools             -> {"tools":[{"name","description"}]}
-//!   GET  /api/config            -> sanitized Profile (never exposes api_key)
+//!   GET  /api/config            -> sanitized Profile + available models/efforts
+//!   POST /api/config            -> partial hot-reload update (W225; response = new config)
 //!   GET  /api/status            -> statusline snapshot (W218: model /
 //!                                  reasoning_effort / steps / tokens_per_sec /
 //!                                  context_usage; SSE fallback channel)
@@ -26,16 +27,21 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use celestea_core::{SessionLog, ToolInput};
+use celestea_runtime::{merge_profile, validate_model};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::Shared;
+use crate::{
+    build_gen, model_reasoning, profile_to_json, DEFAULT_SYSTEM_PROMPT, MIN_STEPS,
+    Shared,
+};
 
 // ---- GET /api/tools --------------------------------------------------------
 
 /// Engine tool surface: name + description for every registered tool.
 pub async fn get_tools(State(st): State<Shared>) -> Json<Value> {
-    let tools: Vec<Value> = st
+    let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+    let tools: Vec<Value> = gen
         .runtime
         .registry
         .schemas()
@@ -47,9 +53,11 @@ pub async fn get_tools(State(st): State<Shared>) -> Json<Value> {
 
 // ---- GET /api/config -------------------------------------------------------
 
-/// Sanitized profile JSON (pre-computed at startup; no api_key / api_key_file).
+/// Sanitized config JSON of the current engine generation + the deployment
+/// catalog (available.models / available.efforts). Never carries an api key.
 pub async fn get_config(State(st): State<Shared>) -> Json<Value> {
-    Json(st.config_json.clone())
+    let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+    Json(gen.config_json.clone())
 }
 
 // ---- GET /api/status --------------------------------------------------------
@@ -69,11 +77,12 @@ pub async fn get_status(State(st): State<Shared>) -> Json<Value> {
 /// conversation driven by /api/turn, and (when CELESTEA_SESSION_DIR is set)
 /// every persisted *.jsonl session file in that directory.
 pub async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
+    let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
     let mut sessions: Vec<Value> = Vec::new();
 
     // 1. Worker sessions (spawned via /api/worker/spawn or the engine tools).
-    for meta in st.runtime.workers.sessions().list() {
-        let events = st
+    for meta in gen.runtime.workers.sessions().list() {
+        let events = gen
             .runtime
             .workers
             .sessions()
@@ -104,9 +113,9 @@ pub async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
         "id": "cli-main",
         "title": "main",
         "workspace": Value::Null,
-        "model": st.model,
+        "model": gen.model,
         "kind": "host",
-        "events": st.runtime.session.events().len(),
+        "events": gen.runtime.session.events().len(),
         "persistent": sess_dir.is_some(),
         "file": host_file,
     }));
@@ -155,8 +164,211 @@ pub async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
 /// Clear the host conversation log (engine SessionLog::clear; truncates the
 /// persistent JSONL when CELESTEA_SESSION_DIR is set).
 pub async fn post_clear(State(st): State<Shared>) -> Json<Value> {
-    st.runtime.session.clear();
+    let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+    gen.runtime.session.clear();
     Json(json!({"ok": true, "cleared": true}))
+}
+
+// ---- POST /api/config -----------------------------------------------------
+
+/// Partial config update — every field is optional; present fields take
+/// effect for the NEXT turn. The engine is re-composed from the merged
+/// profile (host conversation preserved through PersistentSessionLog /
+/// CELESTEA_SESSION_DIR replay), so changes apply without a restart.
+/// api_key is forwarded via the process env only: it never touches disk,
+/// never appears in logs, and is never echoed (the response is the
+/// sanitized config — the GET /api/config body).
+#[derive(Deserialize)]
+pub struct ConfigReq {
+    pub model: Option<String>,
+    /// Outer Some = field present; inner null / "off" clears the effort,
+    /// low/high/max set it (max = engine high; engine-native "medium" is
+    /// accepted for back-compat with celestea.toml).
+    pub reasoning_effort: Option<Option<String>>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub max_output_tokens: Option<u64>,
+    pub context_window: Option<u64>,
+    pub max_steps: Option<u64>,
+    pub system_prompt: Option<String>,
+}
+
+/// Public effort tier -> engine-level effort name. max == engine High (the
+/// ceiling the engine exposes). "" / "off" clears the effort.
+fn parse_effort(s: &str) -> Result<Option<&'static str>, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "off" => Ok(None),
+        "low" => Ok(Some("low")),
+        "medium" => Ok(Some("medium")),
+        "high" | "max" => Ok(Some("high")),
+        other => Err(format!(
+            "invalid reasoning_effort '{other}': expected low|high|max (off clears)"
+        )),
+    }
+}
+
+/// POST /api/config — partial profile update, hot-applied to the next turn:
+///   1. refuse while a turn runs (409) — a swap mid-turn could lose events
+///      the running runtime appends after the new session log was replayed;
+///   2. merge the overrides onto the CURRENT profile (engine lenient merge);
+///   3. api_key -> env[api_key_env] in-memory (the engine's only key channel;
+///      never persisted, never logged);
+///   4. Runtime::compose with the new Profile (same PersistentSessionLog =>
+///      session replayed), then swap the generation under the write lock.
+/// Response: the sanitized config — same body as GET /api/config.
+pub async fn post_config(State(st): State<Shared>, Json(req): Json<ConfigReq>) -> impl IntoResponse {
+    let guard = st.busy.lock().await;
+    if guard.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"ok": false, "error": "turn in progress; config applies between turns"})),
+        );
+    }
+
+    let (mut pj, current_model) = {
+        let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+        (profile_to_json(&gen.profile), gen.profile.model.clone())
+    };
+
+    // ---- validate + apply partial overrides --------------------------------
+    let target_model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    if let Some(m) = target_model.as_deref() {
+        if let Err(e) = validate_model(m) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": e.to_string()})),
+            );
+        }
+        pj["model"] = json!(m);
+    }
+
+    let effort: Option<Result<Option<&'static str>, String>> =
+        req.reasoning_effort.as_ref().map(|v| match v {
+            None => Ok(None), // JSON null -> clear
+            Some(s) => parse_effort(s),
+        });
+    let effort = match effort {
+        Some(Err(e)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": e})),
+            )
+        }
+        Some(Ok(v)) => Some(v),
+        None => None,
+    };
+    if let Some(Some(eng)) = effort {
+        // efforts are meaningful only on reasoning models: reject the pairing
+        // for a KNOWN non-reasoning model (unknown ids on custom endpoints
+        // are accepted and treated as reasoning-capable).
+        let target = target_model.as_deref().unwrap_or(current_model.as_str());
+        if model_reasoning(target) == Some(false) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "ok": false,
+                    "error": format!("model '{target}' is not a reasoning model; reasoning_effort is unavailable")
+                })),
+            );
+        }
+        pj["reasoning_effort"] = json!(eng);
+    } else if let Some(None) = effort {
+        pj.as_object_mut()
+            .expect("profile json is an object")
+            .remove("reasoning_effort");
+    }
+
+    if let Some(b) = req.base_url.as_deref() {
+        let b = b.trim();
+        if b.is_empty() {
+            // clear the base_url override -> env / provider default chain
+            pj.as_object_mut()
+                .expect("profile json is an object")
+                .remove("base_url");
+        } else if b.starts_with("http://") || b.starts_with("https://") {
+            pj["base_url"] = json!(b);
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": "base_url must be an http:// or https:// URL"})),
+            );
+        }
+    }
+    if let Some(n) = req.max_output_tokens {
+        if n == 0 {
+            // 0 clears the cap (no max_output_tokens sent upstream)
+            pj.as_object_mut()
+                .expect("profile json is an object")
+                .remove("max_output_tokens");
+        } else if n <= u32::MAX as u64 {
+            pj["max_output_tokens"] = json!(n);
+        } else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": "max_output_tokens must be <= u32::MAX"})),
+            );
+        }
+    }
+    if let Some(n) = req.context_window {
+        // 0 keeps the engine's ""disable trimming"" semantic (statusline then
+        // falls back to the contract display window).
+        pj["context_window_tokens"] = json!(n);
+    }
+    if let Some(n) = req.max_steps {
+        if n == 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": "max_steps must be >= 1"})),
+            );
+        }
+        // W218 floor still applies: the cap may only be raised, never lowered
+        // below MIN_STEPS.
+        pj["max_steps"] = json!(n.max(MIN_STEPS as u64));
+    }
+    if let Some(s) = req.system_prompt.as_deref() {
+        let s = s.trim();
+        if s.is_empty() {
+            pj["system_prompt"] = json!(DEFAULT_SYSTEM_PROMPT);
+        } else {
+            pj["system_prompt"] = json!(s);
+        }
+    }
+
+    // ---- apply --------------------------------------------------------------
+    let new_profile = match merge_profile(&pj) {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": e.to_string()})),
+            )
+        }
+    };
+    if let Some(k) = req.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        // in-memory only: the engine reads the key from env[api_key_env] at
+        // compose time; the value lives in this process env / the LLM
+        // adapter, never on disk and never in a log line.
+        std::env::set_var(new_profile.api_key_env.as_str(), k);
+    }
+
+    let new_gen = match build_gen(new_profile) {
+        Ok(g) => g,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"ok": false, "error": format!("compose failed: {e}")})),
+            )
+        }
+    };
+    let response = new_gen.config_json.clone();
+    *st.gen.write().unwrap_or_else(|p| p.into_inner()) = new_gen;
+    drop(guard);
+    (StatusCode::OK, Json(response))
 }
 
 // ---- worker endpoints ------------------------------------------------------
@@ -189,9 +401,11 @@ async fn dispatch_worker_tool(
     name: &str,
     args: Value,
 ) -> (StatusCode, Json<Value>) {
-    let out = st
-        .runtime
-        .registry
+    let registry = {
+        let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+        gen.runtime.registry.clone()
+    };
+    let out = registry
         .dispatch(ToolInput {
             call_id: format!("w216-{name}"),
             name: name.into(),
@@ -252,7 +466,8 @@ pub async fn get_worker_status(
     State(st): State<Shared>,
     Query(q): Query<StatusQuery>,
 ) -> Json<Value> {
-    let mut summary = st.runtime.workers.summarize(None);
+    let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+    let mut summary = gen.runtime.workers.summarize(None);
     if let Some(wid) = q.wid.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let (total, running, done, failed) = {
             let workers = summary["workers"]
