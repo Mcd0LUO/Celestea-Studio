@@ -4,7 +4,7 @@
 //      data 为 {"turn":N,"seq":M,"payload":{...}}
 //   HTTP  POST /api/turn {input} · POST /api/cancel · POST /api/config {patch}
 //         GET /api/health · GET /api/tools · GET /api/config · GET /api/sessions
-//         GET /api/sessions/{id}/messages · GET /api/status · POST /api/clear
+//         GET /api/status · POST /api/clear
 // 视图层合同（AssistantView / ToolOpView）见 ui/view.ts（与 API 合同分离）。
 // ============================================================================
 
@@ -116,22 +116,6 @@ export interface SessionInfo {
 export interface SessionsResp {
   ok?: boolean;
   sessions?: SessionInfo[];
-  error?: string;
-}
-
-// ---- 会话历史（GET /api/sessions/{id}/messages，只读回放） --------------------
-
-export type HistoryRole = 'user' | 'assistant' | 'tool';
-
-export interface HistoryMsg {
-  role: HistoryRole;
-  content: string;
-}
-
-export interface MessagesResp {
-  ok?: boolean;
-  session?: string;
-  messages?: HistoryMsg[];
   error?: string;
 }
 

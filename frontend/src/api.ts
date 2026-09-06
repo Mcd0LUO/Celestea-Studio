@@ -9,7 +9,6 @@ import type {
   ConfigPatch,
   ConfigSaveResp,
   HealthInfo,
-  MessagesResp,
   SessionsResp,
   StatusSnapshot,
   ToolsResp,
@@ -72,9 +71,6 @@ export const api = {
   /** 热调保存：POST /api/config {patch}（成功响应 = 消毒后完整配置）。 */
   saveConfig: (patch: ConfigPatch) => postJson<ConfigSaveResp>('/api/config', patch),
   sessions: () => requestJson<SessionsResp>('/api/sessions'),
-  /** 会话历史回放（只读）。404 = 会话未知/历史暂不可用。 */
-  messages: (id: string) =>
-    requestJson<MessagesResp>('/api/sessions/' + encodeURIComponent(id) + '/messages'),
   clear: () => postJson<ClearResp>('/api/clear', {}),
   turn: (input: string) => postJson<TurnResp>('/api/turn', { input }),
   cancel: () => postJson<CancelResp>('/api/cancel', {}),

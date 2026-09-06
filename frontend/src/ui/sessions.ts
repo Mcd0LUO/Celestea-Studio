@@ -2,14 +2,14 @@
 // ui/sessions.ts — 左侧「工作区/会话树」面板（W227 替代原平铺会话列表）：
 //   GET /api/sessions 按 workspace 分组：host（workspace=null）→「主会话」组，
 //   persistent → 按 workspace 字段分组；可折叠树：工作区节点 → 会话叶子。
-//   点击叶子 → ui/history.ts 只读回放；「清空」保留原 /api/clear 行为。
+//   点击叶子仅做选中态高亮（tooltip 展示 kind/事件数/file 等元信息，不切换
+//   聊天区视图、不发起任何请求）；「清空」保留原 /api/clear 行为。
 // ============================================================================
 import { api } from '../api';
 import { el, need } from '../utils/dom';
 import type { SessionInfo } from '../types';
 import { S } from '../state';
 import { resetMessages } from './messages';
-import { enterHistory } from './history';
 
 const treeEl = need<HTMLElement>('#sessionTree');
 const countEl = need<HTMLElement>('#sessionCount');
@@ -51,7 +51,7 @@ function groupSessions(list: SessionInfo[]): Group[] {
 
 function renderLeaf(s: SessionInfo): HTMLElement {
   const id = s.id ?? '';
-  const leaf = el('div', 'tree-leaf' + (S.history?.id === id ? ' active' : ''));
+  const leaf = el('div', 'tree-leaf' + (S.selSession === id ? ' active' : ''));
   leaf.dataset.id = id;
   const title = el('div', 'tree-leaf-title');
   const dot = el('span', 'tree-dot' + (s.kind === 'host' || s.live === true ? ' live' : ''));
@@ -64,16 +64,17 @@ function renderLeaf(s: SessionInfo): HTMLElement {
   if (s.events !== undefined) bits.push('ev:' + s.events);
   bits.push(id);
   meta.textContent = bits.join(' · ');
-  leaf.title = meta.textContent + (s.workspace ? ' · ' + s.workspace : '');
+  // tooltip：kind / 事件数 / id / workspace / file 路径（仅元信息，不切换视图）
+  leaf.title = meta.textContent
+    + (s.workspace ? ' · ' + s.workspace : '')
+    + (s.file ? ' · ' + s.file : '');
   leaf.appendChild(meta);
   leaf.addEventListener('click', () => {
+    // 仅选中态高亮：不发起请求、不切换聊天区内容
     S.selSession = id;
     for (const n of treeEl.querySelectorAll<HTMLElement>('.tree-leaf')) {
       n.classList.toggle('active', n.dataset.id === id);
     }
-    const foot = document.getElementById('sideFoot');
-    if (foot) foot.textContent = '历史会话：' + (s.title || id || '—');
-    enterHistory(id, s.title || id || '(未命名)');
   });
   return leaf;
 }

@@ -34,7 +34,6 @@ import {
   startElapsedTimer,
   stopElapsedTimer,
 } from './ui/statusbar';
-import { onLiveTurnStart } from './ui/history';
 
 const PHASE_LABELS: Record<string, string> = {
   completed: '完成',
@@ -63,9 +62,8 @@ function finalizeTurn(phase: string): void {
 
 function onStatus(p: StatusPayload): void {
   if (p.phase === 'start') {
-    // 新 turn：结束上一个未完成的会话视图；历史回放让位给实时流
+    // 新 turn：结束上一个未完成的会话视图
     if (S.streaming && S.assistant) finalizeTurn('completed');
-    onLiveTurnStart();
     S.turn = p.turn ?? null;
     S.streaming = true;
     setBusy(true);
@@ -206,7 +204,7 @@ export function initChat(): void {
   initInputBar({
     send(text) {
       const t = text.trim();
-      if (!t || S.streaming || S.history) return;
+      if (!t || S.streaming) return;
       addUserMessage(t);
       clearInput();
       S.streaming = true;
