@@ -4,7 +4,7 @@
 //      data 为 {"turn":N,"seq":M,"payload":{...}}
 //   HTTP  POST /api/turn {input} · POST /api/cancel · POST /api/config {patch}
 //         GET /api/health · GET /api/tools · GET /api/config · GET /api/sessions
-//         GET /api/status · POST /api/clear
+//         GET /api/sessions/{id}/messages · GET /api/status · POST /api/clear
 // 视图层合同（AssistantView / ToolOpView）见 ui/view.ts（与 API 合同分离）。
 // ============================================================================
 
@@ -105,14 +105,33 @@ export interface SessionInfo {
   id?: string;
   title?: string;
   kind?: string;
-  workspace?: string;
+  workspace?: string | null;
   events?: number;
   live?: boolean;
+  file?: string;
+  size?: number;
+  modified?: number;
 }
 
 export interface SessionsResp {
   ok?: boolean;
   sessions?: SessionInfo[];
+  error?: string;
+}
+
+// ---- 会话历史（GET /api/sessions/{id}/messages，只读回放） --------------------
+
+export type HistoryRole = 'user' | 'assistant' | 'tool';
+
+export interface HistoryMsg {
+  role: HistoryRole;
+  content: string;
+}
+
+export interface MessagesResp {
+  ok?: boolean;
+  session?: string;
+  messages?: HistoryMsg[];
   error?: string;
 }
 
@@ -133,9 +152,16 @@ export interface TurnResp {
 
 // ---- 配置（GET /api/config · POST /api/config） ----------------------------
 
+/** available.models 条目：id=引擎模型标识，name=展示名。 */
+export interface ModelInfo {
+  id: string;
+  name: string;
+  reasoning?: boolean;
+}
+
 /** 可选清单（后端发布时携带；缺失则前端降级为手输/预置档位）。 */
 export interface ConfigAvailable {
-  models?: string[];
+  models?: ModelInfo[];
   efforts?: string[];
 }
 
@@ -166,3 +192,6 @@ export interface ConfigPatch {
   max_output_tokens?: number | null;
   system_prompt?: string;
 }
+
+/** POST /api/config 成功响应 = 消毒后的完整配置（同 GET 体型）。 */
+export type ConfigSaveResp = ConfigInfo & OkResp;

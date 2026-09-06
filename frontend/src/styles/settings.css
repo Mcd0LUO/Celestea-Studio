@@ -1,0 +1,81 @@
+/* ============================================================================
+ * 通用设置页（W227 新增，取代原 #modal 配置弹层）
+ *   view 级整页覆盖层：运行配置表单 + 工具列表表格
+ *   主题：全部走 tokens.css 的 DSH night（及 sakura/klein 色卡）变量，
+ *   本文件不写死任何颜色。
+ * ============================================================================ */
+
+.settings-page {
+  position: fixed; inset: 0; z-index: 50;
+  background: var(--c-overlay);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 34px 24px 24px;
+  overflow-y: auto;
+}
+
+.settings-shell {
+  width: min(880px, 100%);
+  background: var(--c-surface-raised);
+  border: 1px solid var(--c-border-strong);
+  border-radius: 12px;
+  display: flex; flex-direction: column;
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
+
+.settings-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid var(--c-border-subtle);
+  background: var(--c-surface);
+}
+.settings-head h3 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .5px; }
+.settings-actions { display: flex; align-items: center; gap: 6px; }
+
+.settings-body { padding: 14px 16px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
+
+.settings-sec {
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 10px;
+  background: var(--c-surface);
+  overflow: hidden;
+}
+.settings-sec-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--c-border-subtle);
+}
+.settings-sec-head h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--c-text-2); }
+.settings-sec-note { font-size: 11.5px; color: var(--c-text-3); font-family: var(--mono); }
+.settings-sec-head .btn-mini { margin-left: auto; }
+.settings-sec > #settingsConfig { padding: 12px 14px; }
+.settings-sec > #settingsTools { padding: 10px 14px 12px; }
+
+/* ---- 工具列表表格 ---- */
+.tools-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 12.5px;
+}
+.tools-table th, .tools-table td {
+  border: 1px solid var(--c-border-subtle);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.tools-table th {
+  background: var(--c-surface-raised);
+  color: var(--c-text-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: .5px;
+}
+.tools-table .tools-name {
+  font-family: var(--mono);
+  color: var(--c-accent);
+  font-weight: 600;
+  white-space: nowrap;
+  width: 30%;
+}
+.tools-table .tools-desc {
+  color: var(--c-text-2);
+  word-break: break-word;
+}

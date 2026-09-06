@@ -69,3 +69,117 @@
 #statusline.sl-stale .sl-effort,
 #statusline.sl-stale .sl-tps,
 #statusline.sl-stale .sl-steps { opacity: .55; }
+
+/* ============================================================================
+ * W227：模型 / 推理档位快速切换（按钮 + 紧凑下拉面板）
+ * ============================================================================ */
+
+#statusline { position: relative; }
+
+.sl-model, .sl-effort {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.sl-model {
+  color: var(--c-text-1);
+  max-width: 46ch;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  border-bottom: 1px dashed var(--c-border-subtle);
+}
+.sl-effort {
+  color: var(--c-text-2);
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  line-height: 14px;
+}
+.sl-effort:empty { display: none; }
+.sl-model:hover, .sl-effort:hover {
+  color: var(--c-text-1);
+  border-color: var(--c-accent-ring);
+}
+.sl-model:focus-visible, .sl-effort:focus-visible {
+  outline: 1px solid var(--c-accent-ring);
+  outline-offset: 1px;
+}
+
+/* ---- 下拉面板（自 statusline 向上弹出，覆盖消息区底部） ---- */
+.sl-popup {
+  position: absolute;
+  bottom: calc(100% - 2px);
+  left: 14px;
+  z-index: 40;
+  width: min(360px, calc(100vw - 40px));
+  background: var(--c-surface-raised);
+  border: 1px solid var(--c-border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.sl-popup-title {
+  padding: 7px 12px;
+  font-size: 11.5px;
+  color: var(--c-text-3);
+  letter-spacing: 1px;
+  border-bottom: 1px solid var(--c-border-subtle);
+  background: var(--c-surface);
+}
+.sl-popup-body {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex; flex-direction: column;
+  gap: 2px;
+}
+.sl-popup-loading, .sl-popup-note {
+  padding: 6px 8px; font-size: 12px; color: var(--c-text-3);
+}
+.sl-popup-error, .sl-popup-status.err { color: var(--c-err); }
+.sl-popup-status.busy { color: var(--c-accent); }
+.sl-popup-error, .sl-popup-status {
+  padding: 6px 8px; font-size: 12px; white-space: pre-wrap; word-break: break-all;
+  border-top: 1px solid var(--c-border-subtle); margin-top: 4px;
+}
+
+.sl-opt {
+  display: flex; align-items: baseline; gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: var(--c-text-1);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.sl-opt:hover { background: var(--c-accent-soft); border-color: var(--c-accent-ring); }
+.sl-opt.current { background: var(--c-surface); border-color: var(--c-accent-ring); }
+.sl-opt-name {
+  font-size: 12.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sl-opt-val {
+  font-family: var(--mono); font-size: 10.5px; color: var(--c-text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1 1 auto; text-align: right;
+}
+.sl-opt-tag {
+  flex: 0 0 auto;
+  font-size: 10px; color: var(--c-accent);
+  border: 1px solid var(--c-accent-ring); border-radius: 4px; padding: 0 4px;
+  font-family: var(--mono);
+}
+.sl-popup-sep {
+  font-size: 10.5px; color: var(--c-text-3); letter-spacing: 1px;
+  padding: 6px 8px 2px; border-top: 1px solid var(--c-border-subtle); margin-top: 4px;
+}
+.sl-popup-textrow { display: flex; gap: 6px; padding: 2px; }
+.sl-popup-input { flex: 1; min-width: 0; }

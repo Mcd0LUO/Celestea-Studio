@@ -34,6 +34,7 @@ import {
   startElapsedTimer,
   stopElapsedTimer,
 } from './ui/statusbar';
+import { onLiveTurnStart } from './ui/history';
 
 const PHASE_LABELS: Record<string, string> = {
   completed: '完成',
@@ -62,8 +63,9 @@ function finalizeTurn(phase: string): void {
 
 function onStatus(p: StatusPayload): void {
   if (p.phase === 'start') {
-    // 新 turn：结束上一个未完成的会话视图
+    // 新 turn：结束上一个未完成的会话视图；历史回放让位给实时流
     if (S.streaming && S.assistant) finalizeTurn('completed');
+    onLiveTurnStart();
     S.turn = p.turn ?? null;
     S.streaming = true;
     setBusy(true);
@@ -188,6 +190,7 @@ export function connectSse(statusline: Statusline): SseClient {
   });
   sse.on('done', (p) => {
     try {
+      statusline.onSseDone();
       onDone(p);
     } catch (err) {
       console.warn('SSE done', err);
@@ -203,7 +206,7 @@ export function initChat(): void {
   initInputBar({
     send(text) {
       const t = text.trim();
-      if (!t || S.streaming) return;
+      if (!t || S.streaming || S.history) return;
       addUserMessage(t);
       clearInput();
       S.streaming = true;

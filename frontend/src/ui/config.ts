@@ -1,18 +1,21 @@
 // ============================================================================
-// ui/config.ts — 配置面板（单一职责）：
+// ui/config.ts — 「通用设置」页（单一职责，取代原 #modal 弹层）：
 //   打开时 GET /api/config（+ /api/status 补充窗口信息）→ 渲染可热调表单；
-//   model / reasoning_effort 优先取后端 available 清单（缺失时降级）；
-//   保存 POST /api/config {patch}（404/405 时给出明确提示）。
+//   model 下拉用 available.models（value=id / label=name，缺失时降级手输）；
+//   reasoning_effort 档位 + 「标准（清除）」；工具清单区块见 ui/tools.ts；
+//   保存 POST /api/config {patch}（404/405/400/409 时给出明确提示）。
 // ============================================================================
 import { api, ApiError } from '../api';
 import { el, need } from '../utils/dom';
 import type { ConfigInfo, ConfigPatch } from '../types';
+import { initToolsSection, loadToolsSection } from './tools';
 
-const box = need<HTMLElement>('#configBody');
-const statusHint = need<HTMLElement>('#cfgHint');
+const page = need<HTMLElement>('#settingsPage');
+const box = need<HTMLElement>('#settingsConfig');
+const statusHint = need<HTMLElement>('#settingsHint');
 
 /** 引擎已知档位（后端未发布 available.efforts 时的降级选项）。 */
-const EFFORT_FALLBACK: readonly string[] = ['low', 'medium', 'high'];
+const EFFORT_FALLBACK: readonly string[] = ['low', 'high', 'max'];
 
 // ---- 小部件 -------------------------------------------------------------------
 
@@ -26,7 +29,8 @@ const ctl = {
     }
     const cur = current ?? '';
     if (cur !== '' && !options.some((o) => o.value === cur)) {
-      const extra = el('option', null, cur) as HTMLOptionElement;
+      // 当前值不在清单（如 pinned 具体版本）：保留为附加选项，避免误改
+      const extra = el('option', null, cur + '（当前）') as HTMLOptionElement;
       extra.value = cur;
       s.appendChild(extra);
     }
@@ -70,20 +74,22 @@ function renderForm(cfg: ConfigInfo, statusWindow: number | null): void {
   box.innerHTML = '';
   const form = el('form', 'cfg-form');
 
-  const models = Array.isArray(cfg.available?.models) ? cfg.available!.models!.map(String) : [];
-  const efforts = Array.isArray(cfg.available?.efforts) ? cfg.available!.efforts!.map(String) : [];
+  // W227 修复：available.models 是 {id,name,reasoning} 对象数组——
+  // 选项 value=id、label=name（此前 map(String) 渲染成 "[object Object]"）。
+  const models = Array.isArray(cfg.available?.models) ? cfg.available.models : [];
+  const efforts = Array.isArray(cfg.available?.efforts) ? cfg.available.efforts : [];
 
   const modelCtl: HTMLSelectElement | HTMLInputElement = models.length
-    ? ctl.select(models.map((m) => ({ value: m, label: m })), cfg.model ?? null)
+    ? ctl.select(models.map((m) => ({ value: m.id, label: m.name })), cfg.model ?? null)
     : ctl.text(cfg.model ?? '', '模型名（后端未提供可选清单，手动输入）');
   form.appendChild(ctl.field('模型', modelCtl, models.length ? '' : '后端未返回 available.models'));
 
-  const effortOptions: { value: string; label: string }[] = [{ value: '', label: '标准（未设置）' }];
+  const effortOptions: { value: string; label: string }[] = [{ value: '', label: '标准（清除）' }];
   for (const e of efforts.length ? efforts : EFFORT_FALLBACK) {
     effortOptions.push({ value: e, label: e });
   }
   const effortCtl = ctl.select(effortOptions, cfg.reasoning_effort ?? null);
-  form.appendChild(ctl.field('推理档位', effortCtl, efforts.length ? '' : '后端未返回 available.efforts'));
+  form.appendChild(ctl.field('推理档位', effortCtl, efforts.length ? '空 = 标准档' : '后端未返回 available.efforts'));
 
   const baseUrlCtl = ctl.text(cfg.base_url ?? '', 'https://…/v1');
   form.appendChild(ctl.field('Base URL', baseUrlCtl));
@@ -161,9 +167,13 @@ function renderForm(cfg: ConfigInfo, statusWindow: number | null): void {
       .catch((err: unknown) => {
         status.className = 'cfg-status err';
         const e = err as Error;
-        status.textContent = err instanceof ApiError && (err.status === 405 || err.status === 404)
-          ? '后端未开放配置保存（HTTP ' + err.status + '）：当前后端无 POST /api/config 端点，请更新后端或编辑 celestea.toml 重启。'
-          : '保存失败：' + (e.message || String(err));
+        if (err instanceof ApiError && err.status === 409) {
+          status.textContent = '轮次进行中（409）：配置将在本轮结束后生效，请稍后重新保存。';
+        } else if (err instanceof ApiError && (err.status === 405 || err.status === 404)) {
+          status.textContent = '后端未开放配置保存（HTTP ' + err.status + '）：当前后端无 POST /api/config 端点，请更新后端或编辑 celestea.toml 重启。';
+        } else {
+          status.textContent = '保存失败：' + (e.message || String(err));
+        }
       })
       .finally(() => {
         saveBtn.disabled = false;
@@ -212,24 +222,28 @@ export async function loadConfig(): Promise<void> {
   }
 }
 
-function openModal(): void {
-  need<HTMLElement>('#modal').classList.remove('hidden');
+// ---- 页面开关 ----------------------------------------------------------------
+
+export function openSettings(): void {
+  page.classList.remove('hidden');
   void loadConfig();
+  void loadToolsSection();
 }
 
-function closeModal(): void {
-  need<HTMLElement>('#modal').classList.add('hidden');
+export function closeSettings(): void {
+  page.classList.add('hidden');
 }
 
-export function initConfigModal(): void {
-  need<HTMLElement>('#btnConfig').addEventListener('click', openModal);
-  need<HTMLElement>('#modelChip').addEventListener('click', openModal);
-  need<HTMLElement>('#btnModalClose').addEventListener('click', closeModal);
-  need<HTMLElement>('#btnConfigReload').addEventListener('click', () => void loadConfig());
-  need<HTMLElement>('#modal').addEventListener('click', (e) => {
-    if (e.target === e.currentTarget) closeModal();
+export function initSettingsPage(): void {
+  need<HTMLElement>('#btnConfig').addEventListener('click', openSettings);
+  need<HTMLElement>('#modelChip').addEventListener('click', openSettings);
+  need<HTMLElement>('#btnSettingsClose').addEventListener('click', closeSettings);
+  need<HTMLElement>('#btnSettingsReload').addEventListener('click', () => {
+    void loadConfig();
+    void loadToolsSection();
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeModal();
+    if (e.key === 'Escape' && !page.classList.contains('hidden')) closeSettings();
   });
+  initToolsSection();
 }

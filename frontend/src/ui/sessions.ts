@@ -1,75 +1,132 @@
 // ============================================================================
-// 左侧「会话」面板：会话清单加载/渲染 + 清空当前会话。
+// ui/sessions.ts — 左侧「工作区/会话树」面板（W227 替代原平铺会话列表）：
+//   GET /api/sessions 按 workspace 分组：host（workspace=null）→「主会话」组，
+//   persistent → 按 workspace 字段分组；可折叠树：工作区节点 → 会话叶子。
+//   点击叶子 → ui/history.ts 只读回放；「清空」保留原 /api/clear 行为。
 // ============================================================================
 import { api } from '../api';
-import { $, el, need, $$ } from '../utils/dom';
+import { el, need } from '../utils/dom';
 import type { SessionInfo } from '../types';
 import { S } from '../state';
 import { resetMessages } from './messages';
+import { enterHistory } from './history';
 
-const listEl = need<HTMLElement>('#sessionList');
+const treeEl = need<HTMLElement>('#sessionTree');
 const countEl = need<HTMLElement>('#sessionCount');
 
-function renderSessions(sessions: SessionInfo[] | undefined): void {
+const MAIN_GROUP = '主会话';
+const UNGROUPED = '未分组';
+
+interface Group {
+  name: string;
+  sessions: SessionInfo[];
+}
+
+function groupSessions(list: SessionInfo[]): Group[] {
+  const map = new Map<string, SessionInfo[]>();
+  const push = (name: string, s: SessionInfo) => {
+    let arr = map.get(name);
+    if (!arr) {
+      arr = [];
+      map.set(name, arr);
+    }
+    arr.push(s);
+  };
+  for (const s of list) {
+    if (s.kind === 'host' || s.live === true) {
+      push(MAIN_GROUP, s);
+    } else {
+      const ws = (s.workspace ?? '').trim();
+      push(ws === '' ? UNGROUPED : ws, s);
+    }
+  }
+  const groups = Array.from(map.entries()).map(([name, sessions]) => ({ name, sessions }));
+  groups.sort((a, b) => {
+    if (a.name === MAIN_GROUP) return -1;
+    if (b.name === MAIN_GROUP) return 1;
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+  return groups;
+}
+
+function renderLeaf(s: SessionInfo): HTMLElement {
+  const id = s.id ?? '';
+  const leaf = el('div', 'tree-leaf' + (S.history?.id === id ? ' active' : ''));
+  leaf.dataset.id = id;
+  const title = el('div', 'tree-leaf-title');
+  const dot = el('span', 'tree-dot' + (s.kind === 'host' || s.live === true ? ' live' : ''));
+  title.appendChild(dot);
+  title.appendChild(el('span', 'tree-leaf-name', s.title || '(未命名)'));
+  leaf.appendChild(title);
+  const meta = el('div', 'tree-leaf-meta');
+  const bits: string[] = [];
+  if (s.kind) bits.push(s.kind);
+  if (s.events !== undefined) bits.push('ev:' + s.events);
+  bits.push(id);
+  meta.textContent = bits.join(' · ');
+  leaf.title = meta.textContent + (s.workspace ? ' · ' + s.workspace : '');
+  leaf.appendChild(meta);
+  leaf.addEventListener('click', () => {
+    S.selSession = id;
+    for (const n of treeEl.querySelectorAll<HTMLElement>('.tree-leaf')) {
+      n.classList.toggle('active', n.dataset.id === id);
+    }
+    const foot = document.getElementById('sideFoot');
+    if (foot) foot.textContent = '历史会话：' + (s.title || id || '—');
+    enterHistory(id, s.title || id || '(未命名)');
+  });
+  return leaf;
+}
+
+function renderTree(sessions: SessionInfo[] | undefined): void {
   const arr = sessions ?? [];
   countEl.textContent = String(arr.length);
-  listEl.innerHTML = '';
+  treeEl.innerHTML = '';
   if (!arr.length) {
-    listEl.appendChild(el('div', 'side-note', '无会话记录'));
+    treeEl.appendChild(el('div', 'side-note', '无会话记录'));
     return;
   }
-  for (const s of arr) {
-    const id = s.id ?? '';
-    const live = s.live === true || s.kind === 'host';
-    const item = el('div', 'sess-item' + (S.selSession === id ? ' active' : ''));
-    item.dataset.id = id;
-    const title = el('div', 'sess-title');
-    title.appendChild(el('span', live ? 'sess-live' : 'sess-idle'));
-    title.appendChild(el('span', null, s.title || '(未命名)'));
-    item.appendChild(title);
-    const meta = el('div', 'sess-meta');
-    const bits: string[] = [];
-    if (s.kind) bits.push(s.kind);
-    if (s.workspace) bits.push(s.workspace);
-    if (s.events !== undefined) bits.push('ev:' + s.events);
-    bits.push(id);
-    meta.textContent = bits.join(' · ');
-    item.title = meta.textContent;
-    item.appendChild(meta);
-    item.addEventListener('click', () => {
-      S.selSession = id;
-      for (const n of $$<HTMLElement>('.sess-item', listEl)) {
-        n.classList.toggle('active', n.dataset.id === id);
-      }
-      const foot = $('#sideFoot');
-      if (foot) foot.textContent = '当前会话：' + (s.title || id || '—');
-    });
-    listEl.appendChild(item);
+  const groups = groupSessions(arr);
+  for (const g of groups) {
+    const det = document.createElement('details');
+    det.className = 'tree-group';
+    det.open = g.name === MAIN_GROUP || groups.length === 1;
+    const sum = document.createElement('summary');
+    sum.className = 'tree-group-head';
+    sum.appendChild(el('span', 'tree-caret'));
+    sum.appendChild(el('span', 'tree-group-name', g.name));
+    sum.appendChild(el('span', 'tree-group-count', String(g.sessions.length)));
+    det.appendChild(sum);
+    for (const s of g.sessions) det.appendChild(renderLeaf(s));
+    treeEl.appendChild(det);
   }
 }
 
 export function loadSessions(): Promise<void> {
-  listEl.innerHTML = '<div class="side-note">加载中…</div>';
+  treeEl.innerHTML = '<div class="side-note">加载中…</div>';
   return api
     .sessions()
     .then((d) => {
       S.sessions = d.sessions ?? [];
-      renderSessions(S.sessions);
+      renderTree(S.sessions);
     })
     .catch((err: unknown) => {
-      listEl.innerHTML = '';
-      listEl.appendChild(el('div', 'side-note err', '会话接口不可用'));
-      listEl.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+      treeEl.innerHTML = '';
+      treeEl.appendChild(el('div', 'side-note err', '会话接口不可用'));
+      treeEl.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
     });
 }
 
 export function initSessionsPanel(): void {
+  need<HTMLButtonElement>('#btnReloadSessions').addEventListener('click', () => {
+    void loadSessions();
+  });
   need<HTMLButtonElement>('#btnClearSess').addEventListener('click', () => {
     if (!window.confirm('确认清空当前会话？')) return;
     void api
       .clear()
       .then((d) => {
-        const foot = $('#sideFoot');
+        const foot = document.getElementById('sideFoot');
         if (d.ok) {
           if (foot) foot.textContent = '会话已清空';
           resetMessages();
@@ -80,7 +137,7 @@ export function initSessionsPanel(): void {
         }
       })
       .catch((err: unknown) => {
-        const foot = $('#sideFoot');
+        const foot = document.getElementById('sideFoot');
         if (foot) foot.textContent = '清空失败：' + (err instanceof Error ? err.message : String(err));
       });
   });

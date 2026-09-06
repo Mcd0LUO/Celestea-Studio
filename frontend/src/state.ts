@@ -5,6 +5,12 @@
 import type { ConnState, SessionInfo } from './types';
 import type { AssistantView } from './ui/view';
 
+/** 历史回放视图（只读）：当前展示的会话；null = 主会话实时模式。 */
+export interface HistoryView {
+  id: string;
+  title: string;
+}
+
 export interface AppState {
   /** current turn id (null when idle) */
   turn: number | null;
@@ -15,6 +21,8 @@ export interface AppState {
   assistant: AssistantView | null;
   sessions: SessionInfo[];
   selSession: string | null;
+  /** 历史只读回放（null = 主会话实时） */
+  history: HistoryView | null;
   /** elapsed-seconds timer for the bottom statusbar */
   msgTimer: number | null;
 }
@@ -27,5 +35,6 @@ export const S: AppState = {
   assistant: null,
   sessions: [],
   selSession: null,
+  history: null,
   msgTimer: null,
 };

@@ -30,22 +30,14 @@
       <!-- ---------- 左侧面板 ---------- -->
       <aside id="sidebar">
 
-        <section class="side-sec" id="sec-tools">
-          <header class="side-sec-head">
-            <h3>工具</h3>
-            <span class="sec-note" id="toolCount">…</span>
-            <button class="btn-mini" id="btnReloadTools" title="重新加载工具清单">刷新</button>
-          </header>
-          <div class="side-body" id="toolList"><div class="side-note">加载中…</div></div>
-        </section>
-
         <section class="side-sec" id="sec-sessions">
           <header class="side-sec-head">
-            <h3>会话</h3>
+            <h3>工作区 · 会话</h3>
             <span class="sec-note" id="sessionCount">…</span>
+            <button class="btn-mini" id="btnReloadSessions" title="重新加载会话树">刷新</button>
             <button class="btn-mini" id="btnClearSess" title="清空当前会话">清空</button>
           </header>
-          <div class="side-body" id="sessionList"><div class="side-note">加载中…</div></div>
+          <div class="side-body" id="sessionTree"><div class="side-note">加载中…</div></div>
         </section>
 
         <section class="side-sec side-sec-foot">
@@ -77,9 +69,9 @@
             </span>
             <span class="sl-ctx" id="slCtx">—/—</span>
             <span class="sl-sep">·</span>
-            <span class="sl-model" id="slModel" title="当前模型">—</span>
+            <button class="sl-model" id="slModel" title="当前模型（点击快速切换）">—</button>
             <span class="sl-sep">·</span>
-            <span class="sl-effort" id="slEffort" title="思考强度">—</span>
+            <button class="sl-effort" id="slEffort" title="思考强度（点击快速切换）">—</button>
             <span class="sl-spacer"></span>
             <span class="sl-hint" id="slHint"></span>
           </div>
@@ -115,19 +107,33 @@
     </div>
   </div>
 
-  <!-- ===================== 配置弹层 ===================== -->
-  <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-    <div class="modal-box">
-      <div class="modal-head">
-        <h3 id="modalTitle">运行配置</h3>
-        <div class="modal-actions">
-          <button class="btn-mini" id="btnConfigReload" title="重新载入后端当前配置">重新载入</button>
-          <button class="btn-mini" id="btnModalClose">关闭</button>
+  <!-- ===================== 通用设置页（取代原配置弹层） ===================== -->
+  <div id="settingsPage" class="settings-page hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="settings-shell">
+      <header class="settings-head">
+        <h3 id="settingsTitle">通用设置</h3>
+        <div class="settings-actions">
+          <button class="btn-mini" id="btnSettingsReload" title="重新载入后端当前配置与工具清单">重新载入</button>
+          <button class="btn-mini" id="btnSettingsClose">关闭</button>
         </div>
-      </div>
-      <div class="modal-body">
-        <div id="configBody"><div class="side-note">加载中…</div></div>
-        <div class="cfg-hintline" id="cfgHint"></div>
+      </header>
+      <div class="settings-body">
+        <section class="settings-sec">
+          <header class="settings-sec-head">
+            <h4>运行配置</h4>
+            <span class="settings-sec-note">热调 · 保存后下一轮生效</span>
+          </header>
+          <div id="settingsConfig"><div class="side-note">加载中…</div></div>
+        </section>
+        <section class="settings-sec">
+          <header class="settings-sec-head">
+            <h4>工具列表</h4>
+            <span class="sec-note" id="toolsCount">…</span>
+            <button class="btn-mini" id="btnReloadTools" title="重新加载工具清单">刷新</button>
+          </header>
+          <div id="settingsTools"><div class="side-note">加载中…</div></div>
+        </section>
+        <div class="cfg-hintline" id="settingsHint"></div>
       </div>
     </div>
   </div>

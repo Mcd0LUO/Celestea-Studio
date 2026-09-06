@@ -281,3 +281,78 @@
 }
 
 .cfg-hintline:empty { display: none; }
+
+/* ============================================================================
+ * W227：工作区/会话树 + 历史只读回放（横幅 / 工具消息块）
+ * ============================================================================ */
+
+/* ---- 工作区/会话树 ---- */
+.tree-group { border: 1px solid var(--c-border-subtle); border-radius: 7px; background: var(--c-surface-raised); }
+.tree-group + .tree-group { margin-top: 6px; }
+.tree-group-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; cursor: pointer; user-select: none; list-style: none;
+}
+.tree-group-head::-webkit-details-marker { display: none; }
+.tree-group-head:hover { color: var(--c-text-1); }
+.tree-caret {
+  width: 0; height: 0; flex: 0 0 auto;
+  border-left: 5px solid var(--c-text-3);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform .12s ease;
+}
+.tree-group[open] > .tree-group-head .tree-caret { transform: rotate(90deg); }
+.tree-group-name {
+  font-size: 12.5px; font-weight: 600; color: var(--c-text-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree-group-count {
+  margin-left: auto; flex: 0 0 auto;
+  font-family: var(--mono); font-size: 10.5px; color: var(--c-text-3);
+  border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 5px;
+}
+
+.tree-leaf {
+  border-top: 1px solid var(--c-border-subtle);
+  padding: 6px 10px 6px 24px;
+  cursor: pointer;
+  transition: background .12s ease;
+}
+.tree-leaf:hover { background: var(--c-accent-soft); }
+.tree-leaf.active { background: var(--c-accent-soft); box-shadow: inset 2px 0 0 var(--c-accent-ring); }
+.tree-leaf-title { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--c-text-1); }
+.tree-leaf-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--c-text-3); flex: 0 0 auto; }
+.tree-dot.live { background: var(--c-ok); }
+.tree-leaf-meta {
+  font-size: 10.5px; color: var(--c-text-3); font-family: var(--mono);
+  margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---- 历史只读回放 ---- */
+.hist-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border: 1px solid var(--c-accent-ring);
+  background: var(--c-accent-soft);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 4px;
+}
+.hist-banner-label {
+  font-size: 12.5px; color: var(--c-text-1); font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hist-back { flex: 0 0 auto; font-size: 12px; padding: 3px 10px; }
+.hist-note {
+  margin: auto; text-align: center; color: var(--c-text-3);
+  font-size: 12.5px; padding: 18px 0;
+}
+.hist-note.err { color: var(--c-err); }
+
+.msg.tool .msg-caption .who { color: var(--c-text-3); }
+.msg.tool .bubble { background: var(--c-code-bg); }
+.content.hist-tool {
+  white-space: pre-wrap; word-break: break-all;
+  font-family: var(--mono); font-size: 12px; color: var(--c-text-2);
+}

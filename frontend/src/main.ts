@@ -10,13 +10,14 @@ import './styles/layout.css';
 import './styles/components.css';
 import './styles/statusline.css';
 
+import './styles/settings.css';
+
 import { api } from './api';
 import { connectSse, initChat } from './chat';
 import { setStatus } from './ui/statusbar';
-import { initConfigModal } from './ui/config';
+import { initSettingsPage } from './ui/config';
 import { initSessionsPanel } from './ui/sessions';
 import { initSidebar } from './ui/sidebar';
-import { initToolsPanel } from './ui/tools';
 import { Statusline } from './statusline';
 import { S } from './state';
 import { initTheme, setupThemeSwitcher } from './theme';
@@ -53,13 +54,11 @@ function init(): void {
   const statusline = new Statusline();
   statusline.start();
 
-  // 4) 左侧面板（瘦身后：工具清单 + 会话列表）
-  const sideFoot = need<HTMLElement>('#sideFoot');
-  initToolsPanel(sideFoot);
+  // 4) 左侧面板：工作区/会话树（W227；工具清单已迁至「通用设置」页）
   initSessionsPanel();
 
-  // 5) 配置弹层（热调；保存成功后刷新健康信息）
-  initConfigModal();
+  // 5) 「通用设置」页（取代原 #modal 弹层；热调 + 工具列表；保存成功后刷新健康信息）
+  initSettingsPage();
 
   // 6) 聊天主循环 + SSE
   initChat();

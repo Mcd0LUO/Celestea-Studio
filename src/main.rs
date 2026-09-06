@@ -645,7 +645,7 @@ async fn post_turn(State(st): State<Shared>, Json(req): Json<TurnReq>) -> impl I
     if busy.is_some() {
         return (
             StatusCode::CONFLICT,
-            Json(json!({"error": "a turn is already running"})),
+            Json(json!({"ok": false, "error": "a turn is already running"})),
         );
     }
     let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -826,6 +826,7 @@ async fn main() {
         .route("/api/tools", get(api::get_tools))
         .route("/api/config", get(api::get_config).post(api::post_config))
         .route("/api/sessions", get(api::get_sessions))
+        .route("/api/sessions/{id}/messages", get(api::get_session_messages))
         .route("/api/clear", post(api::post_clear))
         .route("/api/worker/spawn", post(api::post_worker_spawn))
         .route("/api/worker/send", post(api::post_worker_send))

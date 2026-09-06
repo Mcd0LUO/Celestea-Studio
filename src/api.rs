@@ -22,12 +22,12 @@
 
 use std::time::UNIX_EPOCH;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use celestea_core::{SessionLog, ToolInput};
-use celestea_runtime::{merge_profile, validate_model};
+use celestea_runtime::{merge_profile, validate_model, SessionEvent};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -148,6 +148,9 @@ pub async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
                     "id": stem,
                     "title": stem,
                     "kind": "persistent",
+                    // W228: workspace = the jsonl file's parent directory, so
+                    // the frontend can group persisted sessions by workspace.
+                    "workspace": dir.clone(),
                     "file": format!("{dir}/{name}"),
                     "size": size,
                     "modified": modified,
@@ -157,6 +160,163 @@ pub async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
     }
 
     Json(json!({"sessions": sessions}))
+}
+
+// ---- W228: GET /api/sessions/{id}/messages ---------------------------------
+
+/// Session id -> safe JSONL file name, mirroring the engine's persistence
+/// mapping (celestea_session::file_name_for): only [A-Za-z0-9._-] survive,
+/// everything else becomes '_', empty ids fall back to "session", always
+/// ending in .jsonl. Replicated read-only so the studio stays on the
+/// celestea-core/runtime surface; identical output means identical lookup.
+fn session_file_name(id: &str) -> String {
+    let mut name: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        name.push_str("session");
+    }
+    name.push_str(".jsonl");
+    name
+}
+
+/// Map one SessionEvent to the W228 message contract. TurnStart/TurnEnd are
+/// structural markers and are skipped. Tool events become role "tool" with a
+/// decision summary as content: ToolCall = `name(args)` (the agent's
+/// decision), ToolResult = the JSON value or `Error: {error}` (the outcome).
+/// The engine never persists thinking deltas (SessionEvent has no Thinking
+/// variant), so "thinking" cannot appear here — assistant text carries the
+/// reply.
+fn session_event_to_message(ev: &SessionEvent) -> Option<Value> {
+    match ev {
+        SessionEvent::TurnStart { .. } | SessionEvent::TurnEnd { .. } => None,
+        SessionEvent::UserMessage { text } => {
+            Some(json!({"role": "user", "content": text}))
+        }
+        SessionEvent::AssistantMessage { text } => {
+            Some(json!({"role": "assistant", "content": text}))
+        }
+        SessionEvent::ToolCall { name, args, .. } => {
+            Some(json!({"role": "tool", "content": format!("{name}({args})")}))
+        }
+        SessionEvent::ToolResult { value, error, .. } => {
+            let content = match error {
+                Some(e) if !e.is_empty() => format!("Error: {e}"),
+                _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+            };
+            Some(json!({"role": "tool", "content": content}))
+        }
+    }
+}
+
+/// Parse a persistent session JSONL file (engine v1 format: one
+/// serde_json-tagged SessionEvent per line). Blank lines are tolerated;
+/// parsing stops at the first unparsable record, mirroring the engine's
+/// replay semantics (a torn tail is never surfaced).
+fn parse_session_jsonl(text: &str) -> Vec<SessionEvent> {
+    let mut events = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<SessionEvent>(line) {
+            Ok(ev) => events.push(ev),
+            Err(_) => break,
+        }
+    }
+    events
+}
+
+/// W228 lenient model-name sanity check: at most 128 chars, only
+/// [A-Za-z0-9._-:/@] (no whitespace / brackets / control characters). The
+/// engine's validate_model only rejects empty names; this blocks frontend
+/// garbage values while staying open for custom OpenAI-compatible endpoints.
+fn validate_model_name(m: &str) -> Result<(), String> {
+    if m.chars().count() > 128 {
+        return Err(format!(
+            "invalid model name: '{m}' exceeds 128 characters"
+        ));
+    }
+    if let Some(bad) = m.chars().find(|c| {
+        c.is_control()
+            || c.is_whitespace()
+            || !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/' | '@'))
+    }) {
+        return Err(format!(
+            "invalid model name '{m}': character {bad:?} is not allowed (only [A-Za-z0-9._-:/@]; no spaces, brackets or control characters)"
+        ));
+    }
+    Ok(())
+}
+
+/// GET /api/sessions/{id}/messages — read-only transcript of one session.
+/// Sources, in priority order:
+///   1. "cli-main"     -> the host conversation (gen.runtime.session);
+///   2. worker session -> gen.runtime.workers.sessions().get(id).log;
+///   3. persistent     -> <CELESTEA_SESSION_DIR>/<sanitized-id>.jsonl parsed
+///                        with the engine's SessionEvent JSONL format.
+/// Unknown ids -> 404 {"ok":false,"error":"unknown session"}.
+/// Response: {"ok":true,"session":"<id>","messages":[{"role","content"},...]}
+pub async fn get_session_messages(
+    State(st): State<Shared>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Clone the runtime handle, then release the gen read lock: file IO for
+    // the persistent fallback must not run under the generation lock.
+    let runtime = {
+        let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+        gen.runtime.clone()
+    };
+
+    let events: Vec<SessionEvent> = if id == "cli-main" {
+        runtime.session.events()
+    } else if let Some(session) = runtime.workers.sessions().get(&id) {
+        session.log.events()
+    } else {
+        // Persistent JSONL fallback: the engine maps a session id to
+        // <dir>/<sanitized>.jsonl; replicate the mapping and double-check the
+        // resolved path still lives directly inside the session dir.
+        let Some(dir) = std::env::var("CELESTEA_SESSION_DIR")
+            .ok()
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+        else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"ok": false, "error": "unknown session"})),
+            );
+        };
+        let path = std::path::Path::new(&dir).join(session_file_name(&id));
+        let inside_dir = path.parent().map(|p| p.to_string_lossy().into_owned()) == Some(dir);
+        if !inside_dir {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"ok": false, "error": "unknown session"})),
+            );
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(text) => parse_session_jsonl(&text),
+            Err(_) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"ok": false, "error": "unknown session"})),
+                )
+            }
+        }
+    };
+
+    let messages: Vec<Value> = events.iter().filter_map(session_event_to_message).collect();
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "session": id, "messages": messages})),
+    )
 }
 
 // ---- POST /api/clear -------------------------------------------------------
@@ -242,6 +402,16 @@ pub async fn post_config(State(st): State<Shared>, Json(req): Json<ConfigReq>) -
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"ok": false, "error": e.to_string()})),
+            );
+        }
+        // W228: lenient studio-side sanity check on top of the engine's
+        // empty-only rule — blocks the garbage the UI settings page once
+        // saved (e.g. the literal "[object Object]") from entering the
+        // profile / config_json.
+        if let Err(e) = validate_model_name(m) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "error": e})),
             );
         }
         pj["model"] = json!(m);
@@ -495,3 +665,87 @@ pub async fn get_worker_status(
     Json(summary)
 }
 
+
+#[cfg(test)]
+mod w228_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn validate_model_name_accepts_catalog_and_custom_names() {
+        for ok in [
+            "deepseek-v4-flash-vision-exp",
+            "deepseek-v4-pro-0813",
+            "glm-5.3",
+            "muse-spark-1.2-contributor",
+            "openai/gpt-5.6-sol",
+            "custom:model@tag",
+            "a.b-c_d/e@f",
+        ] {
+            assert!(validate_model_name(ok).is_ok(), "{ok} should pass");
+        }
+    }
+
+    #[test]
+    fn validate_model_name_rejects_garbage() {
+        for bad in [
+            "[object Object]",
+            "deepseek v4 pro",
+            "deepseek-v4-pro\t",
+            "model\nname",
+            "model[0]",
+            "模型-中文",
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        ] {
+            assert!(validate_model_name(bad).is_err(), "{bad:?} should fail");
+        }
+        // exactly 128 chars is still fine
+        let long = "a".repeat(128);
+        assert!(validate_model_name(&long).is_ok());
+    }
+
+    #[test]
+    fn session_file_name_matches_engine_sanitization() {
+        assert_eq!(session_file_name("session-0"), "session-0.jsonl");
+        assert_eq!(session_file_name("../etc/passwd"), ".._etc_passwd.jsonl"); // "." survives, matching the engine
+        assert_eq!(session_file_name(""), "session.jsonl");
+        assert_eq!(session_file_name("a b[c]"), "a_b_c_.jsonl");
+    }
+
+    #[test]
+    fn parse_session_jsonl_tolerates_blank_lines_and_torn_tail() {
+        let text = format!(
+            "{}\n\n{}\n{{bad json\n",
+            serde_json::to_string(&SessionEvent::UserMessage { text: "a".into() }).unwrap(),
+            serde_json::to_string(&SessionEvent::AssistantMessage { text: "b".into() }).unwrap(),
+        );
+        let events = parse_session_jsonl(&text);
+        assert_eq!(events.len(), 2);
+        // The unparsable tail is dropped, not surfaced.
+        let text2 = "{\"type\":\"user_message\",\"tex\"";
+        assert_eq!(parse_session_jsonl(text2).len(), 0);
+    }
+
+    #[test]
+    fn session_event_to_message_maps_all_kinds() {
+        let evs = vec![
+            SessionEvent::TurnStart { id: "t1".into() },
+            SessionEvent::UserMessage { text: "hi".into() },
+            SessionEvent::AssistantMessage { text: "hello".into() },
+            SessionEvent::ToolCall { id: "c1".into(), name: "read_file".into(), args: json!({"path": "/tmp/x"}) },
+            SessionEvent::ToolResult { id: "c1".into(), value: Some(json!({"ok": true})), error: None },
+            SessionEvent::ToolResult { id: "c2".into(), value: None, error: Some("boom".into()) },
+            SessionEvent::TurnEnd { id: "t1".into() },
+        ];
+        let msgs: Vec<Value> = evs.iter().filter_map(session_event_to_message).collect();
+        assert_eq!(msgs.len(), 5);
+        assert_eq!(msgs[0], json!({"role": "user", "content": "hi"}));
+        assert_eq!(msgs[1], json!({"role": "assistant", "content": "hello"}));
+        assert_eq!(
+            msgs[2],
+            json!({"role": "tool", "content": r#"read_file({"path":"/tmp/x"})"#})
+        );
+        assert_eq!(msgs[3], json!({"role": "tool", "content": r#"{"ok":true}"#}));
+        assert_eq!(msgs[4], json!({"role": "tool", "content": "Error: boom"}));
+    }
+}
