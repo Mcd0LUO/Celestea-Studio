@@ -43,8 +43,20 @@
 //!   POST /api/sessions/{id}/activate     -> busy 409; env + recompose; persist
 //!   POST /api/sessions/{id}/archive|unarchive -> <ws-path>/.celestea-archived/ moves
 //!   POST /api/sessions/batch-archive|batch-delete -> .celestea-archived / .celestea-trash
-//!   GET  /api/sessions/{id}/messages     -> cli-main.jsonl transcript
+//!   GET  /api/sessions/{id}/messages     -> cli-main.jsonl transcript; ids
+//!                                           prefixed "worker:" read the
+//!                                           engine's in-memory worker
+//!                                           SessionRegistry instead (W239)
 //!   POST /api/clear                      -> clear the active session log
+//!
+//! W239: GET /api/sessions adds a THIRD source — engine worker sessions
+//! (spawn_worker products living in the in-memory SessionRegistry behind
+//! gen.runtime.workers.sessions(), never on disk): id "worker:<sid>",
+//! pseudo-workspace "engine", kind "worker", size = event count of the
+//! worker log. The compose-time "cli-main" shadow registration (HOST_SID)
+//! is skipped — the host conversation is already listed from its workspace
+//! directory. Worker transcripts are read from the same registry in
+//! get_session_messages via the session_event_to_message mapping.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -57,6 +69,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use celestea_runtime::SessionLog;
 use crate::{prepare_gen, profile_to_json, swap_gen, Shared};
 
 /// Reserved hidden dirs under a workspace path (never scanned, never listed).
@@ -65,6 +78,11 @@ pub(crate) const TRASH_DIR: &str = ".celestea-trash";
 /// The engine's internal session file name (PersistentSessionLog / HOST_SID
 /// "cli-main"). No privileges attached on the studio side anymore.
 pub(crate) const SESSION_FILE: &str = "cli-main.jsonl";
+/// W239: the engine's compose-time shadow registration of the host
+/// conversation in the shared worker SessionRegistry (celestea-runtime
+/// compose::HOST_SID). Never listed as a worker session — the host session
+/// is already listed from its workspace directory.
+pub(crate) const WORKER_HOST_SHADOW_SID: &str = "cli-main";
 /// Default workspace name created by the legacy migration.
 pub(crate) const DEFAULT_WORKSPACE: &str = "默认";
 /// Active session after migration: "<默认>/cli-main".
@@ -672,10 +690,66 @@ pub(crate) struct BatchIdsReq {
     pub(crate) ids: Vec<String>,
 }
 
-/// GET /api/sessions — every session dir across ALL registered workspaces:
-/// {"sessions":[{"id":"<ws>/<session>","workspace","title","size","modified",
-/// "active"}],"active_session":...}. `.celestea-*` and other dot-dirs are
-/// never scanned.
+// ---- W239: engine worker sessions (third GET /api/sessions source) -----------
+
+/// W239: strip the "worker:" scheme prefix from a session id. Returns the
+/// engine sid ("session-<n>") when the scheme is present, None otherwise —
+/// file-backed ids ("<workspace>/<session>") never carry the prefix.
+pub(crate) fn worker_sid(id: &str) -> Option<&str> {
+    id.strip_prefix("worker:")
+}
+
+/// W239: render one engine worker session into the GET /api/sessions entry
+/// contract: id "worker:<sid>", pseudo-workspace "engine" (the frontend
+/// groups worker entries by `kind`), size = event count of the worker's
+/// in-memory log, modified 0 / active false (in-memory lifecycle — a worker
+/// session dies with the engine process).
+fn render_worker_entry(
+    id: &str,
+    title: &str,
+    model: Option<&str>,
+    size: usize,
+) -> Value {
+    json!({
+        "id": format!("worker:{id}"),
+        "workspace": "engine",
+        "kind": "worker",
+        "title": title,
+        "model": model,
+        "size": size,
+        "modified": 0,
+        "active": false,
+    })
+}
+
+/// W239: list the engine's worker sessions (the in-memory SessionRegistry
+/// behind gen.runtime.workers.sessions() — spawn_worker products) as
+/// /api/sessions entries. The compose-time "cli-main" shadow registration
+/// (WORKER_HOST_SHADOW_SID / HOST_SID) is skipped — the host conversation is
+/// already listed from its workspace directory, and the shadow's log is
+/// empty anyway.
+fn worker_session_entries(workers: &celestea_runtime::WorkerRegistry) -> Vec<Value> {
+    let sessions = workers.sessions();
+    sessions
+        .list()
+        .into_iter()
+        .filter(|m| m.id != WORKER_HOST_SHADOW_SID)
+        .map(|m| {
+            let size = sessions
+                .get(&m.id)
+                .map(|s| s.log.events().len())
+                .unwrap_or(0);
+            render_worker_entry(&m.id, &m.title, m.model.as_deref(), size)
+        })
+        .collect()
+}
+
+/// GET /api/sessions — every session dir across ALL registered workspaces,
+/// plus the engine's in-memory worker sessions (W239; the "cli-main" shadow
+/// registration is never listed):
+/// {"sessions":[{"id":"<ws>/<session>"|"worker:<sid>","workspace","title",
+/// "size","modified","active","kind"?}],"active_session":...}.
+/// `.celestea-*` and other dot-dirs are never scanned.
 pub(crate) async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
     let data = st.workspaces.snapshot();
     let mut sessions: Vec<Value> = Vec::new();
@@ -704,6 +778,13 @@ pub(crate) async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
                 "active": data.active_session.as_deref() == Some(id.as_str()),
             }));
         });
+    }
+    // W239: third source — engine worker sessions from the in-memory
+    // SessionRegistry of the CURRENT generation (worker sessions are
+    // per-compose; a hot swap starts a fresh registry).
+    {
+        let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+        sessions.extend(worker_session_entries(&gen.runtime.workers));
     }
     sessions.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     Json(json!({"sessions": sessions, "active_session": data.active_session}))
@@ -820,6 +901,25 @@ pub(crate) async fn get_session_messages(
     State(st): State<Shared>,
     AxPath(id): AxPath<String>,
 ) -> Response {
+    // W239: "worker:<sid>" ids address the engine's in-memory worker
+    // SessionRegistry (spawn_worker products), not a workspace directory.
+    if let Some(sid) = worker_sid(&id) {
+        let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+        let Some(session) = gen.runtime.workers.sessions().get(sid) else {
+            return err_response(StatusCode::NOT_FOUND, format!("unknown session '{id}'"));
+        };
+        let messages: Vec<Value> = session
+            .log
+            .events()
+            .iter()
+            .filter_map(crate::api::session_event_to_message)
+            .collect();
+        return (
+            StatusCode::OK,
+            Json(json!({"ok": true, "session": id, "messages": messages})),
+        )
+            .into_response();
+    }
     let data = st.workspaces.snapshot();
     let (_ws, _name, dir) = match session_dir_for(&data, &id) {
         Ok(v) => v,
@@ -990,7 +1090,8 @@ pub(crate) async fn post_sessions_batch_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use celestea_runtime::SessionEvent;
+    use celestea_runtime::{SessionEvent, SessionLog, WorkerRegistry};
+    use celestea_session::{Session, SessionMeta, SessionSpec};
 
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1327,5 +1428,94 @@ mod tests {
         assert_eq!(dirs[199], "d199");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- W239: worker-session visibility ----------------------------------
+
+    #[test]
+    fn worker_sid_strips_prefix_only() {
+        assert_eq!(worker_sid("worker:session-0"), Some("session-0"));
+        assert_eq!(worker_sid("worker:cli-main"), Some("cli-main"));
+        assert_eq!(worker_sid("worker:"), Some(""));
+        // file-backed ids never carry the scheme
+        assert_eq!(worker_sid("默认/cli-main"), None);
+        assert_eq!(worker_sid("session-0"), None);
+        assert_eq!(worker_sid(""), None);
+        assert_eq!(worker_sid("worker-other"), None);
+        assert_eq!(worker_sid("Worker:session-1"), None);
+    }
+
+    #[test]
+    fn render_worker_entry_contract_shape() {
+        let v = render_worker_entry("session-7", "W7·Probe", Some("deepseek-v4-pro"), 3);
+        assert_eq!(
+            v,
+            json!({
+                "id": "worker:session-7",
+                "workspace": "engine",
+                "kind": "worker",
+                "title": "W7·Probe",
+                "model": "deepseek-v4-pro",
+                "size": 3,
+                "modified": 0,
+                "active": false,
+            })
+        );
+        // absent model -> null (never a stringified fallback); zero events ok
+        let v2 = render_worker_entry("session-8", "bare", None, 0);
+        assert_eq!(v2["id"], "worker:session-8");
+        assert_eq!(v2["model"], Value::Null);
+        assert_eq!(v2["size"], 0);
+        assert_eq!(v2["workspace"], "engine");
+        assert_eq!(v2["kind"], "worker");
+    }
+
+    #[test]
+    fn worker_session_entries_lists_workers_and_skips_cli_main_shadow() {
+        let tsv = scratch("workers").join("registry.tsv");
+        let reg = WorkerRegistry::new(&tsv);
+        // compose-time shadow registration of the host conversation: skipped.
+        reg.sessions()
+            .register(std::sync::Arc::new(Session::new(SessionMeta {
+                id: WORKER_HOST_SHADOW_SID.into(),
+                title: WORKER_HOST_SHADOW_SID.into(),
+                workspace: None,
+                model: Some("deepseek-v4-pro".into()),
+            })))
+            .unwrap();
+        let sid = reg
+            .sessions()
+            .create(SessionSpec {
+                title: "WPROBE·hello".into(),
+                workspace: Some("engine".into()),
+                model: Some("deepseek-v4-pro".into()),
+            });
+        let session = reg.sessions().get(&sid).expect("registered");
+        session.log.append(SessionEvent::UserMessage { text: "ping".into() });
+        session.log.append(SessionEvent::AssistantMessage { text: "pong".into() });
+
+        let entries = worker_session_entries(&reg);
+        assert_eq!(entries.len(), 1, "cli-main shadow must never be listed");
+        assert_eq!(entries[0]["id"], format!("worker:{sid}"));
+        assert_eq!(entries[0]["workspace"], "engine");
+        assert_eq!(entries[0]["kind"], "worker");
+        assert_eq!(entries[0]["title"], "WPROBE·hello");
+        assert_eq!(entries[0]["model"], "deepseek-v4-pro");
+        assert_eq!(entries[0]["size"], 2, "size = worker log event count");
+        assert_eq!(entries[0]["modified"], 0);
+        assert_eq!(entries[0]["active"], false);
+
+        // an empty registry (only the shadow) yields no entries at all
+        let reg2 = WorkerRegistry::new(scratch("workers2").join("r.tsv"));
+        reg2.sessions()
+            .register(std::sync::Arc::new(Session::new(SessionMeta {
+                id: WORKER_HOST_SHADOW_SID.into(),
+                title: WORKER_HOST_SHADOW_SID.into(),
+                workspace: None,
+                model: None,
+            })))
+            .unwrap();
+        assert!(worker_session_entries(&reg2).is_empty());
+        let _ = std::fs::remove_dir_all(&tsv.parent().unwrap());
     }
 }
