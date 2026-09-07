@@ -141,13 +141,22 @@ export const api = {
   setDefaultModel: (model: string) =>
     postJson<ClearResp>('/api/providers/default', { model }),
   // ---- 提示词（W245；缺失时 404 优雅降级） ----
+  // P0-4 scope 契约：不传 workspace=全局（后端默认 scope）；workspace=名=该工作区。
   prompts: (workspace?: string) =>
     requestJson<PromptsResp>(
       '/api/prompts' + (workspace ? '?workspace=' + encodeURIComponent(workspace) : ''),
     ),
-  savePrompt: (payload: PromptUpsertReq) => postJson<ClearResp>('/api/prompts', payload),
-  deletePrompt: (id: string, workspace?: string | null) =>
-    postJson<ClearResp>('/api/prompts/' + encodeURIComponent(id) + '/delete', workspace ? { workspace } : {}),
-  setDefaultPrompt: (id: string, workspace?: string | null) =>
-    postJson<ClearResp>('/api/prompts/' + encodeURIComponent(id) + '/default', workspace ? { workspace } : {}),
+  /** POST /api/prompts upsert：workspace 省略=全局；成功响应带 hot_applied。 */
+  savePrompt: (payload: PromptUpsertReq) =>
+    postJson<ClearResp & { hot_applied?: boolean }>('/api/prompts', payload),
+  deletePrompt: (id: string, workspace?: string) =>
+    postJson<ClearResp & { hot_applied?: boolean }>(
+      '/api/prompts/' + encodeURIComponent(id) + '/delete',
+      workspace ? { workspace } : {},
+    ),
+  setDefaultPrompt: (id: string, workspace?: string) =>
+    postJson<ClearResp & { hot_applied?: boolean }>(
+      '/api/prompts/' + encodeURIComponent(id) + '/default',
+      workspace ? { workspace } : {},
+    ),
 };

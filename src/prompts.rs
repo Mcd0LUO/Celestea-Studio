@@ -497,7 +497,13 @@ pub(crate) fn assemble_prompt(
                 if let Some(base) = fallback {
                     match interpolate(base, &vars) {
                         Ok(t) => rendered.push(t),
-                        Err(_) => {} // builtin templates are variable-free
+                        Err(e2) => {
+                            // builtin templates are variable-free; log rather
+                            // than drop silently if that ever changes.
+                            eprintln!(
+                                "[celestea-studio] prompt section '{id}' base fallback also failed to render: {e2}"
+                            );
+                        }
                     }
                 }
             }
@@ -531,33 +537,13 @@ pub(crate) struct PromptsQuery {
     pub(crate) workspace: Option<String>,
 }
 
-/// Scope resolution: None -> the active workspace; Some("") -> the GLOBAL
-/// registry; Some(name) -> that workspace (404 when unknown).
+/// P0-4 scope contract: None or Some("") -> the GLOBAL registry (the default
+/// scope — an omitted workspace must never silently land in the active
+/// workspace); Some(name) -> that workspace (404 when unknown).
 /// Returns (display name or None for global, file path).
 fn resolve_scope(st: &Shared, workspace: Option<&str>) -> Result<(Option<String>, PathBuf), (StatusCode, String)> {
-    match workspace.map(str::trim) {
-        Some("") => Ok((None, global_prompts_path())),
-        None => {
-            let data = st.workspaces.snapshot();
-            let name = data
-                .active_session
-                .as_deref()
-                .and_then(|a| a.split_once('/').map(|(ws, _)| ws.to_string()));
-            match name {
-                Some(name) => {
-                    let ws = data
-                        .workspaces
-                        .iter()
-                        .find(|w| crate::workspaces::workspace_basename(&w.path).as_deref() == Some(name.as_str()))
-                        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("unknown workspace '{name}'")))?;
-                    Ok((Some(name), PathBuf::from(&ws.path).join(WORKSPACE_PROMPTS_FILE)))
-                }
-                None => Err((
-                    StatusCode::BAD_REQUEST,
-                    "no active workspace; pass \"workspace\" or create/activate a session".to_string(),
-                )),
-            }
-        }
+    match workspace.map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok((None, global_prompts_path())),
         Some(name) => {
             let data = st.workspaces.snapshot();
             let ws = data
@@ -575,8 +561,10 @@ fn err_response(code: StatusCode, msg: String) -> Response {
 }
 
 /// The merged registry view for GET /api/prompts: every effective section
-/// annotated with its source scope, the prompts of both scopes, the effective
-/// default and the resolved active prompt id.
+/// annotated with its source scope, the prompts of the scope (global-only for
+/// the default global view; global + workspace with shadow annotations when a
+/// workspace is named), the effective default and the resolved active prompt
+/// id.
 fn merged_view(st: &Shared, workspace: Option<&str>) -> Result<Value, (StatusCode, String)> {
     let (ws_name, ws_path) = resolve_scope(st, workspace)?;
     let global = load_prompt_file(&global_prompts_path());
@@ -652,6 +640,9 @@ fn merged_view(st: &Shared, workspace: Option<&str>) -> Result<Value, (StatusCod
 
     Ok(json!({
         "ok": true,
+        // W246 ruling: explicit scope so clients never infer it from a
+        // missing/empty workspace value.
+        "scope": if ws_name.is_some() { "workspace" } else { "global" },
         "workspace": ws_name,
         "global_file": global_prompts_path().display().to_string(),
         "sections": sections.into_iter().map(|(_, _, v)| v).collect::<Vec<Value>>(),
@@ -661,8 +652,34 @@ fn merged_view(st: &Shared, workspace: Option<&str>) -> Result<Value, (StatusCod
     }))
 }
 
-/// Hot apply tail: re-compose the generation between turns (busy 409).
-async fn hot_apply(st: &Shared) -> Result<(), (StatusCode, String)> {
+/// Hot apply core: compose a fresh generation from the current profile and
+/// swap it in (the busy guard is held by the caller). Only compose can fail.
+fn compose_and_swap(st: &Shared) -> Result<(), String> {
+    let pj = {
+        let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+        profile_to_json(&gen.profile)
+    };
+    let gen = prepare_gen(pj, None)?;
+    let _ = swap_gen(st, gen);
+    Ok(())
+}
+
+/// P0-4 transactional tail shared by upsert / delete / default:
+///   1. take the busy guard and check it FIRST — a turn in progress is a 409
+///      BEFORE anything touches the registry file (no "409 but already
+///      written to disk");
+///   2. persist the mutated file (atomic tmp+rename);
+///   3. compose + swap the generation (re-assembly reads the new file);
+///   4. on compose failure roll the file back to its previous content — the
+///      Gen was never swapped, so 409/500 leave disk, Gen and the user
+///      override slot all unchanged (prepare->persist->swap without side
+///      effects on failure).
+async fn persist_and_hot_apply(
+    st: &Shared,
+    path: &Path,
+    new_file: &PromptFile,
+    old_file: &PromptFile,
+) -> Result<(), (StatusCode, String)> {
     let guard = st.busy.lock().await;
     if guard.is_some() {
         return Err((
@@ -670,19 +687,29 @@ async fn hot_apply(st: &Shared) -> Result<(), (StatusCode, String)> {
             "turn in progress; prompt applies between turns".to_string(),
         ));
     }
-    let pj = {
-        let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
-        profile_to_json(&gen.profile)
-    };
-    let gen = prepare_gen(pj, None)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("compose failed: {e}")))?;
-    let _ = swap_gen(st, gen);
+    if let Err(e) = persist_prompt_file(path, new_file) {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, e));
+    }
+    match compose_and_swap(st) {
+        Ok(()) => {}
+        Err(e) => {
+            if let Err(rb) = persist_prompt_file(path, old_file) {
+                eprintln!(
+                    "[celestea-studio] prompt rollback onto '{}' failed after compose error ({e}): {rb}",
+                    path.display()
+                );
+            }
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("compose failed: {e}")));
+        }
+    }
     drop(guard);
     Ok(())
 }
 
-/// GET /api/prompts?workspace=<name> — merged view (sections with source
-/// scope, prompts, default_prompt, active_prompt).
+/// GET /api/prompts — no workspace param = the GLOBAL merged view
+/// (builtin <- global sections annotated with their source scope, global
+/// prompts, default_prompt, active_prompt); ?workspace=<name> adds that
+/// workspace's sections/prompts and shadow annotations.
 pub(crate) async fn get_prompts(
     State(st): State<Shared>,
     Query(q): Query<PromptsQuery>,
@@ -695,7 +722,8 @@ pub(crate) async fn get_prompts(
 
 #[derive(Deserialize)]
 pub(crate) struct PromptUpsertReq {
-    /// None -> the active workspace; Some("") -> the global registry.
+    /// P0-4: None -> the GLOBAL registry (default scope); Some(name) ->
+    /// that workspace; Some("") -> global (legacy compat).
     #[serde(default)]
     pub(crate) workspace: Option<String>,
     pub(crate) id: String,
@@ -707,8 +735,10 @@ pub(crate) struct PromptUpsertReq {
 }
 
 /// POST /api/prompts {"workspace"?,"id","name","section_overrides","is_default"?}
-/// — upsert a prompt into the scope file. Template validation: variable
-/// whitelist + 8KB cap, bad variables -> 400.
+/// — upsert a prompt into the scope file (no workspace -> the GLOBAL
+/// registry). Template validation: variable whitelist + 8KB cap, bad
+/// variables -> 400. Success persists + hot-applies the generation
+/// ({"hot_applied":true}); a turn in progress is a 409 before any write.
 pub(crate) async fn post_prompts_upsert(
     State(st): State<Shared>,
     Json(req): Json<PromptUpsertReq>,
@@ -725,11 +755,13 @@ pub(crate) async fn post_prompts_upsert(
             );
         }
     }
-    let (_scope_name, path) = match resolve_scope(&st, req.workspace.as_deref()) {
+    let (scope_name, path) = match resolve_scope(&st, req.workspace.as_deref()) {
         Ok(v) => v,
         Err((code, e)) => return err_response(code, e),
     };
+    let scope = if scope_name.is_some() { "workspace" } else { "global" };
     let mut file = load_prompt_file(&path);
+    let file_before = file.clone();
     let pos = file.prompts.iter().position(|p| p.id == id);
     let def = PromptDef {
         id: id.clone(),
@@ -763,10 +795,14 @@ pub(crate) async fn post_prompts_upsert(
         }
         None => {}
     }
-    if let Err(e) = persist_prompt_file(&path, &file) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
+    if let Err((code, e)) = persist_and_hot_apply(&st, &path, &file, &file_before).await {
+        return err_response(code, e);
     }
-    (StatusCode::OK, Json(json!({"ok": true, "id": id}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "id": id, "scope": scope, "hot_applied": true})),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -782,26 +818,28 @@ pub(crate) async fn post_prompts_delete(
     AxPath(id): AxPath<String>,
     Json(req): Json<PromptScopeReq>,
 ) -> Response {
-    let (_scope_name, path) = match resolve_scope(&st, req.workspace.as_deref()) {
+    let (scope_name, path) = match resolve_scope(&st, req.workspace.as_deref()) {
         Ok(v) => v,
         Err((code, e)) => return err_response(code, e),
     };
+    let scope = if scope_name.is_some() { "workspace" } else { "global" };
     let mut file = load_prompt_file(&path);
-    let before = file.prompts.len();
+    let file_before = file.clone();
     file.prompts.retain(|p| p.id != id);
-    if file.prompts.len() == before {
+    if file.prompts.len() == file_before.prompts.len() {
         return err_response(StatusCode::NOT_FOUND, format!("unknown prompt '{id}'"));
     }
     if file.default_prompt.as_deref() == Some(id.as_str()) {
         file.default_prompt = None;
     }
-    if let Err(e) = persist_prompt_file(&path, &file) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
-    }
-    if let Err((code, e)) = hot_apply(&st).await {
+    if let Err((code, e)) = persist_and_hot_apply(&st, &path, &file, &file_before).await {
         return err_response(code, e);
     }
-    (StatusCode::OK, Json(json!({"ok": true}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "scope": scope, "hot_applied": true})),
+    )
+        .into_response()
 }
 
 /// POST /api/prompts/{id}/default {"workspace"?} — mark the prompt default in
@@ -811,27 +849,26 @@ pub(crate) async fn post_prompts_default(
     AxPath(id): AxPath<String>,
     Json(req): Json<PromptScopeReq>,
 ) -> Response {
-    let (_scope_name, path) = match resolve_scope(&st, req.workspace.as_deref()) {
+    let (scope_name, path) = match resolve_scope(&st, req.workspace.as_deref()) {
         Ok(v) => v,
         Err((code, e)) => return err_response(code, e),
     };
+    let scope = if scope_name.is_some() { "workspace" } else { "global" };
     let mut file = load_prompt_file(&path);
     if !file.prompts.iter().any(|p| p.id == id) {
         return err_response(StatusCode::NOT_FOUND, format!("unknown prompt '{id}'"));
     }
+    let file_before = file.clone();
     file.default_prompt = Some(id.clone());
     for p in &mut file.prompts {
         p.is_default = p.id == id;
     }
-    if let Err(e) = persist_prompt_file(&path, &file) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, e);
-    }
-    if let Err((code, e)) = hot_apply(&st).await {
+    if let Err((code, e)) = persist_and_hot_apply(&st, &path, &file, &file_before).await {
         return err_response(code, e);
     }
     (
         StatusCode::OK,
-        Json(json!({"ok": true, "default_prompt": id})),
+        Json(json!({"ok": true, "default_prompt": id, "scope": scope, "hot_applied": true})),
     )
         .into_response()
 }
@@ -842,6 +879,9 @@ pub(crate) async fn post_prompts_default(
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, RwLock};
+    use tokio::sync::{broadcast, watch, Mutex};
 
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1146,6 +1186,418 @@ mod tests {
 
         std::env::remove_var("CELESTEA_PROMPTS_FILE");
         std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::remove_var("W245_TEST_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- P0-4: scope contract + transactional hot apply ------------------------
+
+    /// Minimal handler-level AppState over a scratch layout: a real composed
+    /// Gen, an empty providers store and an in-memory workspace registry.
+    /// `busy` pre-claims the single-turn slot (409 scenarios).
+    fn handler_state(dir: &Path, busy: bool) -> Shared {
+        set_user_override(None);
+        let gen = crate::prepare_gen(profile_to_json(&profile("deepseek-v4-flash-0731")), None)
+            .expect("compose test gen");
+        let busy_slot = if busy {
+            let (tx, _rx) = watch::channel(false);
+            Some(tx)
+        } else {
+            None
+        };
+        Arc::new(crate::AppState {
+            gen: RwLock::new(gen),
+            bcast: broadcast::channel(512).0,
+            busy: Arc::new(Mutex::new(busy_slot)),
+            next_turn: Arc::new(AtomicU64::new(1)),
+            seq: Arc::new(AtomicU64::new(0)),
+            status: crate::StatusTracker::new(),
+            providers: Arc::new(
+                crate::providers::ProvidersStore::open(dir.join("providers.json"))
+                    .expect("empty providers store"),
+            ),
+            workspaces: Arc::new(crate::workspaces::WorkspaceRegistry::new(
+                dir.join("workspaces.json"),
+            )),
+            gen_epoch: watch::channel(0).0,
+        })
+    }
+
+    async fn response_parts(res: Response) -> (StatusCode, Value) {
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 16 * 1024 * 1024)
+            .await
+            .expect("response body");
+        let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, v)
+    }
+
+    /// P0-4 #1: POST /api/prompts WITHOUT workspace lands in the GLOBAL
+    /// registry (never the active/any workspace) and hot-applies the Gen.
+    #[tokio::test]
+    async fn no_workspace_upsert_lands_global_and_hot_applies() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("p0-global-upsert");
+        std::fs::create_dir_all(&dir).unwrap();
+        let global_path = dir.join("prompts.json");
+        let ws_path = dir.join("ws").join(WORKSPACE_PROMPTS_FILE);
+        std::env::set_var("CELESTEA_PROMPTS_FILE", &global_path);
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W245_TEST_KEY", "test-key");
+        let st = handler_state(&dir, false);
+        // a registered workspace that must NOT receive the global write
+        std::fs::create_dir_all(dir.join("ws")).unwrap();
+        let ws_name = st
+            .workspaces
+            .register(&dir.join("ws").display().to_string())
+            .unwrap();
+        assert_eq!(ws_name, "ws");
+
+        let res = post_prompts_upsert(
+            State(st.clone()),
+            Json(PromptUpsertReq {
+                workspace: None, // the contract: absent = global
+                id: "gp1".to_string(),
+                name: "GP1".to_string(),
+                section_overrides: [(
+                    "delegation".to_string(),
+                    "HOT APPLIED {{model}}".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+                is_default: Some(true),
+            }),
+        )
+        .await;
+        let (status, body) = response_parts(res).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["ok"], json!(true));
+        assert_eq!(body["scope"], json!("global"));
+        assert_eq!(body["hot_applied"], json!(true));
+
+        let file = load_prompt_file(&global_path);
+        assert!(file.prompts.iter().any(|p| p.id == "gp1"), "global registry holds gp1");
+        assert_eq!(file.default_prompt.as_deref(), Some("gp1"));
+        assert!(!ws_path.exists(), "workspace registry must not be written (scope isolation)");
+
+        // hot apply: the swapped generation carries the new override + {{model}}
+        let sp = {
+            let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+            gen.profile.system_prompt.clone()
+        };
+        assert!(sp.contains("HOT APPLIED deepseek-v4-flash-0731"), "hot-applied: {sp}");
+        assert!(!sp.contains("report_to=cli-main"), "delegation overridden: {sp}");
+
+        std::env::remove_var("CELESTEA_PROMPTS_FILE");
+        std::env::remove_var("W245_TEST_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P0-4 #2: with a turn in progress every mutation is a 409 BEFORE any
+    /// write — the registry file and the current Gen stay identical (the old
+    /// "409 but already written to disk" defect).
+    #[tokio::test]
+    async fn busy_prompt_mutations_409_without_persisting_or_swapping() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("p0-busy-409");
+        std::fs::create_dir_all(&dir).unwrap();
+        let global_path = dir.join("prompts.json");
+        prompt_file(
+            &global_path,
+            &PromptFile {
+                sections: vec![],
+                prompts: vec![ws_prompt("gp1", &[("delegation", "OLD {{model}}")])],
+                default_prompt: Some("gp1".to_string()),
+            },
+        );
+        std::env::set_var("CELESTEA_PROMPTS_FILE", &global_path);
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W245_TEST_KEY", "test-key");
+        let st = handler_state(&dir, true);
+        let before_file = load_prompt_file(&global_path);
+        let before_sp = {
+            let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+            gen.profile.system_prompt.clone()
+        };
+        assert!(before_sp.contains("OLD deepseek-v4-flash-0731"));
+
+        // upsert -> 409, nothing written, nothing swapped
+        let res = post_prompts_upsert(
+            State(st.clone()),
+            Json(PromptUpsertReq {
+                workspace: None,
+                id: "gp1".to_string(),
+                name: "renamed".to_string(),
+                section_overrides: [(
+                    "delegation".to_string(),
+                    "NEW {{model}}".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+                is_default: None,
+            }),
+        )
+        .await;
+        let (status, body) = response_parts(res).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(load_prompt_file(&global_path), before_file, "409 upsert must not write");
+        assert_eq!(
+            st.gen.read().unwrap_or_else(|p| p.into_inner()).profile.system_prompt,
+            before_sp,
+            "409 upsert must not swap"
+        );
+
+        // delete -> 409, nothing written
+        let res = post_prompts_delete(
+            State(st.clone()),
+            AxPath("gp1".to_string()),
+            Json(PromptScopeReq { workspace: None }),
+        )
+        .await;
+        let (status, _) = response_parts(res).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(load_prompt_file(&global_path), before_file, "409 delete must not write");
+
+        // default -> 409, nothing written
+        let res = post_prompts_default(
+            State(st.clone()),
+            AxPath("gp1".to_string()),
+            Json(PromptScopeReq { workspace: None }),
+        )
+        .await;
+        let (status, _) = response_parts(res).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(load_prompt_file(&global_path), before_file, "409 default must not write");
+        assert_eq!(
+            st.gen.read().unwrap_or_else(|p| p.into_inner()).profile.system_prompt,
+            before_sp,
+            "Gen unchanged across 409s"
+        );
+
+        std::env::remove_var("CELESTEA_PROMPTS_FILE");
+        std::env::remove_var("W245_TEST_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P0-4 #3: delete and default persist + hot-apply the generation
+    /// immediately (the old "only /default swaps, upsert/delete do nothing"
+    /// gap).
+    #[tokio::test]
+    async fn delete_and_default_persist_then_hot_apply() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("p0-default-delete");
+        std::fs::create_dir_all(&dir).unwrap();
+        let global_path = dir.join("prompts.json");
+        prompt_file(
+            &global_path,
+            &PromptFile {
+                sections: vec![],
+                prompts: vec![
+                    ws_prompt("gp1", &[("delegation", "ONE {{model}}")]),
+                    ws_prompt("gp2", &[("delegation", "TWO {{model}}")]),
+                ],
+                default_prompt: Some("gp1".to_string()),
+            },
+        );
+        std::env::set_var("CELESTEA_PROMPTS_FILE", &global_path);
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W245_TEST_KEY", "test-key");
+        let st = handler_state(&dir, false);
+        let sp = st.gen.read().unwrap_or_else(|p| p.into_inner()).profile.system_prompt.clone();
+        assert!(sp.contains("ONE deepseek-v4-flash-0731"), "{sp}");
+
+        // set default gp2 -> hot-applied immediately
+        let res = post_prompts_default(
+            State(st.clone()),
+            AxPath("gp2".to_string()),
+            Json(PromptScopeReq { workspace: None }),
+        )
+        .await;
+        let (status, body) = response_parts(res).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["hot_applied"], json!(true));
+        let file = load_prompt_file(&global_path);
+        assert_eq!(file.default_prompt.as_deref(), Some("gp2"));
+        assert!(file.prompts.iter().find(|p| p.id == "gp2").unwrap().is_default);
+        let sp = st.gen.read().unwrap_or_else(|p| p.into_inner()).profile.system_prompt.clone();
+        assert!(sp.contains("TWO deepseek-v4-flash-0731"), "default hot-applied: {sp}");
+        assert!(!sp.contains("ONE deepseek"));
+
+        // delete gp2 (the default) -> base delegation restored, hot-applied
+        let res = post_prompts_delete(
+            State(st.clone()),
+            AxPath("gp2".to_string()),
+            Json(PromptScopeReq { workspace: None }),
+        )
+        .await;
+        let (status, body) = response_parts(res).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["hot_applied"], json!(true));
+        let file = load_prompt_file(&global_path);
+        assert!(!file.prompts.iter().any(|p| p.id == "gp2"));
+        assert_eq!(file.default_prompt, None);
+        let sp = st.gen.read().unwrap_or_else(|p| p.into_inner()).profile.system_prompt.clone();
+        assert!(sp.contains("report_to=cli-main"), "delete hot-applied: {sp}");
+        assert!(!sp.contains("TWO deepseek"));
+
+        std::env::remove_var("CELESTEA_PROMPTS_FILE");
+        std::env::remove_var("W245_TEST_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P0-4 #4: GET /api/prompts without a workspace returns the GLOBAL
+    /// merged view (scope "global", no workspace shadowing); ?workspace=<name>
+    /// returns the merged workspace view (scope "workspace", shadow/source
+    /// annotations); the empty string stays global-compatible.
+    #[tokio::test]
+    async fn get_prompts_defaults_to_global_merged_view() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("p0-get-scope");
+        std::fs::create_dir_all(&dir).unwrap();
+        let global_path = dir.join("prompts.json");
+        prompt_file(
+            &global_path,
+            &PromptFile {
+                sections: vec![section_def("delegation", "GLOBAL {{model}}", ORDER_DELEGATION)],
+                prompts: vec![ws_prompt("gp1", &[("delegation", "GP {{model}}")])],
+                default_prompt: Some("gp1".to_string()),
+            },
+        );
+        std::env::set_var("CELESTEA_PROMPTS_FILE", &global_path);
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W245_TEST_KEY", "test-key");
+        let st = handler_state(&dir, false);
+        std::fs::create_dir_all(dir.join("ws")).unwrap();
+        let ws_name = st
+            .workspaces
+            .register(&dir.join("ws").display().to_string())
+            .unwrap();
+        assert_eq!(ws_name, "ws");
+
+        // no param -> global view
+        let res = get_prompts(State(st.clone()), Query(PromptsQuery { workspace: None })).await;
+        let (status, body) = response_parts(res).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["scope"], json!("global"));
+        assert_eq!(body["workspace"], Value::Null);
+        assert_eq!(body["active_prompt"], json!("gp1"));
+        let prompts = body["prompts"].as_array().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0]["scope"], json!("global"));
+        assert_eq!(prompts[0]["shadowed"], json!(false));
+        let sections = body["sections"].as_array().unwrap();
+        assert!(sections.iter().any(|s| s["id"] == "delegation" && s["source"] == "global"));
+        assert!(sections.iter().all(|s| s["source"] != "workspace"));
+
+        // empty string still means global (legacy compat)
+        let res = get_prompts(
+            State(st.clone()),
+            Query(PromptsQuery { workspace: Some("".to_string()) }),
+        )
+        .await;
+        let (status, body) = response_parts(res).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["scope"], json!("global"));
+
+        // named workspace -> merged view with shadow/source annotations
+        prompt_file(
+            &dir.join("ws").join(WORKSPACE_PROMPTS_FILE),
+            &PromptFile {
+                sections: vec![section_def("delegation", "WS {{model}}", ORDER_DELEGATION)],
+                prompts: vec![ws_prompt("gp1", &[("delegation", "WSGP {{model}}")])],
+                default_prompt: None,
+            },
+        );
+        let res = get_prompts(
+            State(st.clone()),
+            Query(PromptsQuery { workspace: Some("ws".to_string()) }),
+        )
+        .await;
+        let (status, body) = response_parts(res).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["scope"], json!("workspace"));
+        assert_eq!(body["workspace"], json!("ws"));
+        let sections = body["sections"].as_array().unwrap();
+        assert!(sections.iter().any(|s| s["id"] == "delegation" && s["source"] == "workspace"));
+        let prompts = body["prompts"].as_array().unwrap();
+        assert_eq!(prompts.len(), 2, "global + workspace prompts merged");
+        let (g, w) = if prompts[0]["scope"] == "global" {
+            (&prompts[0], &prompts[1])
+        } else {
+            (&prompts[1], &prompts[0])
+        };
+        assert_eq!(g["shadowed"], json!(true), "workspace gp1 shadows global gp1");
+        assert_eq!(w["scope"], json!("workspace"));
+        // no session binding; ws default None -> global default
+        assert_eq!(body["active_prompt"], json!("gp1"));
+
+        std::env::remove_var("CELESTEA_PROMPTS_FILE");
+        std::env::remove_var("W245_TEST_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P0-4 #5: a compose failure after persist rolls the registry file back
+    /// — a 500 leaves disk, Gen and override all unchanged (two-phase
+    /// rollback; W246 ruling A).
+    #[tokio::test]
+    async fn compose_failure_rolls_back_the_registry_write() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("p0-rollback");
+        std::fs::create_dir_all(&dir).unwrap();
+        let global_path = dir.join("prompts.json");
+        prompt_file(
+            &global_path,
+            &PromptFile {
+                sections: vec![],
+                prompts: vec![ws_prompt("gp1", &[("delegation", "OLD {{model}}")])],
+                default_prompt: Some("gp1".to_string()),
+            },
+        );
+        std::env::set_var("CELESTEA_PROMPTS_FILE", &global_path);
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W245_TEST_KEY", "test-key");
+        let st = handler_state(&dir, false);
+        let before_file = load_prompt_file(&global_path);
+        let before_sp = st
+            .gen
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .profile
+            .system_prompt
+            .clone();
+        // break compose: the engine resolves the key from env[api_key_env]
+        std::env::remove_var("W245_TEST_KEY");
+
+        let res = post_prompts_upsert(
+            State(st.clone()),
+            Json(PromptUpsertReq {
+                workspace: None,
+                id: "gp1".to_string(),
+                name: "renamed".to_string(),
+                section_overrides: [(
+                    "delegation".to_string(),
+                    "NEW {{model}}".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+                is_default: None,
+            }),
+        )
+        .await;
+        let (status, body) = response_parts(res).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        assert!(
+            body["error"].as_str().unwrap_or("").contains("compose failed"),
+            "{body}"
+        );
+        assert_eq!(load_prompt_file(&global_path), before_file, "registry rolled back");
+        assert_eq!(
+            st.gen.read().unwrap_or_else(|p| p.into_inner()).profile.system_prompt,
+            before_sp,
+            "Gen unchanged after rollback"
+        );
+
+        std::env::remove_var("CELESTEA_PROMPTS_FILE");
         std::env::remove_var("W245_TEST_KEY");
         let _ = std::fs::remove_dir_all(&dir);
     }

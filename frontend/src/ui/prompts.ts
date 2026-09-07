@@ -80,8 +80,11 @@ function renderList(): void {
     def.disabled = !!p.is_default;
     def.addEventListener('click', () => {
       void api
-        .setDefaultPrompt(p.id, scope === 'global' ? null : curWs || null)
-        .then(() => void loadPrompts())
+        .setDefaultPrompt(p.id, scope === 'global' ? undefined : curWs || undefined)
+        .then(() => {
+          note('已设为默认并热应用：' + (p.name || p.id));
+          void loadPrompts();
+        })
         .catch((err: unknown) => note('设为默认失败：' + fmtErr(err)));
     });
     const del = el('button', 'btn-mini danger', '删除') as HTMLButtonElement;
@@ -95,8 +98,11 @@ function renderList(): void {
       }).then((ok) => {
         if (!ok) return;
         void api
-          .deletePrompt(p.id, scope === 'global' ? null : curWs || null)
-          .then(() => void loadPrompts())
+          .deletePrompt(p.id, scope === 'global' ? undefined : curWs || undefined)
+          .then(() => {
+            note('已删除并热应用：' + (p.name || p.id));
+            void loadPrompts();
+          })
           .catch((err: unknown) => note('删除失败：' + fmtErr(err)));
       });
     });
@@ -157,7 +163,12 @@ function openEditor(existing: PromptInfo | null): void {
   if (!sections.length) {
     secWrap.appendChild(el('div', 'side-note', '（后端未返回段定义，覆盖编辑暂不可用；可直接保存名称级提示词）'));
   }
-  // 覆盖编辑器：未覆盖段 = 继承；textarea 非空 = 覆盖
+  // 覆盖编辑器：未覆盖段 = 继承；textarea 非空 = 覆盖。
+  // P0-4 回填：编辑已存在提示词时，必须把该 prompt 的 section_overrides
+  // 回填进对应段（取消「继承」并填入覆盖文本），保存时未改动的回填项
+  // 原样提交 —— 否则保存会把旧覆盖全部清掉。
+  // 语义（W246 裁定）：「继承」勾选 = 删除该段 override、恢复上层模板；
+  // 不勾选 = 保留/新增覆盖；不勾选且文本为空 = 校验错误（不提交）。
   const rows: { sec: PromptSection; ta: HTMLTextAreaElement; inherit: HTMLInputElement }[] = [];
   for (const sec of sections) {
     const row = el('div', 'prompt-sec-row');
@@ -176,6 +187,11 @@ function openEditor(existing: PromptInfo | null): void {
     ta.rows = 3;
     ta.disabled = true;
     ta.placeholder = '（继承自内置模板）';
+    const ov = existing?.section_overrides?.[sec.id];
+    if (ov !== undefined) {
+      inherit.checked = false;
+      ta.value = ov;
+    }
     row.appendChild(ta);
     secWrap.appendChild(row);
     rows.push({ sec, ta, inherit });
@@ -203,9 +219,23 @@ function openEditor(existing: PromptInfo | null): void {
       nameInput.focus();
       return;
     }
+    // 「继承」勾选 = 删除该段 override（提交时省略该 key）；不勾选 = 保留
+    // 或新增覆盖。不勾选但文本为空是显式校验错误 —— 空文本与「清除覆盖」
+    // 不允许隐式混淆。
     const overrides: Record<string, string> = {};
+    if (!rows.length && existing?.section_overrides) {
+      // 降级态（后端未返回段定义）：保留既有覆盖，保存不得误清空。
+      Object.assign(overrides, existing.section_overrides);
+    }
     for (const r of rows) {
-      if (!r.inherit.checked && r.ta.value.trim() !== '') overrides[r.sec.id] = r.ta.value;
+      if (r.inherit.checked) continue;
+      if (r.ta.value.trim() === '') {
+        status.className = 'ws-fs-status err';
+        status.textContent = '段「' + (r.sec.name || r.sec.id) + '」未填覆盖文本：请填写，或勾选「继承」以恢复上层模板';
+        r.ta.focus();
+        return;
+      }
+      overrides[r.sec.id] = r.ta.value;
     }
     save.disabled = true;
     save.textContent = '保存中…';
@@ -214,7 +244,8 @@ function openEditor(existing: PromptInfo | null): void {
         id: existing?.id ?? 'p' + Date.now().toString(36),
         name,
         section_overrides: overrides,
-        workspace: scope === 'global' ? null : curWs || null,
+        // P0-4：全局 scope 省略 workspace；工作区 scope 传真实名称。
+        workspace: scope === 'workspace' ? curWs || undefined : undefined,
       })
       .then((r) => {
         if (r.ok === false) {
@@ -225,6 +256,9 @@ function openEditor(existing: PromptInfo | null): void {
           return;
         }
         close();
+        // persist+prepare+swap 全部成功后才会走到这里（409/500 都会抛错），
+        // 所以此时提示「已热应用」是真实语义。
+        note('已保存并热应用：' + name);
         void loadPrompts();
       })
       .catch((err: unknown) => {
@@ -244,17 +278,23 @@ function openEditor(existing: PromptInfo | null): void {
 
 // ---- 加载主流程 ---------------------------------------------------------------------
 
+/** 竞态守卫序号：scope/工作区切换或重复加载时，晚到的旧响应一律丢弃。 */
+let loadSeq = 0;
+
 export async function loadPrompts(): Promise<void> {
+  const seq = ++loadSeq;
   const off = document.createElement('div');
   let resp;
   try {
     resp = await api.prompts(scope === 'workspace' ? curWs || undefined : undefined);
   } catch (err) {
+    if (seq !== loadSeq) return; // 旧 scope 的失败结果，丢弃
     off.appendChild(el('div', 'side-note err', '后端未开放提示词注册'));
     off.appendChild(el('div', 'side-note', fmtErr(err)));
     boxEl.replaceChildren(...off.childNodes);
     return;
   }
+  if (seq !== loadSeq) return; // 旧 scope 的结果不得覆盖新状态
   sections = resp.sections ?? [];
   prompts = resp.prompts ?? [];
   activePrompt = resp.active_prompt ?? null;
