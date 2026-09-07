@@ -67,14 +67,29 @@
 .msg-caption .who { color: var(--c-text-2); }
 .msg.user .msg-caption { flex-direction: row-reverse; }
 
+/* W243 任务2：气泡按文字自适应宽度（不再铺满）；
+   用户右对齐紧凑（max-width 72% + 反色底），AI 左对齐（72%）。 */
 .bubble {
-  width: 100%;
+  width: fit-content;
+  max-width: 72%;
   border: 1px solid var(--c-border-subtle);
   border-radius: 10px;
   padding: 10px 14px;
   background: var(--c-surface);
 }
-.msg.user .bubble { background: var(--c-surface-raised); }
+.msg.user .bubble {
+  margin-left: auto; /* 右对齐 */
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+  color: var(--c-accent-fg);
+}
+.msg.user .bubble .content { color: inherit; }
+.msg.user .bubble a { color: var(--c-accent-fg); text-decoration: underline; }
+/* 工具卡 / 信息块：仍按事件流在左侧，略窄于全宽 */
+.msg.tool .bubble, .msg.info .bubble, .msg.think-seg .bubble {
+  max-width: 86%;
+}
+.msg.tool .bubble { background: var(--c-code-bg); }
 .msg.assistant .bubble.streaming { border-color: var(--c-border-strong); }
 .msg.assistant .bubble.complete { border-color: var(--c-border-subtle); }
 

@@ -91,11 +91,27 @@ export const api = {
   workspaces: () => requestJson<WorkspacesResp>('/api/workspaces'),
   createWorkspace: (name: string, path?: string) =>
     postJson<ClearResp>('/api/workspaces', path ? { name, path } : { name }),
+  /** 重命名工作区（W243）：POST /api/workspaces/{name}/rename {"new_name"}。 */
+  renameWorkspace: (name: string, newName: string) =>
+    postJson<ClearResp>('/api/workspaces/' + encodeURIComponent(name) + '/rename', {
+      new_name: newName,
+    }),
   deleteWorkspace: (name: string) =>
     postJson<ClearResp>('/api/workspaces/' + encodeURIComponent(name) + '/delete', {}),
   batchDeleteWorkspaces: (names: string[]) =>
     postJson<ClearResp>('/api/workspaces/batch-delete', { names } as BatchNamesReq),
   createSession: (req: SessionCreateReq) => postJson<ClearResp>('/api/sessions', req),
+  /** 重命名会话（W243）：POST /api/sessions/{id}/rename {"new_title"}。 */
+  renameSession: (id: string, newTitle: string) =>
+    postJson<ClearResp>('/api/sessions/' + encodeURIComponent(id) + '/rename', {
+      new_title: newTitle,
+    }),
+  /** 分支会话（W243）：POST /api/sessions/{id}/branch {"title"?}。 */
+  branchSession: (id: string, title?: string) =>
+    postJson<ClearResp & { id?: string; branch?: string }>(
+      '/api/sessions/' + encodeURIComponent(id) + '/branch',
+      title ? { title } : {},
+    ),
   archiveSession: (id: string) =>
     postJson<ClearResp>('/api/sessions/' + encodeURIComponent(id) + '/archive', {}),
   unarchiveSession: (id: string) =>

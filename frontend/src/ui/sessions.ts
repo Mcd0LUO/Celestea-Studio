@@ -1,15 +1,14 @@
 // ============================================================================
-// ui/sessions.ts — 左侧「工作区/会话」面板（W237 契约，端点缺失优雅降级）：
-//   顶部工作区横向胶囊条（可横向滚动；胶囊「⋯」菜单就地锚定右下）：
-//     删除工作区（仅注销）/ 新建会话 / 清空（活跃会话在本工作区时可用）/
-//     批量操作（复选批量归档/删除）
-//   下方 = 当前工作区的会话纵向列表；会话行「⋯」菜单：激活 / 归档 / 删除。
-//   点击会话行 = 激活（POST /api/sessions/{id}/activate，409=轮次中提示）→
-//   成功切换聊天区为该会话（restore.switchToSession 拉取历史渲染）。
-//   活跃会话高亮（GET /api/sessions 的 active 字段 / GET /api/workspaces 的
-//   active_session）。无「主会话/cli-main 置顶」特设逻辑。
-//   新建工作区 = 文件管理器弹窗（GET /api/fs/browse 懒加载，面包屑/目录树/
-//   地址栏；接口缺失降级为手输路径）。
+// ui/sessions.ts — 左侧工作区/会话树（W243 重构）：
+//   结构自上而下：新会话按钮 → 工具行（搜索 / 排序 / 新建工作区）→ 分割线
+//   → 会话树（工作区节点可折叠：文件夹图标+名称+「⋯」；会话叶子：文件图标
+//    +标题+「⋯」）→ 引擎 Worker 组（W239，未就绪隐藏）。
+//   工作区「⋯」菜单（锚定右下）：重命名 / 删除（确认后注销）/ 批量删除会话
+//   （进入勾选模式：叶子左侧勾选框 + 底部操作条，走 batch-delete）。
+//   会话「⋯」菜单：重命名 / 删除 / 归档 / 分支（成功后刷新并高亮新分支）。
+//   搜索过滤工作区与会话；排序切换「最近活跃（modified）/ 名称」。
+//   点击会话行 = 激活切换聊天区（第 4 轮契约）；活跃会话高亮。
+//   图标：内联 SVG（不引图标库）。端点缺失（W243 并行开发）优雅降级。
 // ============================================================================
 import { api, ApiError } from '../api';
 import { el, need } from '../utils/dom';
@@ -27,8 +26,9 @@ const selected = new Set<string>();
 let wsList: WorkspaceInfo[] = [];
 let sessions: SessionInfo[] = [];
 let activeSession: string | null = null;
-let selectedWs: string | null = null;
-let workerTimer: number | null = null; // 引擎 Worker 组轮询
+let searchQuery = '';
+let sortMode: 'active' | 'name' = 'active';
+let workerTimer: number | null = null;
 
 const WORKER_POLL_MS = 5000;
 
@@ -42,27 +42,52 @@ function wsNameOf(s: SessionInfo): string {
   return ws === '' ? 'root' : ws;
 }
 
-/** 活跃会话所在工作区（优先当前选中的）。 */
-function pickSelectedWs(): string | null {
-  if (selectedWs !== null && wsList.some((w) => w.name === selectedWs)) return selectedWs;
-  const act = sessions.find((s) => s.id === activeSession);
-  if (act) return wsNameOf(act);
-  if (wsList.length) return wsList[0]!.name;
-  return null;
+function truncateName(id: string): string {
+  const i = id.lastIndexOf('/');
+  return i >= 0 ? id.slice(i + 1) : id;
 }
 
-function currentWsSessions(): SessionInfo[] {
-  return sessions.filter((s) => !s.archived && wsNameOf(s) === selectedWs);
+// ---- 内联 SVG 图标 -----------------------------------------------------------------
+
+type IconKind = 'folder' | 'file' | 'search' | 'sort' | 'folder-plus' | 'plus';
+
+function svgIcon(kind: IconKind): SVGSVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('width', '13');
+  svg.setAttribute('height', '13');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.3');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  const p = document.createElementNS(ns, 'path');
+  switch (kind) {
+    case 'folder':
+      p.setAttribute('d', 'M1.5 3.5h4l1.5 2h7.5v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z');
+      break;
+    case 'file':
+      p.setAttribute('d', 'M3 1.5h6l4 4v9h-10zM9 1.5v4h4');
+      break;
+    case 'search':
+      p.setAttribute('d', 'M6.5 11.5a5 5 0 1 1 0-10 5 5 0 0 1 0 10zM14.5 14.5l-3.8-3.8');
+      break;
+    case 'sort':
+      p.setAttribute('d', 'M2 4h12M5 8h7M8 12h4');
+      break;
+    case 'folder-plus':
+      p.setAttribute('d', 'M1.5 3.5h4l1.5 2h7.5v4M1.5 3.5v8a1 1 0 0 0 1 1h5.5M11 9v5M8.5 11.5h5');
+      break;
+    case 'plus':
+      p.setAttribute('d', 'M8 3v10M3 8h10');
+      break;
+  }
+  svg.appendChild(p);
+  return svg;
 }
 
-/** 引擎 Worker 条目（W239：kind="worker"、workspace="engine"、id 形如 "worker:<sid>"）。 */
-function workerSessions(list: SessionInfo[]): SessionInfo[] {
-  return list.filter(
-    (s) => s.kind === 'worker' || (s.id ?? '').startsWith('worker:'),
-  );
-}
-
-// ---- 批量模式 ----------------------------------------------------------------------
+// ---- 批量勾选模式 -------------------------------------------------------------------
 
 function exitBatch(container: HTMLElement): void {
   batchMode = false;
@@ -76,34 +101,25 @@ function refreshChecks(container: HTMLElement): void {
   }
   const bar = container.querySelector<HTMLElement>('.sess-batchbar');
   if (!bar) return;
-  bar.querySelector('.sess-batchbar-count')!.textContent = '已选 ' + selected.size;
+  bar.querySelector('.sess-batchbar-count')!.textContent = '已选 ' + selected.size + ' 个会话';
   bar.classList.toggle('active', selected.size > 0);
 }
 
-async function batchAction(container: HTMLElement, action: 'archive' | 'delete'): Promise<void> {
+async function batchDelete(container: HTMLElement): Promise<void> {
   const ids = Array.from(selected);
   if (!ids.length) return;
-  const ok = await confirmDialog(
-    action === 'delete'
-      ? {
-          title: '批量删除',
-          message: '将批量删除 ' + ids.length + ' 个会话。删除后可在回收目录恢复，确认？',
-          okLabel: '批量删除',
-          danger: true,
-        }
-      : {
-          title: '批量归档',
-          message: '确认归档 ' + ids.length + ' 个会话？',
-          okLabel: '批量归档',
-        },
-  );
+  const ok = await confirmDialog({
+    title: '批量删除',
+    message: '将批量删除 ' + ids.length + ' 个会话。删除后可在回收目录恢复，确认？',
+    okLabel: '删除',
+    danger: true,
+  });
   if (!ok) return;
   try {
-    if (action === 'archive') await api.batchArchiveSessions(ids);
-    else await api.batchDeleteSessions(ids);
+    await api.batchDeleteSessions(ids);
     exitBatch(container);
   } catch (err) {
-    note('批量' + (action === 'archive' ? '归档' : '删除') + '失败：' + (err instanceof Error ? err.message : String(err)));
+    note('批量删除失败：' + (err instanceof Error ? err.message : String(err)));
   }
 }
 
@@ -135,7 +151,6 @@ function openCtxMenu(container: HTMLElement, anchor: DOMRect, items: MenuItem[])
     m.appendChild(b);
   }
   container.appendChild(m);
-  // 就近弹出：锚定按钮右下，防溢出容器
   const x = Math.max(0, Math.min(anchor.right - cr.left - 8, container.clientWidth - 180));
   const y = Math.max(0, Math.min(anchor.bottom - cr.top + 2, container.clientHeight - 60));
   m.style.left = x + 'px';
@@ -146,7 +161,7 @@ function closeCtxMenu(): void {
   for (const n of document.querySelectorAll('.sess-menu')) n.remove();
 }
 
-// ---- 操作 --------------------------------------------------------------------------
+// ---- 会话 / 工作区操作 -----------------------------------------------------------------
 
 async function activateSession(container: HTMLElement, id: string): Promise<void> {
   if (id === activeSession) return;
@@ -159,23 +174,16 @@ async function activateSession(container: HTMLElement, id: string): Promise<void
     activeSession = r.active_session ?? id;
     S.selSession = activeSession;
     note('已切换到会话：' + activeSession);
-    switchToSession(activeSession); // 聊天区切换为该会话历史
+    switchToSession(activeSession);
     void loadTreeInto(container, null);
   } catch (err) {
-    if (err instanceof ApiError && err.status === 409) {
-      note('轮次进行中，请稍后重试');
-    } else {
-      note('激活失败：' + (err instanceof Error ? err.message : String(err)));
-    }
+    if (err instanceof ApiError && err.status === 409) note('轮次进行中，请稍后重试');
+    else note('激活失败：' + (err instanceof Error ? err.message : String(err)));
   }
 }
 
 async function archiveSession(container: HTMLElement, id: string): Promise<void> {
-  const ok = await confirmDialog({
-    title: '归档会话',
-    message: '确认归档会话「' + id + '」？',
-    okLabel: '归档',
-  });
+  const ok = await confirmDialog({ title: '归档会话', message: '确认归档会话「' + id + '」？', okLabel: '归档' });
   if (!ok) return;
   try {
     await api.archiveSession(id);
@@ -201,6 +209,37 @@ async function deleteSession(container: HTMLElement, id: string): Promise<void> 
   }
 }
 
+async function renameSession(container: HTMLElement, id: string, current: string): Promise<void> {
+  const name = window.prompt('重命名会话（新标题）', current);
+  if (name === null) return;
+  const t = name.trim();
+  if (t === '' || t === current) return;
+  try {
+    await api.renameSession(id, t);
+    void loadTreeInto(container, null);
+  } catch (err) {
+    note('重命名失败：' + (err instanceof Error ? err.message : String(err)));
+  }
+}
+
+async function branchSession(container: HTMLElement, id: string): Promise<void> {
+  const t = window.prompt('分支会话（新分支标题，可留空）', '');
+  if (t === null) return;
+  try {
+    const r = await api.branchSession(id, t.trim() === '' ? undefined : t.trim());
+    if (r.ok === false) {
+      note('分支失败：' + (r.error || '—'));
+      return;
+    }
+    const newId = r.id ?? r.branch;
+    if (newId) S.selSession = newId; // 高亮新分支
+    note('已创建分支' + (newId ? '：' + newId : ''));
+    void loadTreeInto(container, null);
+  } catch (err) {
+    note('分支失败：' + (err instanceof Error ? err.message : String(err)));
+  }
+}
+
 async function deleteWorkspace(container: HTMLElement, name: string): Promise<void> {
   const ok = await confirmDialog({
     title: '删除工作区「' + name + '」',
@@ -211,10 +250,23 @@ async function deleteWorkspace(container: HTMLElement, name: string): Promise<vo
   if (!ok) return;
   try {
     await api.deleteWorkspace(name);
-    note('工作区已注销：' + name);
+    note('工作区已删除：' + name);
     void loadTreeInto(container, null);
   } catch (err) {
-    note('注销失败：' + (err instanceof Error ? err.message : String(err)));
+    note('删除失败：' + (err instanceof Error ? err.message : String(err)));
+  }
+}
+
+async function renameWorkspace(container: HTMLElement, name: string): Promise<void> {
+  const n = window.prompt('重命名工作区', name);
+  if (n === null) return;
+  const t = n.trim();
+  if (t === '' || t === name) return;
+  try {
+    await api.renameWorkspace(name, t);
+    void loadTreeInto(container, null);
+  } catch (err) {
+    note('重命名失败：' + (err instanceof Error ? err.message : String(err)));
   }
 }
 
@@ -245,51 +297,77 @@ function clearActive(): void {
   });
 }
 
-// ---- 渲染：工作区胶囊条 + 会话列表 ----------------------------------------------------
+// ---- 渲染：工具行 + 树 ------------------------------------------------------------------
 
-function renderPill(container: HTMLElement, w: WorkspaceInfo): HTMLElement {
-  const pill = el('div', 'ws-pill' + (w.name === selectedWs ? ' active' : ''));
-  if (activeSession !== null) {
-    const act = sessions.find((s) => s.id === activeSession);
-    if (act && wsNameOf(act) === w.name) pill.classList.add('has-active');
-  }
-  pill.appendChild(el('span', 'ws-pill-name', w.name));
-  const cnt = sessions.filter((s) => !s.archived && wsNameOf(s) === w.name).length;
-  pill.appendChild(el('span', 'ws-pill-count', String(cnt)));
-  const kebab = el('button', 'sess-kebab', '⋯') as HTMLButtonElement;
-  kebab.type = 'button';
-  kebab.title = '工作区操作';
-  kebab.addEventListener('click', (e) => {
-    e.stopPropagation();
-    const act = sessions.find((s) => s.id === activeSession);
-    const inWs = activeSession !== null && act !== undefined && wsNameOf(act) === w.name;
-    openCtxMenu(container, kebab.getBoundingClientRect(), [
-      { label: '新建会话', onPick: () => newSession(w.name) },
-      {
-        label: '清空（活跃会话）',
-        disabled: !inWs,
-        onPick: () => {
-          if (inWs) clearActive();
-        },
-      },
-      { label: '批量操作会话', onPick: () => { batchMode = true; selected.clear(); void loadTreeInto(container, null); } },
-      { label: '删除工作区（仅注销）', danger: true, onPick: () => void deleteWorkspace(container, w.name) },
-    ]);
-  });
-  pill.appendChild(kebab);
-  pill.addEventListener('click', (e) => {
-    if (e.target === kebab) return;
-    selectedWs = w.name;
+function renderToolbar(container: HTMLElement): void {
+  // 新会话按钮（树顶部）
+  const nsBtn = el('button', 'btn btn-soft ws-newsess') as HTMLButtonElement;
+  nsBtn.type = 'button';
+  nsBtn.appendChild(svgIcon('plus'));
+  nsBtn.appendChild(el('span', null, '新会话'));
+  nsBtn.addEventListener('click', () => newSession());
+  container.appendChild(nsBtn);
+
+  // 工具行：搜索 / 排序 / 新建工作区
+  const row = el('div', 'ws-toolrow');
+  const searchBox = el('div', 'ws-search');
+  searchBox.appendChild(svgIcon('search'));
+  const input = el('input', 'ws-search-input') as HTMLInputElement;
+  input.placeholder = '搜索工作区/会话';
+  input.value = searchQuery;
+  input.addEventListener('input', () => {
+    searchQuery = input.value.trim().toLowerCase();
     void loadTreeInto(container, null);
   });
-  return pill;
+  searchBox.appendChild(input);
+  row.appendChild(searchBox);
+
+  const sortBtn = el('button', 'ws-toolbtn') as HTMLButtonElement;
+  sortBtn.type = 'button';
+  sortBtn.appendChild(svgIcon('sort'));
+  sortBtn.appendChild(el('span', 'ws-toolbtn-label', sortMode === 'active' ? '活跃' : '名称'));
+  sortBtn.title = '排序：' + (sortMode === 'active' ? '最近活跃（modified）' : '名称') + ' · 点击切换';
+  sortBtn.addEventListener('click', () => {
+    sortMode = sortMode === 'active' ? 'name' : 'active';
+    void loadTreeInto(container, null);
+  });
+  row.appendChild(sortBtn);
+
+  const wsBtn = el('button', 'ws-toolbtn') as HTMLButtonElement;
+  wsBtn.type = 'button';
+  wsBtn.title = '新建工作区';
+  wsBtn.appendChild(svgIcon('folder-plus'));
+  wsBtn.addEventListener('click', newWorkspace);
+  row.appendChild(wsBtn);
+
+  container.appendChild(row);
+  container.appendChild(el('div', 'ws-divider'));
 }
 
-function renderSessionRow(container: HTMLElement, s: SessionInfo): HTMLElement {
+function matchesQuery(text: string): boolean {
+  return searchQuery === '' || text.toLowerCase().includes(searchQuery);
+}
+
+function sortSessions(list: SessionInfo[]): SessionInfo[] {
+  const arr = [...list];
+  if (sortMode === 'name') {
+    arr.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh'));
+    return arr;
+  }
+  // 最近活跃：modified 降序，无 modified 排后
+  arr.sort((a, b) => {
+    const am = typeof a.modified === 'number' ? a.modified : -1;
+    const bm = typeof b.modified === 'number' ? b.modified : -1;
+    return bm - am;
+  });
+  return arr;
+}
+
+function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
   const id = s.id ?? '';
   const isActive = id === activeSession;
-  const row = el('div', 'sess-row' + (isActive ? ' active' : '') + (S.selSession === id ? ' sel' : ''));
-  row.dataset.id = id;
+  const leaf = el('div', 'sess-leaf' + (isActive ? ' active' : '') + (S.selSession === id ? ' sel' : ''));
+  leaf.dataset.id = id;
 
   if (batchMode) {
     const cb = el('input', 'sess-check') as HTMLInputElement;
@@ -301,16 +379,16 @@ function renderSessionRow(container: HTMLElement, s: SessionInfo): HTMLElement {
       else selected.delete(id);
       refreshChecks(container);
     });
-    row.appendChild(cb);
+    leaf.appendChild(cb);
   }
-  row.appendChild(el('span', 'sess-dot' + (isActive ? ' live' : '')));
-  const name = el('span', 'sess-row-name', s.title || truncateName(id) || '(未命名)');
-  row.appendChild(name);
+  leaf.appendChild(svgIcon('file'));
+  const name = el('span', 'sess-leaf-name', s.title || truncateName(id) || '(未命名)');
+  leaf.appendChild(name);
   const bits: string[] = [];
   if (s.events !== undefined) bits.push('ev:' + s.events);
   bits.push(truncateName(id));
-  row.appendChild(el('span', 'sess-row-meta', bits.join(' · ')));
-  row.title = id + (s.file ? ' · ' + s.file : '');
+  leaf.appendChild(el('span', 'sess-leaf-meta', bits.join(' · ')));
+  leaf.title = id + (s.file ? ' · ' + s.file : '');
 
   if (!batchMode) {
     const kebab = el('button', 'sess-kebab', '⋯') as HTMLButtonElement;
@@ -320,25 +398,76 @@ function renderSessionRow(container: HTMLElement, s: SessionInfo): HTMLElement {
       e.stopPropagation();
       openCtxMenu(container, kebab.getBoundingClientRect(), [
         { label: isActive ? '当前活跃' : '激活', disabled: isActive, onPick: () => void activateSession(container, id) },
+        { label: '重命名', onPick: () => void renameSession(container, id, s.title || truncateName(id)) },
         { label: '归档', onPick: () => void archiveSession(container, id) },
+        { label: '分支', onPick: () => void branchSession(container, id) },
         { label: '删除', danger: true, onPick: () => void deleteSession(container, id) },
       ]);
     });
-    row.appendChild(kebab);
+    leaf.appendChild(kebab);
   }
-  // 点击行 = 激活该会话（切换聊天区）
-  row.addEventListener('click', () => {
+  leaf.addEventListener('click', () => {
     void activateSession(container, id);
   });
-  return row;
+  return leaf;
 }
 
-function truncateName(id: string): string {
-  const i = id.lastIndexOf('/');
-  return i >= 0 ? id.slice(i + 1) : id;
+function renderWorkspaceNode(container: HTMLElement, name: string, list: SessionInfo[]): HTMLElement {
+  const wrap = el('div', 'ws-node');
+  const det = document.createElement('details');
+  det.className = 'ws-details';
+  det.open = true;
+  const sum = document.createElement('summary');
+  sum.className = 'ws-head';
+  sum.appendChild(svgIcon('folder'));
+  sum.appendChild(el('span', 'ws-name', name));
+  sum.appendChild(el('span', 'ws-count', String(list.length)));
+  const kebab = el('button', 'sess-kebab', '⋯') as HTMLButtonElement;
+  kebab.type = 'button';
+  kebab.title = '工作区操作';
+  kebab.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openCtxMenu(container, kebab.getBoundingClientRect(), [
+      { label: '重命名', onPick: () => void renameWorkspace(container, name) },
+      {
+        label: '批量删除会话',
+        onPick: () => {
+          batchMode = true;
+          selected.clear();
+          void loadTreeInto(container, null);
+        },
+      },
+      { label: '删除工作区', danger: true, onPick: () => void deleteWorkspace(container, name) },
+    ]);
+  });
+  sum.appendChild(kebab);
+  det.appendChild(sum);
+  const body = el('div', 'ws-body');
+  for (const s of sortSessions(list)) body.appendChild(renderLeaf(container, s));
+  det.appendChild(body);
+  wrap.appendChild(det);
+  return wrap;
 }
 
-// ---- 引擎 Worker 组 ------------------------------------------------------------------
+function renderBatchBar(container: HTMLElement): void {
+  const bar = el('div', 'sess-batchbar');
+  bar.appendChild(el('span', 'sess-batchbar-count', '已选 0 个会话'));
+  const del = el('button', 'btn btn-danger btn-mini', '删除选中') as HTMLButtonElement;
+  del.type = 'button';
+  del.addEventListener('click', () => void batchDelete(container));
+  const quit = el('button', 'btn-mini', '取消') as HTMLButtonElement;
+  quit.type = 'button';
+  quit.addEventListener('click', () => exitBatch(container));
+  bar.appendChild(del);
+  bar.appendChild(quit);
+  container.appendChild(bar);
+}
+
+// ---- 引擎 Worker 组（W239） -----------------------------------------------------------
+
+function workerSessions(list: SessionInfo[]): SessionInfo[] {
+  return list.filter((s) => s.kind === 'worker' || (s.id ?? '').startsWith('worker:'));
+}
 
 function renderWorkerGroup(container: HTMLElement, workers: SessionInfo[]): void {
   const group = el('div', 'ws-worker-group');
@@ -358,7 +487,6 @@ function renderWorkerGroup(container: HTMLElement, workers: SessionInfo[]): void
     if (w.events !== undefined) bits.push('ev:' + w.events);
     row.appendChild(el('span', 'ws-worker-meta', bits.join(' · ')));
     row.title = id + (w.model ? ' · ' + w.model : '');
-    // 点击仅选中高亮（延续 W230 决策，不切换聊天区）
     row.addEventListener('click', () => {
       S.selSession = id;
       for (const n of container.querySelectorAll<HTMLElement>('.ws-worker-row')) {
@@ -370,7 +498,6 @@ function renderWorkerGroup(container: HTMLElement, workers: SessionInfo[]): void
   container.appendChild(group);
 }
 
-/** 轮询刷新引擎 Worker 组（worker 状态会变；仅重渲染该组）。 */
 async function refreshWorkers(container: HTMLElement): Promise<void> {
   if (!container.isConnected) return;
   let list: SessionInfo[];
@@ -381,17 +508,15 @@ async function refreshWorkers(container: HTMLElement): Promise<void> {
     return;
   }
   const workers = workerSessions(list);
-  const old = container.querySelector<HTMLElement>('.ws-worker-group');
-  if (!workers.length) {
-    old?.remove();
-    return;
-  }
-  if (old) {
-    old.remove();
-    renderWorkerGroup(container, workers);
-  } else {
-    renderWorkerGroup(container, workers);
-  }
+  container.querySelector('.ws-worker-group')?.remove();
+  if (workers.length) renderWorkerGroup(container, workers);
+}
+
+function ensureWorkerPoll(container: HTMLElement): void {
+  if (workerTimer !== null) return;
+  workerTimer = window.setInterval(() => {
+    void refreshWorkers(container);
+  }, WORKER_POLL_MS);
 }
 
 function stopWorkerPoll(): void {
@@ -401,15 +526,7 @@ function stopWorkerPoll(): void {
   }
 }
 
-/** 若列表含 worker 条目则启动轮询（幂等）。 */
-function ensureWorkerPoll(container: HTMLElement): void {
-  if (workerTimer !== null) return;
-  workerTimer = window.setInterval(() => {
-    void refreshWorkers(container);
-  }, WORKER_POLL_MS);
-}
-
-// ---- 新建入口 -----------------------------------------------------------------------
+// ---- 新建入口 -------------------------------------------------------------------------
 
 /** 新建会话弹窗：标题 + 选择工作区（presetWs 预选）。 */
 export function newSession(presetWs?: string): void {
@@ -523,9 +640,7 @@ export function newWorkspace(): void {
       b.addEventListener('click', () => void loadDirs(target));
       crumbs.appendChild(b);
     }
-    if (!parts.length) {
-      crumbs.appendChild(el('span', 'ws-fs-crumb cur', '/'));
-    }
+    if (!parts.length) crumbs.appendChild(el('span', 'ws-fs-crumb cur', '/'));
   }
 
   async function loadDirs(path: string): Promise<void> {
@@ -536,7 +651,6 @@ export function newWorkspace(): void {
     try {
       r = await api.fsBrowse(path);
     } catch (err) {
-      // 降级：fs 接口不可用 → 手输路径模式
       status.className = 'ws-fs-status err';
       status.textContent = '文件浏览暂不可用（' + (err instanceof Error ? err.message : String(err)) + '）· 请直接在下方输入路径';
       tree.innerHTML = '';
@@ -557,9 +671,7 @@ export function newWorkspace(): void {
     renderCrumbs(r.roots ?? [], r.path ?? path);
     tree.innerHTML = '';
     const dirs = r.dirs ?? [];
-    if (!dirs.length) {
-      tree.appendChild(el('div', 'side-note', '（该目录下没有子目录）'));
-    }
+    if (!dirs.length) tree.appendChild(el('div', 'side-note', '（该目录下没有子目录）'));
     for (const d of dirs) {
       const row = el('div', 'ws-fs-dir');
       row.appendChild(el('span', 'ws-fs-dir-icon', '▸'));
@@ -614,31 +726,12 @@ export function newWorkspace(): void {
   card.appendChild(actions);
   scrim.appendChild(card);
   document.body.appendChild(scrim);
-  // 初始加载：根视图（roots）
   void loadDirs('');
 }
 
-// ---- 渲染主流程 ---------------------------------------------------------------------
+// ---- 树渲染主流程 ----------------------------------------------------------------------
 
-function renderBatchBar(container: HTMLElement): void {
-  const bar = el('div', 'sess-batchbar');
-  bar.appendChild(el('span', 'sess-batchbar-count', '已选 0'));
-  const arch = el('button', 'btn-mini', '批量归档') as HTMLButtonElement;
-  arch.type = 'button';
-  arch.addEventListener('click', () => void batchAction(container, 'archive'));
-  const del = el('button', 'btn-mini danger', '批量删除') as HTMLButtonElement;
-  del.type = 'button';
-  del.addEventListener('click', () => void batchAction(container, 'delete'));
-  const quit = el('button', 'btn-mini', '退出批量') as HTMLButtonElement;
-  quit.type = 'button';
-  quit.addEventListener('click', () => exitBatch(container));
-  bar.appendChild(arch);
-  bar.appendChild(del);
-  bar.appendChild(quit);
-  container.appendChild(bar);
-}
-
-/** 载入并渲染：工作区横向胶囊条 + 当前工作区会话列表（侧栏与设置页复用）。 */
+/** 载入并渲染：新会话按钮 + 工具行 + 工作区/会话树 + Worker 组（侧栏与设置页复用）。 */
 export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement | null): Promise<void> {
   closeCtxMenu();
   container.innerHTML = '';
@@ -649,7 +742,7 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
     wsList = w.workspaces ?? [];
     if (w.active_session) activeSession = w.active_session;
   } catch {
-    wsList = []; // 降级：仅按 sessions 的 workspace 分组
+    wsList = [];
   }
 
   try {
@@ -666,7 +759,6 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
     return;
   }
 
-  // 若 wsList 为空（workspaces 未就绪）：从 sessions 反推工作区
   const wsNames = new Set<string>();
   for (const s of sessions) if (!s.archived) wsNames.add(wsNameOf(s));
   for (const n of wsNames) {
@@ -676,36 +768,33 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
 
   if (countEl) countEl.textContent = String(sessions.filter((s) => s.archived !== true).length);
 
-  selectedWs = pickSelectedWs();
-  if (selectedWs === null) {
-    container.appendChild(el('div', 'side-note', '无工作区 · 点击「+工作区」创建'));
-    return;
+  renderToolbar(container);
+
+  // 树：按工作区收束（可折叠）
+  const tree = el('div', 'ws-tree');
+  const wsWith = wsList.filter(
+    (w) =>
+      matchesQuery(w.name) ||
+      sessions.some((s) => !s.archived && wsNameOf(s) === w.name && matchesQuery(s.title ?? s.id ?? '')),
+  );
+  let rendered = 0;
+  for (const w of wsWith) {
+    const list = sessions.filter(
+      (s) => !s.archived && wsNameOf(s) === w.name && matchesQuery(s.title ?? s.id ?? ''),
+    );
+    if (!matchesQuery(w.name) && !list.length) continue;
+    tree.appendChild(renderWorkspaceNode(container, w.name, list));
+    rendered += list.length;
   }
+  if (!rendered) {
+    tree.appendChild(el('div', 'side-note', searchQuery ? '无匹配结果' : '无会话记录 · 点击「新会话」创建'));
+  }
+  container.appendChild(tree);
 
-  // 1) 工作区胶囊条（横向滚动）
-  const strip = el('div', 'ws-strip');
-  for (const w of wsList) strip.appendChild(renderPill(container, w));
-  container.appendChild(strip);
-
-  // 2) 会话列表
-  const listHead = el('div', 'sess-list-head');
-  listHead.appendChild(el('span', 'sess-list-title', selectedWs));
-  const listCount = currentWsSessions().length;
-  listHead.appendChild(el('span', 'sess-list-count', String(listCount) + ' 会话'));
-  container.appendChild(listHead);
-
+  // 批量勾选模式：底部操作条
   if (batchMode) renderBatchBar(container);
 
-  const list = el('div', 'sess-list');
-  const cur = currentWsSessions();
-  cur.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh'));
-  if (!cur.length) {
-    list.appendChild(el('div', 'side-note', '该工作区暂无会话'));
-  }
-  for (const s of cur) list.appendChild(renderSessionRow(container, s));
-  container.appendChild(list);
-
-  // 3) 引擎 Worker 组（W239；未就绪/无条目时整组隐藏，不轮询）
+  // 引擎 Worker 组
   const workers = workerSessions(sessions);
   if (workers.length) {
     renderWorkerGroup(container, workers);
@@ -733,8 +822,6 @@ export function initSessionsPanel(): void {
   need<HTMLButtonElement>('#btnClearSess').addEventListener('click', () => {
     clearActive();
   });
-  need<HTMLButtonElement>('#btnNewWs').addEventListener('click', newWorkspace);
-  need<HTMLButtonElement>('#btnNewSess').addEventListener('click', () => newSession());
   document.addEventListener('click', (e) => {
     if (!(e.target instanceof Element) || !e.target.closest('.sess-menu')) closeCtxMenu();
   });
