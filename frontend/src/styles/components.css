@@ -376,3 +376,21 @@
   padding: 1px 6px; cursor: pointer;
 }
 .toolcard-copy:hover { color: var(--c-text-1); border-color: var(--c-accent-ring); }
+/* ============================================================================
+ * 第 10 轮：会话切换轻量进度条（顶部细条，非整页空白）
+ * ============================================================================ */
+.switch-progress {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  z-index: 95;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent 0%, var(--c-accent) 50%, transparent 100%);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: switchSlide 1.1s linear infinite;
+}
+@keyframes switchSlide {
+  0%   { background-position: -40% 0; }
+  100% { background-position: 140% 0; }
+}

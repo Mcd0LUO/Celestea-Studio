@@ -63,7 +63,20 @@
   font-family: var(--mono); font-size: 10px; color: var(--c-text-3);
   border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 4px;
 }
-.ws-body { border-top: 1px solid var(--c-border-subtle); padding: 2px 0; }
+/* 折叠/展开动画：max-height 过渡（不清除重建 DOM；第 10 轮） */
+.ws-body {
+  border-top: 1px solid var(--c-border-subtle);
+  padding: 2px 0;
+  max-height: 900px;
+  overflow: hidden;
+  transition: max-height .22s ease, padding .22s ease;
+}
+.ws-details:not([open]) > .ws-body {
+  display: block; /* 覆盖 UA 默认隐藏，使过渡生效 */
+  max-height: 0;
+  padding: 0;
+  border-top-color: transparent;
+}
 
 .sess-leaf {
   display: flex; align-items: center; gap: 7px;

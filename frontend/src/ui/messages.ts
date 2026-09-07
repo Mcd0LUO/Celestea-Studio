@@ -194,7 +194,7 @@ export function renderInfoBlock(text: string, cls?: 'err' | 'warn'): void {
 
 // ---- message builders ----------------------------------------------------------
 
-export function addUserMessage(text: string): void {
+export function addUserMessage(text: string, container: HTMLElement = MsgsEl): void {
   hideEmptyHint();
   const col = el('div', 'mcol');
   const msg = el('div', 'msg user');
@@ -209,14 +209,14 @@ export function addUserMessage(text: string): void {
   bubble.appendChild(body);
   msg.appendChild(bubble);
   col.appendChild(msg);
-  MsgsEl.appendChild(col);
+  container.appendChild(col);
   railAdd(col, 'user');
   railSync();
   autoscroll(true);
 }
 
-/** 获取当前文本段视图或创建新的流式文本气泡（连续流中的一段）。 */
-export function ensureAssistant(): AssistantView {
+/** 获取当前文本段视图或创建新的流式文本气泡（连续流中的一段；container 用于离屏构建）。 */
+export function ensureAssistant(container: HTMLElement = MsgsEl): AssistantView {
   if (S.assistant) return S.assistant;
   hideEmptyHint();
   const col = el('div', 'mcol');
@@ -230,7 +230,7 @@ export function ensureAssistant(): AssistantView {
   bubble.appendChild(content);
   msg.appendChild(bubble);
   col.appendChild(msg);
-  MsgsEl.appendChild(col);
+  container.appendChild(col);
   railAdd(col, 'assistant');
   railSync();
 

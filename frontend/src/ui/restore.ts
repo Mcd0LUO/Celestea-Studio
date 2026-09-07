@@ -15,8 +15,9 @@ import {
   autoscroll,
   ensureAssistant,
   finalizeAssistant,
-  resetMessages,
+  renderEmptyHint,
 } from './messages';
+import { railReset, railSync } from './rail';
 import { buildToolCard, setToolResult, type ToolCardRef } from './toolcards';
 
 const MAX_RESTORE = 200;
@@ -82,30 +83,6 @@ export function finalAssistantDedup(text?: string): boolean {
 
 // ---- 渲染 ---------------------------------------------------------------------
 
-function appendNote(text: string): void {
-  const msgs = document.getElementById('messages');
-  if (msgs && !msgs.querySelector('.restore-note')) {
-    msgs.appendChild(el('div', 'restore-note', text));
-  }
-}
-
-function appendFoldNote(): void {
-  const msgs = document.getElementById('messages');
-  if (!msgs) return;
-  msgs.appendChild(
-    el('div', 'restore-fold', '更早的历史已折叠 · 仅显示最近 ' + MAX_RESTORE + ' 条'),
-  );
-}
-
-function appendLiveSeparator(): void {
-  const msgs = document.getElementById('messages');
-  if (!msgs) return;
-  const sep = el('div', 'live-sep');
-  sep.appendChild(el('span', null, '以下为本次会话'));
-  sep.title = '上方为刷新前恢复的存量消息';
-  msgs.appendChild(sep);
-}
-
 // ---- 历史工具条目：解析并复用 live 工具卡片样式（第 8 轮） ----
 // 契约 content 形如 "name(args)"（调用）或结果 JSON / "Error: …"（结果）。
 // call 与随后的 result 配对成一张卡（折叠三行摘要：工具名/参数截断/结果截断，
@@ -123,7 +100,7 @@ function parseToolCall(content: string): { name: string; args: string } | null {
   return { name: m[1]!, args: m[2]! };
 }
 
-function appendFallbackToolLine(content: string): void {
+function appendFallbackToolLine(content: string, container: HTMLElement): void {
   const col = el('div', 'mcol');
   const msg = el('div', 'msg tool');
   const cap = el('div', 'msg-caption');
@@ -135,17 +112,15 @@ function appendFallbackToolLine(content: string): void {
   bubble.appendChild(body);
   msg.appendChild(bubble);
   col.appendChild(msg);
-  const msgs = document.getElementById('messages');
-  if (msgs) msgs.appendChild(col);
+  container.appendChild(col);
 }
 
-function renderToolHistory(content: string): void {
+function renderToolHistory(content: string, container: HTMLElement): void {
   const call = parseToolCall(content);
   if (call) {
     histToolStep += 1;
     const ref = buildToolCard({ step: histToolStep, name: call.name, argsText: call.args });
-    const msgs = document.getElementById('messages');
-    if (msgs) msgs.appendChild(ref.col);
+    container.appendChild(ref.col);
     pendingTool = ref; // 等待紧随其后的结果条目配对
     autoscroll(true);
     return;
@@ -157,55 +132,92 @@ function renderToolHistory(content: string): void {
     autoscroll(true);
     return;
   }
-  appendFallbackToolLine(content); // 解析失败回退：普通文本行
+  appendFallbackToolLine(content, container); // 解析失败回退：普通文本行
 }
 
-function renderOne(m: HistoryMsg): void {
+function appendNote(text: string): void {
+  const msgs = document.getElementById('messages');
+  if (msgs && !msgs.querySelector('.restore-note')) {
+    msgs.appendChild(el('div', 'restore-note', text));
+  }
+}
+
+function renderOne(m: HistoryMsg, container: HTMLElement): void {
   const content = String(m.content);
   if (m.role === 'user') {
-    addUserMessage(content);
+    addUserMessage(content, container);
     return;
   }
   if (m.role === 'assistant') {
     if (content.trim() === '') return; // 空内容不渲染空块
     // 与 live 相同的 marked 渲染管线（ensureAssistant → finalizeAssistant 冲刷）
-    const a = ensureAssistant();
+    const a = ensureAssistant(container);
     a.text = content;
     finalizeAssistant(a);
     S.assistant = null;
     return;
   }
-  renderToolHistory(content);
+  renderToolHistory(content, container);
 }
 
 /**
  * 渲染指定会话历史（最近 200 条 + 折叠提示 + 「以下为本次会话」分隔线）。
  * 404/超时/端点缺失 → 空视图 + 轻提示，不崩溃。
  */
-export async function restoreSessionHistory(id: string): Promise<void> {
+/**
+ * 渲染指定会话历史（最近 200 条 + 折叠提示 + 「以下为本次会话」分隔线）。
+ * 第 10 轮：离屏双缓冲——先在离屏容器完整构建，再一次性 replaceChildren，
+ * 不出现「清空→空白→重建」帧；guard() 返回 false 时丢弃（竞态：旧请求
+ * 结果晚到不得覆盖新会话）。404/超时/端点缺失 → 轻提示，不崩溃。
+ */
+export async function restoreSessionHistory(id: string, guard?: () => boolean): Promise<void> {
   let resp;
   try {
     resp = await api.messages(id);
   } catch (err) {
-    // 404/超时/端点缺失：保持空视图，仅轻提示
+    // 404/超时/端点缺失：保持现有视图，仅轻提示
     if (!S.streaming) {
       appendNote('历史恢复暂不可用（' + (err instanceof Error ? err.message : String(err)) + '）');
     }
     return;
   }
+  if (guard && !guard()) return; // 竞态：期间已发起更新的切换，丢弃本次结果
   const all = resp.messages ?? [];
-  if (S.streaming || !all.length) return; // 已开跑/空历史：不打断实时流
+  if (S.streaming) return; // 已开跑：不打断实时流
+
+  // 离屏构建（不挂载，浏览器不绘制中间态）
+  railReset(); // 先清旧 rail 条目；离屏渲染注册的新条目在替换后重新 layout
+  const off = document.createElement('div');
+  if (all.length > MAX_RESTORE) {
+    const fold = el('div', 'restore-fold', '更早的历史已折叠 · 仅显示最近 ' + MAX_RESTORE + ' 条');
+    off.appendChild(fold);
+  }
   const recent = all.length > MAX_RESTORE ? all.slice(all.length - MAX_RESTORE) : all;
-  if (all.length > MAX_RESTORE) appendFoldNote();
-  for (const m of recent) renderOne(m);
+  for (const m of recent) renderOne(m, off);
   if (pendingTool) {
     // 无配对结果的调用：历史视角标记为完成（无结果行）
     setToolResult(pendingTool, '（历史记录无结果）', false);
     pendingTool = null;
   }
-  appendLiveSeparator();
+  if (recent.length) {
+    const sep = el('div', 'live-sep');
+    sep.appendChild(el('span', null, '以下为本次会话'));
+    sep.title = '上方为刷新前恢复的存量消息';
+    off.appendChild(sep);
+  }
+  if (guard && !guard()) return;
+
+  // 一次性替换（无空白帧）
+  const msgs = document.getElementById('messages');
+  if (!msgs) return;
+  msgs.replaceChildren(...off.childNodes);
+  if (!recent.length) {
+    // 空会话：重建空态视图
+    renderEmptyHint();
+  }
+  railSync();
   autoscroll(true);
-  tail = recent[recent.length - 1] ?? null;
+  tail = recent.length ? recent[recent.length - 1] ?? null : null;
 }
 
 /**
@@ -246,10 +258,44 @@ export async function restoreActiveHistory(): Promise<void> {
   await restoreSessionHistory(id);
 }
 
-/** 激活会话后切换聊天区：清空现有视图并渲染目标会话历史（选择条同步复位）。 */
+// ---- 会话切换（第 10 轮：无空白帧 + 竞态防护） ----
+
+let switchSeq = 0;
+let progressEl: HTMLElement | null = null;
+
+function showSwitchProgress(): void {
+  if (progressEl) return;
+  progressEl = document.createElement('div');
+  progressEl.className = 'switch-progress';
+  progressEl.title = '正在加载会话历史…';
+  document.body.appendChild(progressEl);
+}
+
+function hideSwitchProgress(): void {
+  progressEl?.remove();
+  progressEl = null;
+}
+
+/**
+ * 激活会话后切换聊天区（第 10 轮）：
+ *   - 不清空现有内容——历史在离屏构建完成后一次性替换（无空白帧）；
+ *   - 加载期间仅显示顶部细进度条（轻量状态，不整页空白）；
+ *   - seq 竞态防护：切换期间重复点击会发起更新的请求，旧请求结果
+ *     （guard 不匹配）直接丢弃，不覆盖新会话。
+ */
 export function switchToSession(id: string): void {
+  const seq = ++switchSeq;
   pendingTool = null;
   histToolStep = 0;
-  resetMessages(); // 清空消息流 + 选择条 + 流式状态
-  void restoreSessionHistory(id);
+  S.assistant = null; // 旧流式视图随替换移除；新 turn 从新段开始
+  S.turn = null;
+  showSwitchProgress();
+  void restoreSessionHistory(id, () => seq === switchSeq).finally(() => {
+    if (seq === switchSeq) hideSwitchProgress();
+  });
+}
+
+/** 会话切换是否进行中（供外部判断加载态）。 */
+export function isSwitching(): boolean {
+  return progressEl !== null;
 }

@@ -29,6 +29,7 @@ let activeSession: string | null = null;
 let searchQuery = '';
 let sortMode: 'active' | 'name' = 'active';
 let workerTimer: number | null = null;
+let searchTimer: number | null = null;
 
 const WORKER_POLL_MS = 5000;
 
@@ -40,6 +41,13 @@ function note(text: string): void {
 function wsNameOf(s: SessionInfo): string {
   const ws = (s.workspace ?? '').trim();
   return ws === '' ? 'root' : ws;
+}
+
+/** 激活高亮只切 class（不重建树，避免闪烁）。 */
+function updateActiveHighlight(container: HTMLElement): void {
+  for (const n of container.querySelectorAll<HTMLElement>('.sess-leaf')) {
+    n.classList.toggle('active', n.dataset.id === activeSession);
+  }
 }
 
 function truncateName(id: string): string {
@@ -174,8 +182,8 @@ async function activateSession(container: HTMLElement, id: string): Promise<void
     activeSession = r.active_session ?? id;
     S.selSession = activeSession;
     note('已切换到会话：' + activeSession);
-    switchToSession(activeSession);
-    void loadTreeInto(container, null);
+    switchToSession(activeSession); // 离屏双缓冲：无空白帧
+    updateActiveHighlight(container); // 只切 class，不重建整棵树
   } catch (err) {
     if (err instanceof ApiError && err.status === 409) note('轮次进行中，请稍后重试');
     else note('激活失败：' + (err instanceof Error ? err.message : String(err)));
@@ -317,7 +325,8 @@ function renderToolbar(container: HTMLElement): void {
   input.value = searchQuery;
   input.addEventListener('input', () => {
     searchQuery = input.value.trim().toLowerCase();
-    void loadTreeInto(container, null);
+    if (searchTimer !== null) window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => void loadTreeInto(container, null), 180);
   });
   searchBox.appendChild(input);
   row.appendChild(searchBox);
@@ -416,6 +425,7 @@ function renderWorkspaceNode(container: HTMLElement, name: string, list: Session
   const wrap = el('div', 'ws-node');
   const det = document.createElement('details');
   det.className = 'ws-details';
+  det.dataset.ws = name;
   det.open = true;
   const sum = document.createElement('summary');
   sum.className = 'ws-head';
@@ -734,7 +744,13 @@ export function newWorkspace(): void {
 /** 载入并渲染：新会话按钮 + 工具行 + 工作区/会话树 + Worker 组（侧栏与设置页复用）。 */
 export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement | null): Promise<void> {
   closeCtxMenu();
-  container.innerHTML = '';
+  // 记录折叠状态与搜索框焦点（重建后保持，避免闪动）
+  const openMap = new Map<string, boolean>();
+  for (const det of container.querySelectorAll<HTMLDetailsElement>('.ws-details')) {
+    openMap.set(det.dataset.ws ?? '', det.open);
+  }
+  const searchFocused = document.activeElement?.classList.contains('ws-search-input') ?? false;
+  const off = document.createElement('div'); // 离屏容器：构建期间旧内容保持可见
   if (countEl) countEl.textContent = '…';
 
   try {
@@ -752,9 +768,9 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
     if (act?.id) activeSession = act.id;
   } catch (err) {
     stopWorkerPoll();
-    container.innerHTML = '';
-    container.appendChild(el('div', 'side-note err', '会话接口不可用'));
-    container.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+    off.appendChild(el('div', 'side-note err', '会话接口不可用'));
+    off.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+    container.replaceChildren(...off.childNodes);
     if (countEl) countEl.textContent = '—';
     return;
   }
@@ -768,7 +784,7 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
 
   if (countEl) countEl.textContent = String(sessions.filter((s) => s.archived !== true).length);
 
-  renderToolbar(container);
+  renderToolbar(off);
 
   // 树：按工作区收束（可折叠）
   const tree = el('div', 'ws-tree');
@@ -789,18 +805,32 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
   if (!rendered) {
     tree.appendChild(el('div', 'side-note', searchQuery ? '无匹配结果' : '无会话记录 · 点击「新会话」创建'));
   }
-  container.appendChild(tree);
+  off.appendChild(tree);
 
   // 批量勾选模式：底部操作条
-  if (batchMode) renderBatchBar(container);
+  if (batchMode) renderBatchBar(off);
 
   // 引擎 Worker 组
   const workers = workerSessions(sessions);
   if (workers.length) {
-    renderWorkerGroup(container, workers);
+    renderWorkerGroup(off, workers);
     ensureWorkerPoll(container);
   } else {
     stopWorkerPoll();
+  }
+
+  // 一次性替换（无空白帧）
+  container.replaceChildren(...off.childNodes);
+
+  // 恢复折叠状态
+  for (const det of container.querySelectorAll<HTMLDetailsElement>('.ws-details')) {
+    const name = det.dataset.ws ?? '';
+    if (openMap.has(name)) det.open = openMap.get(name) ?? true;
+  }
+  // 恢复搜索框焦点（输入过滤时不丢焦点）
+  if (searchFocused) {
+    const inp = container.querySelector<HTMLInputElement>('.ws-search-input');
+    if (inp) inp.focus();
   }
 }
 
