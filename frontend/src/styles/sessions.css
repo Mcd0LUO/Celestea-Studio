@@ -1,86 +1,133 @@
 /* ============================================================================
- * 会话列表 · Codex 风格横向长条（W227 续）
- *   悬停变长（--grow 邻近度权重 + transition 吸附）/ 停留展开 Q·A 预览 /
- *   工作区分组小节标题。全部走 tokens.css 的 DSH night 变量。
+ * 工作区/会话树（W236）
+ *   工作区节点（可折叠）→ 会话叶子；「⋯」二级菜单；批量复选模式；
+ *   全部走 tokens.css 的 DSH night 变量。
  * ============================================================================ */
 
-.sess-group { margin-bottom: 10px; }
-.sess-group-title {
-  display: flex; align-items: center; gap: 8px;
-  padding: 2px 2px 5px;
+/* ---- 主会话（host，置顶） ---- */
+.ws-host { margin-bottom: 10px; }
+.ws-host-head {
   font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
   text-transform: uppercase; color: var(--c-text-3);
+  padding: 2px 2px 5px;
 }
-.sess-group-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess-group-count {
+
+/* ---- 工作区节点 ---- */
+.ws-node { border: 1px solid var(--c-border-subtle); border-radius: 8px; background: var(--c-surface-raised); }
+.ws-node + .ws-node { margin-top: 6px; }
+.ws-details { }
+.ws-head {
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 8px; cursor: pointer; user-select: none; list-style: none;
+}
+.ws-head::-webkit-details-marker { display: none; }
+.ws-head:hover { background: var(--c-accent-soft); }
+.ws-caret {
+  width: 0; height: 0; flex: 0 0 auto;
+  border-left: 5px solid var(--c-text-3);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform .12s ease;
+}
+.ws-details[open] > .ws-head .ws-caret { transform: rotate(90deg); }
+.ws-name {
+  font-size: 12.5px; font-weight: 600; color: var(--c-text-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-path {
+  font-family: var(--mono); font-size: 10px; color: var(--c-text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 30%;
+}
+.ws-count {
   margin-left: auto; flex: 0 0 auto;
-  font-family: var(--mono); font-size: 10px;
+  font-family: var(--mono); font-size: 10.5px; color: var(--c-text-3);
   border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 5px;
-  color: var(--c-text-3);
 }
+.sess-kebab {
+  flex: 0 0 auto;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--c-text-3); font-size: 14px; line-height: 1; padding: 0 2px;
+  border-radius: 4px;
+}
+.sess-kebab:hover { color: var(--c-text-1); background: var(--c-surface); }
 
-/* ---- 长条本体：宽度 = 基础 + 邻近度权重 ---- */
-.sess-bar {
-  --grow: 0;
-  width: calc(84% + var(--grow) * 16%);
-  min-width: 0;
-  margin-bottom: 6px;
-  border: 1px solid var(--c-border-subtle);
-  border-radius: 8px;
-  background: var(--c-surface-raised);
+.ws-body { border-top: 1px solid var(--c-border-subtle); }
+
+/* ---- 会话叶子 ---- */
+.sess-leaf {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 8px 6px 20px;
   cursor: pointer;
-  overflow: hidden;
-  transition: width .22s cubic-bezier(.23, .9, .3, 1.12), border-color .15s ease, background .15s ease;
+  transition: background .12s ease;
 }
-.sess-bar:hover { --grow: 1; border-color: var(--c-accent-ring); }
-.sess-bar.active { border-color: var(--c-accent-ring); background: var(--c-accent-soft); }
-
-.sess-bar-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 10px;
-}
-.sess-bar-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--c-text-3); flex: 0 0 auto; }
-.sess-bar-dot.live { background: var(--c-ok); }
-.sess-bar-name {
+.sess-leaf:hover { background: var(--c-accent-soft); }
+.sess-leaf.active { background: var(--c-accent-soft); box-shadow: inset 2px 0 0 var(--c-accent-ring); }
+.sess-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--c-text-3); flex: 0 0 auto; }
+.sess-dot.live { background: var(--c-ok); }
+.sess-leaf-name {
   flex: 1 1 auto; min-width: 0;
   font-size: 12.5px; color: var(--c-text-1);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.sess-bar-meta {
-  flex: 0 0 auto;
-  font-family: var(--mono); font-size: 10.5px; color: var(--c-text-3);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%;
+.sess-leaf-meta {
+  flex: 0 1 auto; max-width: 42%;
+  font-family: var(--mono); font-size: 10px; color: var(--c-text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* ---- 展开预览（停留吸附后展开；高度过渡） ---- */
-.sess-bar-preview {
-  max-height: 0; opacity: 0; overflow: hidden;
-  border-top: 1px solid transparent;
-  transition: max-height .25s ease, opacity .18s ease, border-color .2s ease;
+/* ---- 批量复选 ---- */
+.sess-check { flex: 0 0 auto; accent-color: var(--c-accent); margin: 0; cursor: pointer; }
+
+.sess-batchbar {
+  display: none; align-items: center; gap: 8px;
+  border: 1px solid var(--c-accent-ring);
+  background: var(--c-accent-soft);
+  border-radius: 8px;
+  padding: 5px 8px;
+  margin-bottom: 8px;
 }
-.sess-bar-preview.open {
-  max-height: 110px; opacity: 1;
-  border-top-color: var(--c-border-subtle);
+.sess-batchbar.active { display: flex; }
+.sess-batchbar-count {
+  font-family: var(--mono); font-size: 11px; color: var(--c-text-1);
+  flex: 1 1 auto;
 }
-.sess-bar-pv-line {
-  display: flex; align-items: baseline; gap: 6px;
-  padding: 6px 10px;
-  font-size: 11.5px; color: var(--c-text-2);
+.sess-batchbar .btn-mini.danger { color: var(--c-err); }
+.sess-batchbar .btn-mini.danger:hover { background: var(--c-err-dim); color: var(--c-err); }
+
+/* ---- 二级菜单浮层 ---- */
+.sess-menu {
+  position: absolute; z-index: 60;
+  min-width: 150px;
+  background: var(--c-surface-raised);
+  border: 1px solid var(--c-border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-panel);
+  padding: 4px;
+  display: flex; flex-direction: column;
 }
-.sess-bar-pv-line span:last-child {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.sess-menu-item {
+  background: transparent; border: none; text-align: left;
+  padding: 7px 10px; font-size: 12.5px; color: var(--c-text-1);
+  border-radius: 5px; cursor: pointer;
 }
-.sess-bar-pv-tag {
-  flex: 0 0 auto;
-  font-family: var(--mono); font-size: 10px; font-weight: 700;
-  border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 4px;
-  color: var(--c-text-3);
+.sess-menu-item:hover { background: var(--c-accent-soft); }
+.sess-menu-item.danger { color: var(--c-err); }
+.sess-menu-item.danger:hover { background: var(--c-err-dim); }
+
+/* ---- 新建会话弹窗 ---- */
+.modal-scrim {
+  position: fixed; inset: 0; z-index: 80;
+  background: var(--c-overlay);
+  display: flex; align-items: center; justify-content: center;
 }
-.sess-bar-pv-q .sess-bar-pv-tag { color: var(--c-accent); border-color: var(--c-accent-ring); }
-.sess-bar-pv-a .sess-bar-pv-tag { color: var(--c-text-2); }
-.sess-bar-pv-a { color: var(--c-text-3); }
-.sess-bar-pv-sep { height: 1px; margin: 0 10px; background: var(--c-border-subtle); }
-.sess-bar-pv-note {
-  padding: 6px 10px; font-size: 11.5px; color: var(--c-text-3);
+.modal-card {
+  width: min(420px, calc(100vw - 40px));
+  background: var(--c-surface-raised);
+  border: 1px solid var(--c-border-strong);
+  border-radius: 12px;
+  box-shadow: var(--shadow-panel);
+  padding: 16px;
+  display: flex; flex-direction: column; gap: 10px;
 }
-.sess-bar-pv-note.err { color: var(--c-err); }
+.modal-card-title { font-size: 14px; font-weight: 600; }
+.modal-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }

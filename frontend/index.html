@@ -33,6 +33,8 @@
           <header class="side-sec-head">
             <h3>工作区 · 会话</h3>
             <span class="sec-note" id="sessionCount">…</span>
+            <button class="btn-mini" id="btnNewWs" title="新建工作区">+工作区</button>
+            <button class="btn-mini" id="btnNewSess" title="新建会话">+会话</button>
             <button class="btn-mini" id="btnReloadSessions" title="重新加载会话树">刷新</button>
             <button class="btn-mini" id="btnClearSess" title="清空当前会话">清空</button>
           </header>
@@ -121,6 +123,7 @@
           <button class="settings-nav-item active" type="button" data-page="config">通用配置</button>
           <button class="settings-nav-item" type="button" data-page="tools">工具</button>
           <button class="settings-nav-item" type="button" data-page="sessions">会话</button>
+          <button class="settings-nav-item" type="button" data-page="providers">模型提供商</button>
         </nav>
         <div class="settings-content">
           <section class="settings-pane active" data-pane="config">
@@ -147,6 +150,13 @@
               <button class="btn-mini" id="btnClearSessSettings" title="清空当前会话">清空当前会话</button>
             </header>
             <div class="settings-pane-body" id="settingsSessions"><div class="side-note">加载中…</div></div>
+          </section>
+          <section class="settings-pane" data-pane="providers">
+            <header class="settings-pane-head">
+              <h4>模型提供商</h4>
+              <button class="btn-mini" id="btnAddProvider" type="button">添加提供商</button>
+            </header>
+            <div class="settings-pane-body" id="settingsProviders"><div class="side-note">加载中…</div></div>
           </section>
         </div>
       </div>

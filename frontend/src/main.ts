@@ -12,6 +12,7 @@ import './styles/statusline.css';
 
 import './styles/settings.css';
 import './styles/sessions.css';
+import './styles/rail.css';
 
 import { api } from './api';
 import { connectSse, initChat } from './chat';
@@ -19,6 +20,7 @@ import { setStatus } from './ui/statusbar';
 import { initSettingsPage } from './ui/config';
 import { initSessionsPanel } from './ui/sessions';
 import { restoreCliMainHistory } from './ui/restore';
+import { initRail } from './ui/rail';
 import { initSidebar } from './ui/sidebar';
 import { Statusline } from './statusline';
 import { S } from './state';
@@ -58,7 +60,8 @@ function init(): void {
   // 5) 「通用设置」页（取代原 #modal 弹层；热调 + 工具列表；保存成功后刷新健康信息）
   initSettingsPage();
 
-  // 6) 聊天主循环 + 启动恢复（cli-main 历史；失败轻提示） + SSE
+  // 6) 消息 rail（左侧灵动长条）+ 聊天主循环 + 启动恢复 + SSE
+  initRail();
   initChat();
   refreshHealthChip(statusline);
   void restoreCliMainHistory();

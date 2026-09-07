@@ -111,6 +111,7 @@ export interface SessionInfo {
   file?: string;
   size?: number;
   modified?: number;
+  archived?: boolean;
 }
 
 export interface SessionsResp {
@@ -132,6 +133,74 @@ export interface MessagesResp {
   ok?: boolean;
   session?: string;
   messages?: HistoryMsg[];
+  error?: string;
+}
+
+// ---- 工作区 / 会话管理（W236） ------------------------------------------------
+
+export interface WorkspaceInfo {
+  name: string;
+  path?: string;
+  sessions?: number;
+}
+
+export interface WorkspacesResp {
+  ok?: boolean;
+  workspaces?: WorkspaceInfo[];
+  error?: string;
+}
+
+export interface SessionCreateReq {
+  workspace?: string | null;
+  title: string;
+}
+
+export interface BatchIdsReq {
+  ids?: string[];
+}
+
+export interface BatchNamesReq {
+  names?: string[];
+}
+
+// ---- 模型提供商（W236） --------------------------------------------------------
+
+export interface ProviderModelSpec {
+  id: string;
+  name: string;
+  reasoning_efforts?: string[];
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name?: string;
+  note?: string;
+  base_url?: string;
+  request_format?: string;
+  models?: ProviderModelSpec[];
+  is_default?: boolean;
+  has_key?: boolean;
+}
+
+export interface ProvidersResp {
+  ok?: boolean;
+  providers?: ProviderInfo[];
+  default_model?: string | null;
+  error?: string;
+}
+
+export interface ProviderTestResp {
+  ok?: boolean;
+  latency_ms?: number;
+  model_count?: number;
+  error?: string;
+}
+
+export interface ProviderFetchResp {
+  ok?: boolean;
+  models?: { id: string }[];
   error?: string;
 }
 

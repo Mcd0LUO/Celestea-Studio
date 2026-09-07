@@ -1,272 +1,462 @@
 // ============================================================================
-// ui/sessions.ts — 左侧「会话列表」：Codex 风格横向长条（W227 续 W230 决策：
-//   点击长条仅选中态高亮，不切换聊天区；cli-main 置顶）。
-//   - 数据：GET /api/sessions，按 workspace 分组为小节标题（host→「主会话」）；
-//   - #1 鼠标靠近长条 → 平滑变长（--grow 权重 + transition，吸附效果）；
-//   - #2 hover 停留（防抖 350ms）→ 展开预览：第一条 user 首行前 ~40 字
-//         + 分割线 + 其后第一条 assistant 前 ~40 字（懒加载 messages，
-//         每会话缓存；404 优雅降级）；
-//   - #3 邻近度：按鼠标到各长条中心的距离加权，邻近者最长，向两侧递减。
-//   侧栏与「通用设置 → 会话」页共用本模块（缓存共享）。
+// ui/sessions.ts — 左侧「工作区/会话树」（W236 契约）：
+//   树：工作区节点 → 会话叶子（host cli-main 置顶；已归档不显示）；
+//   每工作区「⋯」→ 二级菜单（删除工作区 / 批量操作会话）；
+//   每会话「⋯」→ 二级菜单（归档 / 删除）；
+//   批量模式（复选 + 批量归档/删除操作条）；
+//   「新建工作区」「新建会话」入口（会话弹窗：标题 + 选择工作区）。
+//   端点缺失（后端 W236 并行开发中）→ 优雅降级不崩溃。
 // ============================================================================
 import { api } from '../api';
 import { el, need } from '../utils/dom';
-import type { SessionInfo } from '../types';
+import type { SessionInfo, WorkspaceInfo } from '../types';
 import { S } from '../state';
 import { resetMessages } from './messages';
-
-const PREVIEW_DEBOUNCE_MS = 350; // hover 停留防抖
-const PREVIEW_CHARS = 40;        // Q/A 各截断字数
-const PROXIMITY_RANGE = 260;     // 邻近度衰减半径（px）
 
 const MAIN_GROUP = '主会话';
 const UNGROUPED = '未分组';
 
-interface Group {
+// ---- 批量模式状态 --------------------------------------------------------------
+
+let batchMode = false;
+const selected = new Set<string>();
+
+function exitBatch(container: HTMLElement): void {
+  batchMode = false;
+  selected.clear();
+  void loadTreeInto(container, null); // 重渲染：取消复选与批量条
+}
+
+/** 渲染容器内所有 checkbox 的选中态（批量模式；组头为部分/全选态）。 */
+function refreshChecks(container: HTMLElement): void {
+  for (const cb of container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) {
+    const ws = cb.dataset.ws;
+    if (ws !== undefined) {
+      const node = cb.closest('.ws-node');
+      const leaves = node ? Array.from(node.querySelectorAll<HTMLElement>('.sess-leaf')) : [];
+      const ids = leaves.map((l) => l.dataset.id ?? '').filter(Boolean);
+      const hit = ids.filter((i) => selected.has(i)).length;
+      cb.checked = ids.length > 0 && hit === ids.length;
+      cb.indeterminate = hit > 0 && hit < ids.length;
+      continue;
+    }
+    cb.checked = cb.dataset.id !== undefined && selected.has(cb.dataset.id);
+  }
+  setBatchBar(container);
+}
+
+function setBatchBar(container: HTMLElement | null): void {
+  const bar = container?.querySelector<HTMLElement>('.sess-batchbar');
+  if (!bar) return;
+  const n = selected.size;
+  bar.querySelector('.sess-batchbar-count')!.textContent = '已选 ' + n;
+  bar.classList.toggle('active', batchMode && n > 0);
+}
+
+// ---- 树构建 ---------------------------------------------------------------------
+
+interface WsNode {
   name: string;
+  path?: string;
   sessions: SessionInfo[];
 }
 
-function groupSessions(list: SessionInfo[]): Group[] {
-  const map = new Map<string, SessionInfo[]>();
-  const push = (name: string, s: SessionInfo) => {
-    let arr = map.get(name);
-    if (!arr) {
-      arr = [];
-      map.set(name, arr);
+function collectNodes(sessions: SessionInfo[], wsList: WorkspaceInfo[] | null): WsNode[] {
+  const map = new Map<string, WsNode>();
+  const get = (name: string): WsNode => {
+    let n = map.get(name);
+    if (!n) {
+      n = { name, sessions: [] };
+      map.set(name, n);
     }
-    arr.push(s);
+    return n;
   };
-  for (const s of list) {
-    if (s.kind === 'host' || s.live === true) push(MAIN_GROUP, s);
-    else {
-      const ws = (s.workspace ?? '').trim();
-      push(ws === '' ? UNGROUPED : ws, s);
-    }
+  for (const s of sessions) {
+    if (s.kind === 'host' || s.live === true) continue; // 主会话单独置顶
+    if (s.archived === true) continue; // 已归档不显示在主树
+    const ws = (s.workspace ?? '').trim() || 'root';
+    get(ws).sessions.push(s);
   }
-  const groups = Array.from(map.entries()).map(([name, sessions]) => ({ name, sessions }));
-  groups.sort((a, b) => {
-    if (a.name === MAIN_GROUP) return -1;
-    if (b.name === MAIN_GROUP) return 1;
-    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
-  });
-  for (const g of groups) {
-    // 组内：cli-main 置顶，其余按标题
-    g.sessions.sort((a, b) => {
-      const ai = a.id === 'cli-main' ? -1 : a.id === undefined ? 0 : 1;
-      const bi = b.id === 'cli-main' ? -1 : b.id === undefined ? 0 : 1;
-      if (ai !== bi) return ai - bi;
-      return (a.title || '').localeCompare(b.title || '', 'zh');
+  if (wsList) {
+    for (const w of wsList) get(w.name).path = w.path;
+  }
+  const nodes = Array.from(map.values());
+  nodes.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const n of nodes) {
+    n.sessions.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh'));
+  }
+  return nodes;
+}
+
+function truncateName(id: string): string {
+  const i = id.lastIndexOf('/');
+  return i >= 0 ? id.slice(i + 1) : id;
+}
+
+// ---- 右键菜单（浮层） -----------------------------------------------------------
+
+interface MenuItem {
+  label: string;
+  danger?: boolean;
+  onPick: () => void;
+}
+
+function openCtxMenu(container: HTMLElement, x: number, y: number, items: MenuItem[]): void {
+  closeCtxMenu();
+  const m = el('div', 'sess-menu');
+  for (const it of items) {
+    const b = el('button', 'sess-menu-item' + (it.danger ? ' danger' : ''), it.label) as HTMLButtonElement;
+    b.type = 'button';
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeCtxMenu();
+      it.onPick();
     });
+    m.appendChild(b);
   }
-  return groups;
+  container.appendChild(m);
+  const xc = Math.max(0, Math.min(x, container.clientWidth - 170));
+  const yc = Math.max(0, Math.min(y, container.clientHeight - 40));
+  m.style.left = xc + 'px';
+  m.style.top = yc + 'px';
 }
 
-// ---- 预览（懒加载 + 缓存） ---------------------------------------------------
-
-interface Preview {
-  ok: boolean;
-  q?: string;
-  a?: string;
-  error?: string;
+function closeCtxMenu(): void {
+  for (const n of document.querySelectorAll('.sess-menu')) n.remove();
 }
 
-const previewCache = new Map<string, Promise<Preview>>();
+// ---- 操作 ------------------------------------------------------------------------
 
-function truncate(s: string): string {
-  const line = s.replace(/\s+/g, ' ').trim();
-  if (line.length <= PREVIEW_CHARS) return line;
-  return line.slice(0, PREVIEW_CHARS) + '…';
+function note(text: string): void {
+  const foot = document.getElementById('sideFoot');
+  if (foot) foot.textContent = text;
 }
 
-function loadPreview(id: string): Promise<Preview> {
-  let p = previewCache.get(id);
-  if (p) return p;
-  p = api
-    .messages(id)
-    .then((d) => {
-      const msgs = d.messages ?? [];
-      let q: string | undefined;
-      let a: string | undefined;
-      for (const m of msgs) {
-        if (q === undefined && m.role === 'user') {
-          q = truncate(String(m.content));
-          continue;
-        }
-        if (q !== undefined && m.role === 'assistant') {
-          a = truncate(String(m.content));
-          break;
-        }
-      }
-      return { ok: true, q, a };
-    })
-    .catch((err: unknown) => ({
-      ok: false,
-      error: err instanceof Error ? err.message : String(err),
-    }));
-  previewCache.set(id, p);
-  return p;
+function wsNames(container: HTMLElement): string[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('.ws-node .ws-name')).map((n) => n.textContent ?? '');
 }
 
-// ---- 渲染 ---------------------------------------------------------------------
+async function deleteWorkspace(container: HTMLElement, name: string): Promise<void> {
+  if (!window.confirm('确认删除工作区「' + name + '」？（含其下会话）')) return;
+  try {
+    await api.deleteWorkspace(name);
+    note('工作区已删除');
+    void loadTreeInto(container, null);
+  } catch (err) {
+    note('删除失败：' + (err instanceof Error ? err.message : String(err)));
+  }
+}
 
-function renderBar(s: SessionInfo, container: HTMLElement): HTMLElement {
+async function archiveSession(container: HTMLElement, id: string): Promise<void> {
+  try {
+    await api.archiveSession(id);
+    void loadTreeInto(container, null);
+  } catch (err) {
+    note('归档失败：' + (err instanceof Error ? err.message : String(err)));
+  }
+}
+
+async function deleteSession(container: HTMLElement, id: string): Promise<void> {
+  if (!window.confirm('确认删除会话「' + id + '」？')) return;
+  try {
+    await api.batchDeleteSessions([id]);
+    void loadTreeInto(container, null);
+  } catch (err) {
+    note('删除失败：' + (err instanceof Error ? err.message : String(err)));
+  }
+}
+
+async function batchAction(container: HTMLElement, action: 'archive' | 'delete'): Promise<void> {
+  const ids = Array.from(selected);
+  if (!ids.length) return;
+  const label = action === 'archive' ? '归档' : '删除';
+  if (action === 'delete' && !window.confirm('确认批量删除 ' + ids.length + ' 个会话？')) return;
+  try {
+    if (action === 'archive') await api.batchArchiveSessions(ids);
+    else await api.batchDeleteSessions(ids);
+    exitBatch(container);
+  } catch (err) {
+    note('批量' + label + '失败：' + (err instanceof Error ? err.message : String(err)));
+  }
+}
+
+// ---- 渲染 ------------------------------------------------------------------------
+
+function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
   const id = s.id ?? '';
-  const bar = el('div', 'sess-bar' + (S.selSession === id ? ' active' : ''));
-  bar.dataset.id = id;
+  const leaf = el('div', 'sess-leaf' + (S.selSession === id ? ' active' : ''));
+  leaf.dataset.id = id;
 
-  const row = el('div', 'sess-bar-row');
-  row.appendChild(el('span', 'sess-bar-dot' + (s.kind === 'host' || s.live === true ? ' live' : '')));
-  row.appendChild(el('span', 'sess-bar-name', s.title || '(未命名)'));
-  const bits: string[] = [];
-  if (s.kind) bits.push(s.kind);
-  if (s.events !== undefined) bits.push('ev:' + s.events);
-  bits.push(id);
-  row.appendChild(el('span', 'sess-bar-meta', bits.join(' · ')));
-  bar.appendChild(row);
+  if (batchMode) {
+    const cb = el('input', 'sess-check') as HTMLInputElement;
+    cb.type = 'checkbox';
+    cb.dataset.id = id;
+    cb.checked = selected.has(id);
+    cb.addEventListener('change', () => {
+      if (cb.checked) selected.add(id);
+      else selected.delete(id);
+      setBatchBar(container);
+    });
+    leaf.appendChild(cb);
+  }
+  leaf.appendChild(el('span', 'sess-dot' + (s.kind === 'host' || s.live === true ? ' live' : '')));
+  const name = el('span', 'sess-leaf-name', s.title || truncateName(id) || '(未命名)');
+  leaf.appendChild(name);
+  const metaBits: string[] = [];
+  if (s.events !== undefined) metaBits.push('ev:' + s.events);
+  metaBits.push(truncateName(id));
+  leaf.appendChild(el('span', 'sess-leaf-meta', metaBits.join(' · ')));
+  leaf.title = id + (s.workspace ? ' · ' + s.workspace : '') + (s.file ? ' · ' + s.file : '');
 
-  const pv = el('div', 'sess-bar-preview');
-  bar.appendChild(pv);
-
-  bar.title = bits.join(' · ') + (s.workspace ? ' · ' + s.workspace : '') + (s.file ? ' · ' + s.file : '');
-
-  // 点击 = 选中态高亮（延续 W230 决策：不切换聊天区、不发起请求）
-  bar.addEventListener('click', () => {
+  // 点击 = 选中态高亮（不改聊天区）
+  leaf.addEventListener('click', () => {
     S.selSession = id;
-    if (!container) return;
-    for (const n of container.querySelectorAll<HTMLElement>('.sess-bar')) {
+    for (const n of container.querySelectorAll<HTMLElement>('.sess-leaf')) {
       n.classList.toggle('active', n.dataset.id === id);
     }
   });
-  return bar;
+
+  // 「⋯」菜单（批量模式下隐藏；host 无操作）
+  if (!batchMode && s.kind !== 'host' && !s.live) {
+    const kebab = el('button', 'sess-kebab', '⋯') as HTMLButtonElement;
+    kebab.type = 'button';
+    kebab.title = '会话操作';
+    kebab.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const r = kebab.getBoundingClientRect();
+      const cr = container.getBoundingClientRect();
+      openCtxMenu(container, r.left - cr.left, r.bottom - cr.top + 4, [
+        { label: '归档', onPick: () => void archiveSession(container, id) },
+        { label: '删除', danger: true, onPick: () => void deleteSession(container, id) },
+      ]);
+    });
+    leaf.appendChild(kebab);
+  }
+  return leaf;
 }
 
-function renderGroups(container: HTMLElement, sessions: SessionInfo[]): void {
+function renderWorkspaceNode(container: HTMLElement, n: WsNode): HTMLElement {
+  const wrap = el('div', 'ws-node');
+  const det = document.createElement('details');
+  det.className = 'ws-details';
+  det.open = true;
+  const sum = document.createElement('summary');
+  sum.className = 'ws-head';
+  if (batchMode) {
+    const cb = el('input', 'sess-check') as HTMLInputElement;
+    cb.type = 'checkbox';
+    cb.dataset.ws = n.name;
+    cb.checked = n.sessions.length > 0 && n.sessions.every((x) => selected.has(x.id ?? ''));
+    cb.addEventListener('change', () => {
+      for (const x of n.sessions) {
+        const sid = x.id ?? '';
+        if (cb.checked) selected.add(sid);
+        else selected.delete(sid);
+      }
+      refreshChecks(container);
+    });
+    sum.appendChild(cb);
+  }
+  sum.appendChild(el('span', 'ws-caret'));
+  sum.appendChild(el('span', 'ws-name', n.name === '' ? UNGROUPED : n.name));
+  sum.appendChild(el('span', 'ws-path', n.path ?? ''));
+  sum.appendChild(el('span', 'ws-count', String(n.sessions.length)));
+  if (!batchMode) {
+    const kebab = el('button', 'sess-kebab', '⋯') as HTMLButtonElement;
+    kebab.type = 'button';
+    kebab.title = '工作区操作';
+    kebab.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const r = kebab.getBoundingClientRect();
+      const cr = container.getBoundingClientRect();
+      openCtxMenu(container, r.left - cr.left, r.bottom - cr.top + 4, [
+        { label: '批量操作会话', onPick: () => { batchMode = true; selected.clear(); void loadTreeInto(container, null); } },
+        { label: '删除工作区', danger: true, onPick: () => void deleteWorkspace(container, n.name) },
+      ]);
+    });
+    sum.appendChild(kebab);
+  }
+  det.appendChild(sum);
+  const body = el('div', 'ws-body');
+  for (const s of n.sessions) body.appendChild(renderLeaf(container, s));
+  det.appendChild(body);
+  wrap.appendChild(det);
+  return wrap;
+}
+
+function renderHostSection(container: HTMLElement, hostSessions: SessionInfo[]): HTMLElement | null {
+  if (!hostSessions.length) return null;
+  const sec = el('div', 'ws-host');
+  const head = el('div', 'ws-host-head', MAIN_GROUP);
+  sec.appendChild(head);
+  for (const s of hostSessions) sec.appendChild(renderLeaf(container, s));
+  return sec;
+}
+
+// ---- 新建入口 ---------------------------------------------------------------------
+
+export function newWorkspace(): void {
+  const name = window.prompt('新建工作区 · 名称（字母/数字/下划线/斜杠）', '');
+  if (name === null) return;
+  const t = name.trim();
+  if (t === '') return;
+  void api
+    .createWorkspace(t)
+    .then(() => {
+      const foot = document.getElementById('sideFoot');
+      if (foot) foot.textContent = '工作区已创建：' + t;
+      void loadSessions();
+    })
+    .catch((err: unknown) => {
+      const foot = document.getElementById('sideFoot');
+      if (foot) foot.textContent = '创建工作区失败：' + (err instanceof Error ? err.message : String(err));
+    });
+}
+
+/** 新建会话弹窗：标题 + 选择工作区。 */
+export function newSession(container: HTMLElement): void {
+  const scrim = el('div', 'modal-scrim');
+  const card = el('div', 'modal-card');
+  card.appendChild(el('div', 'modal-card-title', '新建会话'));
+  const titleInput = el('input', 'cfg-input') as HTMLInputElement;
+  titleInput.placeholder = '会话标题';
+  card.appendChild(titleInput);
+  const wsNamesList = wsNames(container);
+  const wsSel = document.createElement('select');
+  wsSel.className = 'cfg-input';
+  const optRoot = document.createElement('option');
+  optRoot.value = '';
+  optRoot.textContent = '默认工作区（root）';
+  wsSel.appendChild(optRoot);
+  for (const w of wsNamesList) {
+    if (w === MAIN_GROUP) continue;
+    const o = document.createElement('option');
+    o.value = w;
+    o.textContent = w;
+    wsSel.appendChild(o);
+  }
+  card.appendChild(wsSel);
+  const actions = el('div', 'modal-card-actions');
+  const cancel = el('button', 'btn btn-soft', '取消') as HTMLButtonElement;
+  cancel.type = 'button';
+  const create = el('button', 'btn btn-accent', '创建') as HTMLButtonElement;
+  create.type = 'button';
+  const close = () => scrim.remove();
+  cancel.addEventListener('click', close);
+  create.addEventListener('click', () => {
+    const t = titleInput.value.trim();
+    if (!t) {
+      titleInput.focus();
+      return;
+    }
+    const ws = wsSel.value === '' ? null : wsSel.value;
+    create.disabled = true;
+    create.textContent = '创建中…';
+    void api
+      .createSession({ workspace: ws, title: t })
+      .then(() => {
+        const foot = document.getElementById('sideFoot');
+        if (foot) foot.textContent = '会话已创建：' + t;
+        close();
+        void loadSessions();
+      })
+      .catch((err: unknown) => {
+        const foot = document.getElementById('sideFoot');
+        if (foot) foot.textContent = '创建会话失败：' + (err instanceof Error ? err.message : String(err));
+        create.disabled = false;
+        create.textContent = '创建';
+      });
+  });
+  actions.appendChild(cancel);
+  actions.appendChild(create);
+  card.appendChild(actions);
+  scrim.appendChild(card);
+  document.body.appendChild(scrim);
+  titleInput.focus();
+}
+
+// ---- 树渲染主流程 ----------------------------------------------------------------
+
+function renderBatchBar(container: HTMLElement): void {
+  const bar = el('div', 'sess-batchbar');
+  bar.appendChild(el('span', 'sess-batchbar-count', '已选 0'));
+  const arch = el('button', 'btn-mini', '批量归档') as HTMLButtonElement;
+  arch.type = 'button';
+  arch.addEventListener('click', () => void batchAction(container, 'archive'));
+  const del = el('button', 'btn-mini danger', '批量删除') as HTMLButtonElement;
+  del.type = 'button';
+  del.addEventListener('click', () => void batchAction(container, 'delete'));
+  const quit = el('button', 'btn-mini', '退出批量') as HTMLButtonElement;
+  quit.type = 'button';
+  quit.addEventListener('click', () => exitBatch(container));
+  bar.appendChild(arch);
+  bar.appendChild(del);
+  bar.appendChild(quit);
+  container.appendChild(bar);
+}
+
+/** 载入并渲染工作区/会话树（侧栏与设置页「会话」页复用）。 */
+export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement | null): Promise<void> {
+  closeCtxMenu();
   container.innerHTML = '';
-  if (!sessions.length) {
+  if (countEl) countEl.textContent = '…';
+
+  let wsList: WorkspaceInfo[] | null = null;
+  try {
+    const w = await api.workspaces();
+    wsList = w.workspaces ?? null;
+  } catch {
+    wsList = null; // 降级：仅按 sessions 分组
+  }
+
+  let sessions: SessionInfo[];
+  try {
+    const d = await api.sessions();
+    sessions = d.sessions ?? [];
+  } catch (err) {
+    container.innerHTML = '';
+    container.appendChild(el('div', 'side-note err', '会话接口不可用'));
+    container.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+    if (countEl) countEl.textContent = '—';
+    return;
+  }
+
+  if (countEl) countEl.textContent = String(sessions.filter((s) => s.archived !== true).length);
+  if (batchMode) renderBatchBar(container);
+
+  const hostSessions = sessions.filter((s) => s.kind === 'host' || s.live === true);
+  const host = renderHostSection(container, hostSessions);
+  if (host) container.appendChild(host);
+
+  const nodes = collectNodes(sessions, wsList);
+  if (!nodes.length && !host) {
     container.appendChild(el('div', 'side-note', '无会话记录'));
     return;
   }
-  for (const g of groupSessions(sessions)) {
-    const group = el('div', 'sess-group');
-    const title = el('div', 'sess-group-title');
-    title.appendChild(el('span', 'sess-group-name', g.name));
-    title.appendChild(el('span', 'sess-group-count', String(g.sessions.length)));
-    group.appendChild(title);
-    for (const s of g.sessions) group.appendChild(renderBar(s, container));
-    container.appendChild(group);
-  }
+  for (const n of nodes) container.appendChild(renderWorkspaceNode(container, n));
 }
 
-async function expandPreview(bar: HTMLElement): Promise<void> {
-  const id = bar.dataset.id ?? '';
-  const pv = bar.querySelector<HTMLElement>('.sess-bar-preview');
-  if (!pv) return;
-  pv.innerHTML = '';
-  pv.appendChild(el('div', 'sess-bar-pv-note', '加载预览…'));
-  pv.classList.add('open');
-  const p = await loadPreview(id);
-  if (!bar.isConnected) return; // 预览加载期间列表已重渲染
-  pv.innerHTML = '';
-  if (!p.ok) {
-    pv.appendChild(el('div', 'sess-bar-pv-note err', '预览不可用：' + (p.error || '—')));
-    return;
-  }
-  if (p.q === undefined && p.a === undefined) {
-    pv.appendChild(el('div', 'sess-bar-pv-note', '暂无消息'));
-    return;
-  }
-  if (p.q !== undefined) {
-    const ql = el('div', 'sess-bar-pv-line sess-bar-pv-q');
-    ql.appendChild(el('span', 'sess-bar-pv-tag', 'Q'));
-    ql.appendChild(el('span', null, p.q));
-    pv.appendChild(ql);
-  }
-  if (p.q !== undefined && p.a !== undefined) pv.appendChild(el('div', 'sess-bar-pv-sep'));
-  if (p.a !== undefined) {
-    const al = el('div', 'sess-bar-pv-line sess-bar-pv-a');
-    al.appendChild(el('span', 'sess-bar-pv-tag', 'A'));
-    al.appendChild(el('span', null, p.a));
-    pv.appendChild(al);
-  }
+// ---- 装配 ------------------------------------------------------------------------
+
+export function loadSessions(): Promise<void> {
+  return loadTreeInto(need<HTMLElement>('#sessionTree'), need<HTMLElement>('#sessionCount'));
 }
 
-// ---- 交互（悬停变长 / 停留预览 / 邻近度） --------------------------------------
-
-function attachSessionBars(container: HTMLElement): void {
-  if (container.dataset.sessBound === '1') return;
-  container.dataset.sessBound = '1';
-
-  let hoverTimer: number | null = null;
-  let rafPending = false;
-
-  const setGrow = (b: HTMLElement, g: number) => b.style.setProperty('--grow', g.toFixed(3));
-
-  container.addEventListener('mouseover', (e) => {
-    const target = e.target instanceof Element ? (e.target as Element).closest('.sess-bar') : null;
-    if (!target || !container.contains(target)) return;
-    const bar = target as HTMLElement;
-    if (hoverTimer !== null) window.clearTimeout(hoverTimer);
-    // 关闭其它长条的展开预览
-    for (const other of container.querySelectorAll<HTMLElement>('.sess-bar-preview.open')) {
-      if (other.parentElement !== bar) other.classList.remove('open');
-    }
-    hoverTimer = window.setTimeout(() => {
-      hoverTimer = null;
-      void expandPreview(bar);
-    }, PREVIEW_DEBOUNCE_MS);
+export function initSessionsPanel(): void {
+  const tree = need<HTMLElement>('#sessionTree');
+  need<HTMLButtonElement>('#btnReloadSessions').addEventListener('click', () => {
+    void loadSessions();
   });
-
-  container.addEventListener('mouseleave', () => {
-    if (hoverTimer !== null) {
-      window.clearTimeout(hoverTimer);
-      hoverTimer = null;
-    }
-    for (const pv of container.querySelectorAll<HTMLElement>('.sess-bar-preview.open')) {
-      pv.classList.remove('open');
-    }
-    for (const b of container.querySelectorAll<HTMLElement>('.sess-bar')) setGrow(b, 0);
+  need<HTMLButtonElement>('#btnClearSess').addEventListener('click', () => {
+    clearCurrentSession();
   });
-
-  // 邻近度：鼠标越近的长条越长，向两侧递减（rAF 节流）
-  container.addEventListener('mousemove', (e) => {
-    if (rafPending) return;
-    rafPending = true;
-    requestAnimationFrame(() => {
-      rafPending = false;
-      const rect = container.getBoundingClientRect();
-      if (e.clientY < rect.top || e.clientY > rect.bottom) return;
-      const bars = Array.from(container.querySelectorAll<HTMLElement>('.sess-bar'));
-      if (!bars.length) return;
-      for (const b of bars) {
-        const r = b.getBoundingClientRect();
-        const center = r.top + r.height / 2;
-        const dist = Math.abs(e.clientY - center);
-        setGrow(b, Math.max(0, 1 - dist / PROXIMITY_RANGE));
-      }
-    });
+  need<HTMLButtonElement>('#btnNewWs').addEventListener('click', newWorkspace);
+  need<HTMLButtonElement>('#btnNewSess').addEventListener('click', () => newSession(tree));
+  document.addEventListener('click', (e) => {
+    // 点击外部关闭菜单（菜单内按钮已 stopPropagation）
+    if (!(e.target instanceof Element) || !e.target.closest('.sess-menu')) closeCtxMenu();
   });
-}
-
-// ---- 公共 API -----------------------------------------------------------------
-
-/** 载入会话长条列表（供侧栏与「通用设置 → 会话」页复用；点击仅选中）。 */
-export function loadSessionBars(container: HTMLElement, countEl: HTMLElement | null): Promise<void> {
-  attachSessionBars(container);
-  if (countEl) countEl.textContent = '…';
-  return api
-    .sessions()
-    .then((d) => {
-      S.sessions = d.sessions ?? [];
-      if (countEl) countEl.textContent = String(S.sessions.length);
-      renderGroups(container, S.sessions);
-    })
-    .catch((err: unknown) => {
-      container.innerHTML = '';
-      container.appendChild(el('div', 'side-note err', '会话接口不可用'));
-      container.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
-      if (countEl) countEl.textContent = '—';
-    });
+  void loadSessions();
 }
 
 /** 清空当前会话（确认后 /api/clear + 本地消息流复位）。 */
@@ -289,20 +479,4 @@ export function clearCurrentSession(foot?: HTMLElement | null): void {
       const f = foot ?? document.getElementById('sideFoot');
       if (f) f.textContent = '清空失败：' + (err instanceof Error ? err.message : String(err));
     });
-}
-
-// ---- 侧栏装配 -----------------------------------------------------------------
-
-export function loadSessions(): Promise<void> {
-  return loadSessionBars(need<HTMLElement>('#sessionTree'), need<HTMLElement>('#sessionCount'));
-}
-
-export function initSessionsPanel(): void {
-  need<HTMLButtonElement>('#btnReloadSessions').addEventListener('click', () => {
-    void loadSessions();
-  });
-  need<HTMLButtonElement>('#btnClearSess').addEventListener('click', () => {
-    clearCurrentSession();
-  });
-  void loadSessions();
 }

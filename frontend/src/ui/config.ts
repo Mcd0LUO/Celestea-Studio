@@ -8,7 +8,8 @@ import { api, ApiError } from '../api';
 import { el, need } from '../utils/dom';
 import type { ConfigInfo, ConfigPatch } from '../types';
 import { initToolsSection, loadToolsSection } from './tools';
-import { clearCurrentSession, loadSessionBars } from './sessions';
+import { clearCurrentSession, loadTreeInto as loadSessionTree } from './sessions';
+import { initProvidersSection, loadProviders } from './providers';
 
 const page = need<HTMLElement>('#settingsPage');
 const box = need<HTMLElement>('#settingsConfig');
@@ -98,7 +99,7 @@ function renderForm(cfg: ConfigInfo, statusWindow: number | null): void {
   form.appendChild(ctl.field('API Key', apiKeyCtl, '仅用于热调；不会从后端读取明文'));
 
   const ctxWin = cfg.context_window ?? cfg.context_window_tokens ?? statusWindow;
-  const ctxCtl = ctl.num(ctxWin, '未设置（后端未暴露）');
+  const ctxCtl = ctl.num(ctxWin, '默认 1M（1000000 tokens）');
   form.appendChild(ctl.field('上下文窗口', ctxCtl));
 
   const maxOutCtl = ctl.num(cfg.max_output_tokens ?? null, '未限制');
@@ -224,7 +225,7 @@ export async function loadConfig(): Promise<void> {
 
 // ---- 左导航 + 右内容 -----------------------------------------------------------
 
-const PANES = ['config', 'tools', 'sessions'] as const;
+const PANES = ['config', 'tools', 'sessions', 'providers'] as const;
 type PaneName = (typeof PANES)[number];
 
 let currentPane: PaneName = 'config';
@@ -245,22 +246,26 @@ function showPane(name: PaneName): void {
     void loadConfig();
   } else if (name === 'tools') {
     void loadToolsSection();
-  } else {
-    void loadSessionBars(
+  } else if (name === 'sessions') {
+    void loadSessionTree(
       need<HTMLElement>('#settingsSessions'),
       need<HTMLElement>('#settingsSessionCount'),
     );
+  } else {
+    void loadProviders();
   }
 }
 
 function reloadCurrentPane(): void {
   if (currentPane === 'config') void loadConfig();
   else if (currentPane === 'tools') void loadToolsSection();
-  else {
-    void loadSessionBars(
+  else if (currentPane === 'sessions') {
+    void loadSessionTree(
       need<HTMLElement>('#settingsSessions'),
       need<HTMLElement>('#settingsSessionCount'),
     );
+  } else {
+    void loadProviders();
   }
 }
 
@@ -283,7 +288,7 @@ export function initSettingsPage(): void {
     navEl(n).addEventListener('click', () => showPane(n));
   }
   need<HTMLButtonElement>('#btnReloadSessionsSettings').addEventListener('click', () => {
-    void loadSessionBars(
+    void loadSessionTree(
       need<HTMLElement>('#settingsSessions'),
       need<HTMLElement>('#settingsSessionCount'),
     );
@@ -295,4 +300,5 @@ export function initSettingsPage(): void {
     if (e.key === 'Escape' && !page.classList.contains('hidden')) closeSettings();
   });
   initToolsSection(); // #btnReloadTools
+  initProvidersSection(); // #btnAddProvider
 }

@@ -9,6 +9,7 @@ import { highlightCode } from '../utils/hljs';
 import { marked } from 'marked';
 import type { AssistantView } from './view';
 import { S } from '../state';
+import { railAdd, railReset, railSync } from './rail';
 
 marked.setOptions({ breaks: true, gfm: true });
 
@@ -59,6 +60,7 @@ export function resetMessages(): void {
   }
   S.assistant = null;
   S.turn = null;
+  railReset();
   renderEmptyHint();
 }
 
@@ -71,6 +73,7 @@ function renderTextView(view: AssistantView): void {
   view.content.innerHTML = md(view.text);
   highlightCode(view.content);
   autoscroll();
+  railSync(); // 流式高度变化 → 同步 rail 条目位置
 }
 
 function scheduleTextView(view: AssistantView): void {
@@ -160,6 +163,7 @@ export function appendThinking(view: AssistantView, delta: string): void {
   renderThinkTime(view);
   view.thinkBody.textContent = view.thinkText;
   autoscroll();
+  railSync();
 }
 
 /** Transition the bubble out of streaming state（冲刷正文 + 冻结思考时长）。 */
@@ -191,6 +195,8 @@ export function addUserMessage(text: string): void {
   msg.appendChild(bubble);
   col.appendChild(msg);
   MsgsEl.appendChild(col);
+  railAdd(col, 'user');
+  railSync();
   autoscroll(true);
 }
 
@@ -228,6 +234,8 @@ export function ensureAssistant(): AssistantView {
   msg.appendChild(bubble);
   col.appendChild(msg);
   MsgsEl.appendChild(col);
+  railAdd(col, 'assistant');
+  railSync();
 
   const view: AssistantView = {
     root: msg,

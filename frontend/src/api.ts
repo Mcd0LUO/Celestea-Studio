@@ -3,6 +3,8 @@
 // 封装：请求/响应解析/ApiError；不持有 UI 状态、不做 DOM 操作。
 // ============================================================================
 import type {
+  BatchIdsReq,
+  BatchNamesReq,
   CancelResp,
   ClearResp,
   ConfigInfo,
@@ -10,10 +12,15 @@ import type {
   ConfigSaveResp,
   HealthInfo,
   MessagesResp,
+  ProviderFetchResp,
+  ProviderTestResp,
+  ProvidersResp,
+  SessionCreateReq,
   SessionsResp,
   StatusSnapshot,
   ToolsResp,
   TurnResp,
+  WorkspacesResp,
 } from './types';
 
 export class ApiError extends Error {
@@ -78,4 +85,30 @@ export const api = {
   clear: () => postJson<ClearResp>('/api/clear', {}),
   turn: (input: string) => postJson<TurnResp>('/api/turn', { input }),
   cancel: () => postJson<CancelResp>('/api/cancel', {}),
+  // ---- 工作区 / 会话管理（W236；缺失时 404 优雅降级） ----
+  workspaces: () => requestJson<WorkspacesResp>('/api/workspaces'),
+  createWorkspace: (name: string) => postJson<ClearResp>('/api/workspaces', { name }),
+  deleteWorkspace: (name: string) =>
+    postJson<ClearResp>('/api/workspaces/' + encodeURIComponent(name) + '/delete', {}),
+  batchDeleteWorkspaces: (names: string[]) =>
+    postJson<ClearResp>('/api/workspaces/batch-delete', { names } as BatchNamesReq),
+  createSession: (req: SessionCreateReq) => postJson<ClearResp>('/api/sessions', req),
+  archiveSession: (id: string) =>
+    postJson<ClearResp>('/api/sessions/' + encodeURIComponent(id) + '/archive', {}),
+  unarchiveSession: (id: string) =>
+    postJson<ClearResp>('/api/sessions/' + encodeURIComponent(id) + '/unarchive', {}),
+  batchArchiveSessions: (ids: string[]) =>
+    postJson<ClearResp>('/api/sessions/batch-archive', { ids } as BatchIdsReq),
+  batchDeleteSessions: (ids: string[]) =>
+    postJson<ClearResp>('/api/sessions/batch-delete', { ids } as BatchIdsReq),
+  // ---- 模型提供商（W236；缺失时 404 优雅降级） ----
+  providers: () => requestJson<ProvidersResp>('/api/providers'),
+  saveProvider: (payload: unknown) => postJson<ClearResp>('/api/providers', payload),
+  deleteProvider: (id: string) =>
+    postJson<ClearResp>('/api/providers/' + encodeURIComponent(id) + '/delete', {}),
+  testProvider: (payload: unknown) => postJson<ProviderTestResp>('/api/providers/test', payload),
+  fetchProviderModels: (id: string) =>
+    postJson<ProviderFetchResp>('/api/providers/' + encodeURIComponent(id) + '/models/fetch', {}),
+  setDefaultModel: (model: string) =>
+    postJson<ClearResp>('/api/providers/default', { model }),
 };
