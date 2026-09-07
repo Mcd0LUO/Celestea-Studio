@@ -188,3 +188,19 @@
 .ws-fs-status { font-size: 11.5px; font-family: var(--mono); min-height: 14px; color: var(--c-text-3); }
 .ws-fs-status.ok { color: var(--c-ok); }
 .ws-fs-status.err { color: var(--c-err); }
+
+/* ---- 二次确认弹窗（破坏性操作） ---- */
+.confirm-card { width: min(420px, calc(100vw - 40px)); }
+.confirm-message {
+  font-size: 13px; color: var(--c-text-1); line-height: 1.65;
+  white-space: pre-wrap; word-break: break-word;
+  padding: 2px 0 4px;
+}
+.btn-danger {
+  background: var(--c-err);
+  border-color: var(--c-err);
+  color: oklch(0.98 0.005 25);
+  font-weight: 600;
+}
+.btn-danger:hover { background: var(--c-err); filter: brightness(1.15); }
+.btn-danger:disabled { opacity: .4; cursor: default; filter: none; }

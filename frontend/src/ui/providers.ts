@@ -9,6 +9,7 @@
 import { api } from '../api';
 import { el, need } from '../utils/dom';
 import type { ProviderInfo, ProviderModelSpec } from '../types';
+import { confirmDialog } from './confirm';
 
 const boxEl = need<HTMLElement>('#settingsProviders');
 
@@ -70,11 +71,18 @@ function renderProviders(): void {
     const del = el('button', 'btn-mini danger', '删除') as HTMLButtonElement;
     del.type = 'button';
     del.addEventListener('click', () => {
-      if (!window.confirm('确认删除提供商「' + (p.name || p.id) + '」？')) return;
-      void api
-        .deleteProvider(p.id)
-        .then(() => void loadProviders())
-        .catch((err: unknown) => setMsg('删除失败：' + fmtErr(err)));
+      void confirmDialog({
+        title: '删除提供商',
+        message: '确认删除提供商「' + (p.name || p.id) + '」？',
+        okLabel: '删除',
+        danger: true,
+      }).then((ok) => {
+        if (!ok) return;
+        void api
+          .deleteProvider(p.id)
+          .then(() => void loadProviders())
+          .catch((err: unknown) => setMsg('删除失败：' + fmtErr(err)));
+      });
     });
     tdOps.appendChild(edit);
     tdOps.appendChild(del);

@@ -17,6 +17,7 @@ import type { SessionInfo, WorkspaceInfo } from '../types';
 import { S } from '../state';
 import { resetMessages } from './messages';
 import { switchToSession } from './restore';
+import { confirmDialog } from './confirm';
 
 // ---- 面板状态 ---------------------------------------------------------------------
 
@@ -72,7 +73,21 @@ function refreshChecks(container: HTMLElement): void {
 async function batchAction(container: HTMLElement, action: 'archive' | 'delete'): Promise<void> {
   const ids = Array.from(selected);
   if (!ids.length) return;
-  if (action === 'delete' && !window.confirm('确认批量删除 ' + ids.length + ' 个会话？')) return;
+  const ok = await confirmDialog(
+    action === 'delete'
+      ? {
+          title: '批量删除',
+          message: '将批量删除 ' + ids.length + ' 个会话。删除后可在回收目录恢复，确认？',
+          okLabel: '批量删除',
+          danger: true,
+        }
+      : {
+          title: '批量归档',
+          message: '确认归档 ' + ids.length + ' 个会话？',
+          okLabel: '批量归档',
+        },
+  );
+  if (!ok) return;
   try {
     if (action === 'archive') await api.batchArchiveSessions(ids);
     else await api.batchDeleteSessions(ids);
@@ -146,6 +161,12 @@ async function activateSession(container: HTMLElement, id: string): Promise<void
 }
 
 async function archiveSession(container: HTMLElement, id: string): Promise<void> {
+  const ok = await confirmDialog({
+    title: '归档会话',
+    message: '确认归档会话「' + id + '」？',
+    okLabel: '归档',
+  });
+  if (!ok) return;
   try {
     await api.archiveSession(id);
     void loadTreeInto(container, null);
@@ -155,7 +176,13 @@ async function archiveSession(container: HTMLElement, id: string): Promise<void>
 }
 
 async function deleteSession(container: HTMLElement, id: string): Promise<void> {
-  if (!window.confirm('确认删除会话「' + id + '」？')) return;
+  const ok = await confirmDialog({
+    title: '删除会话「' + id + '」',
+    message: '删除后可在回收目录恢复，确认？',
+    okLabel: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     await api.batchDeleteSessions([id]);
     void loadTreeInto(container, null);
@@ -165,7 +192,13 @@ async function deleteSession(container: HTMLElement, id: string): Promise<void> 
 }
 
 async function deleteWorkspace(container: HTMLElement, name: string): Promise<void> {
-  if (!window.confirm('确认注销工作区「' + name + '」？（仅注销注册，不影响磁盘文件）')) return;
+  const ok = await confirmDialog({
+    title: '删除工作区「' + name + '」',
+    message: '删除后可在回收目录恢复，确认？',
+    okLabel: '删除',
+    danger: true,
+  });
+  if (!ok) return;
   try {
     await api.deleteWorkspace(name);
     note('工作区已注销：' + name);
@@ -175,23 +208,31 @@ async function deleteWorkspace(container: HTMLElement, name: string): Promise<vo
   }
 }
 
-/** 清空活跃会话（POST /api/clear）。 */
+/** 清空活跃会话（POST /api/clear；二次确认，默认焦点在取消）。 */
 function clearActive(): void {
-  void api
-    .clear()
-    .then((d) => {
-      if (d.ok) {
-        note('当前会话已清空');
-        resetMessages();
-        S.assistant = null;
-        S.turn = null;
-      } else {
-        note('清空失败（返回异常）');
-      }
-    })
-    .catch((err: unknown) => {
-      note('清空失败：' + (err instanceof Error ? err.message : String(err)));
-    });
+  void confirmDialog({
+    title: '清空当前会话',
+    message: '将清空当前会话全部消息，且不可恢复。确认清空？',
+    okLabel: '清空',
+    danger: true,
+  }).then((ok) => {
+    if (!ok) return;
+    void api
+      .clear()
+      .then((d) => {
+        if (d.ok) {
+          note('当前会话已清空');
+          resetMessages();
+          S.assistant = null;
+          S.turn = null;
+        } else {
+          note('清空失败（返回异常）');
+        }
+      })
+      .catch((err: unknown) => {
+        note('清空失败：' + (err instanceof Error ? err.message : String(err)));
+      });
+  });
 }
 
 // ---- 渲染：工作区胶囊条 + 会话列表 ----------------------------------------------------
@@ -218,8 +259,7 @@ function renderPill(container: HTMLElement, w: WorkspaceInfo): HTMLElement {
         label: '清空（活跃会话）',
         disabled: !inWs,
         onPick: () => {
-          if (!inWs) return;
-          if (window.confirm('确认清空当前活跃会话？')) clearActive();
+          if (inWs) clearActive();
         },
       },
       { label: '批量操作会话', onPick: () => { batchMode = true; selected.clear(); void loadTreeInto(container, null); } },
