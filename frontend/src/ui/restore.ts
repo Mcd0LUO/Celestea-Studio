@@ -212,8 +212,11 @@ export async function restoreSessionHistory(id: string, guard?: () => boolean): 
   if (!msgs) return;
   msgs.replaceChildren(...off.childNodes);
   if (!recent.length) {
-    // 空会话：重建空态视图
+    // 空会话：空态提示 + 「以下为本次会话」分隔线（第 12 轮：新会话切换可见）
     renderEmptyHint();
+    const sep = el('div', 'live-sep');
+    sep.appendChild(el('span', null, '以下为本次会话'));
+    msgs.appendChild(sep);
   }
   railSync();
   autoscroll(true);

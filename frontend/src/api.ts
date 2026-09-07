@@ -18,6 +18,7 @@ import type {
   ProviderTestResp,
   ProvidersResp,
   SessionCreateReq,
+  SessionCreateResp,
   SessionsResp,
   StatusSnapshot,
   ToolsResp,
@@ -89,8 +90,9 @@ export const api = {
   cancel: () => postJson<CancelResp>('/api/cancel', {}),
   // ---- 工作区 / 会话管理（W236；缺失时 404 优雅降级） ----
   workspaces: () => requestJson<WorkspacesResp>('/api/workspaces'),
-  createWorkspace: (name: string, path?: string) =>
-    postJson<ClearResp>('/api/workspaces', path ? { name, path } : { name }),
+  /** W243 任务2：纯文件管理器建工作区——仅按目录注册（name 由后端取文件夹 basename）。 */
+  createWorkspaceByPath: (path: string) =>
+    postJson<ClearResp>('/api/workspaces', { path }),
   /** 重命名工作区（W243）：POST /api/workspaces/{name}/rename {"new_name"}。 */
   renameWorkspace: (name: string, newName: string) =>
     postJson<ClearResp>('/api/workspaces/' + encodeURIComponent(name) + '/rename', {
@@ -100,7 +102,7 @@ export const api = {
     postJson<ClearResp>('/api/workspaces/' + encodeURIComponent(name) + '/delete', {}),
   batchDeleteWorkspaces: (names: string[]) =>
     postJson<ClearResp>('/api/workspaces/batch-delete', { names } as BatchNamesReq),
-  createSession: (req: SessionCreateReq) => postJson<ClearResp>('/api/sessions', req),
+  createSession: (req: SessionCreateReq) => postJson<SessionCreateResp>('/api/sessions', req),
   /** 重命名会话（W243）：POST /api/sessions/{id}/rename {"new_title"}。 */
   renameSession: (id: string, newTitle: string) =>
     postJson<ClearResp>('/api/sessions/' + encodeURIComponent(id) + '/rename', {

@@ -180,6 +180,13 @@ export interface FsBrowseResp {
 export interface SessionCreateReq {
   workspace?: string | null;
   title: string;
+  /** W243：可选模型（空=跟随默认）。 */
+  model?: string;
+}
+
+/** POST /api/sessions 响应（W243 起携带新会话 id）。 */
+export interface SessionCreateResp extends OkResp {
+  id?: string;
 }
 
 export interface BatchIdsReq {

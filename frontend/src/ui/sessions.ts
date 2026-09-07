@@ -438,6 +438,7 @@ function renderWorkspaceNode(container: HTMLElement, name: string, list: Session
   kebab.addEventListener('click', (e) => {
     e.stopPropagation();
     openCtxMenu(container, kebab.getBoundingClientRect(), [
+      { label: '新建会话', onPick: () => newSession(name) },
       { label: '重命名', onPick: () => void renameWorkspace(container, name) },
       {
         label: '批量删除会话',
@@ -538,14 +539,18 @@ function stopWorkerPoll(): void {
 
 // ---- 新建入口 -------------------------------------------------------------------------
 
-/** 新建会话弹窗：标题 + 选择工作区（presetWs 预选）。 */
+/** 新建会话弹窗：标题 + 选择工作区（presetWs 预选）+ 可选模型。
+ *  创建成功 → 自动激活（POST /api/sessions/{id}/activate）→ 树刷新 + 活跃高亮
+ *  + 聊天区切换到新会话（空历史 + 「以下为本次会话」分隔线）。
+ *  任一步失败给出具体提示（W243 端点未就绪时优雅降级）。 */
 export function newSession(presetWs?: string): void {
   const scrim = el('div', 'modal-scrim');
   const card = el('div', 'modal-card');
   card.appendChild(el('div', 'modal-card-title', '新建会话'));
   const titleInput = el('input', 'cfg-input') as HTMLInputElement;
-  titleInput.placeholder = '会话标题';
+  titleInput.placeholder = '会话标题（必填）';
   card.appendChild(titleInput);
+
   const wsSel = document.createElement('select');
   wsSel.className = 'cfg-input';
   const optRoot = document.createElement('option');
@@ -559,7 +564,52 @@ export function newSession(presetWs?: string): void {
     wsSel.appendChild(o);
   }
   if (presetWs) wsSel.value = presetWs;
-  card.appendChild(wsSel);
+  const wsRow = el('label', 'prov-field');
+  wsRow.appendChild(el('span', 'prov-field-label', '工作区'));
+  wsRow.appendChild(wsSel);
+  card.appendChild(wsRow);
+
+  // 可选模型（W243 任务4）：跟随默认 + providers 全部模型
+  const modelSel = document.createElement('select');
+  modelSel.className = 'cfg-input';
+  const optDef = document.createElement('option');
+  optDef.value = '';
+  optDef.textContent = '跟随默认';
+  modelSel.appendChild(optDef);
+  const modelRow = el('label', 'prov-field');
+  modelRow.appendChild(el('span', 'prov-field-label', '模型'));
+  modelRow.appendChild(modelSel);
+  card.appendChild(modelRow);
+  void api
+    .providers()
+    .then((d) => {
+      const ps = d.providers ?? [];
+      for (const p of ps) {
+        for (const m of p.models ?? []) {
+          const o = document.createElement('option');
+          o.value = m.id;
+          o.textContent = (p.name || p.id) + ' · ' + m.id + (m.name && m.name !== m.id ? '（' + m.name + '）' : '');
+          modelSel.appendChild(o);
+        }
+      }
+      if (!ps.length) {
+        const o = document.createElement('option');
+        o.value = '';
+        o.textContent = '（暂无可选模型）';
+        o.disabled = true;
+        modelSel.appendChild(o);
+      }
+    })
+    .catch(() => {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = '（模型列表暂不可用）';
+      o.disabled = true;
+      modelSel.appendChild(o);
+    });
+
+  const status = el('div', 'ws-fs-status');
+  card.appendChild(status);
   const actions = el('div', 'modal-card-actions');
   const cancel = el('button', 'btn btn-soft', '取消') as HTMLButtonElement;
   cancel.type = 'button';
@@ -570,21 +620,73 @@ export function newSession(presetWs?: string): void {
   create.addEventListener('click', () => {
     const t = titleInput.value.trim();
     if (!t) {
+      status.className = 'ws-fs-status err';
+      status.textContent = '标题不能为空';
       titleInput.focus();
       return;
     }
     const ws = wsSel.value === '' ? null : wsSel.value;
+    const model = modelSel.value === '' ? undefined : modelSel.value;
     create.disabled = true;
     create.textContent = '创建中…';
-    void api
-      .createSession({ workspace: ws, title: t })
-      .then(() => {
-        note('会话已创建：' + t);
+    const doCreate = (withModel: boolean) =>
+      api.createSession(withModel && model ? { workspace: ws, title: t, model } : { workspace: ws, title: t });
+    void doCreate(true)
+      .catch((err: unknown) => {
+        // 降级：后端未支持 model 字段时（4xx）重试不带 model
+        const e = err as { status?: number };
+        if (model && e && typeof e.status === 'number' && e.status >= 400 && e.status < 500) {
+          return doCreate(false);
+        }
+        throw err;
+      })
+      .then(async (r) => {
+        if (r.ok === false) {
+          throw new Error(r.error || '后端拒绝');
+        }
+        // 定位新会话 id（响应优先；缺失则按标题取最新）
+        let id = r.id;
+        if (!id) {
+          try {
+            const d = await api.sessions();
+            const cands = (d.sessions ?? []).filter((x) => x.title === t);
+            cands.sort((a, b) => (b.modified ?? 0) - (a.modified ?? 0));
+            id = cands[0]?.id;
+          } catch {
+            id = undefined;
+          }
+        }
+        if (!id) {
+          status.className = 'ws-fs-status err';
+          status.textContent = '会话已创建，但无法定位其 id——请刷新会话树后手动激活';
+          close();
+          void loadSessions();
+          return;
+        }
+        // 自动激活 + 聊天区切换
+        try {
+          const ar = await api.activateSession(id);
+          if (ar.ok === false) {
+            status.className = 'ws-fs-status err';
+            status.textContent = '创建成功，但激活失败：' + (ar.error || '—');
+            close();
+            void loadSessions();
+            return;
+          }
+          activeSession = ar.active_session ?? id;
+          S.selSession = activeSession;
+          note('已创建并激活会话：' + activeSession);
+          switchToSession(activeSession);
+        } catch (err) {
+          status.className = 'ws-fs-status err';
+          status.textContent = '创建成功，但激活失败：' + (err instanceof Error ? err.message : String(err));
+        }
         close();
         void loadSessions();
       })
       .catch((err: unknown) => {
-        note('创建会话失败：' + (err instanceof Error ? err.message : String(err)));
+        status.className = 'ws-fs-status err';
+        status.textContent = '创建失败：' + (err instanceof Error ? err.message : String(err));
         create.disabled = false;
         create.textContent = '创建';
       });
@@ -601,7 +703,8 @@ export function newSession(presetWs?: string): void {
 export function newWorkspace(): void {
   const scrim = el('div', 'modal-scrim');
   const card = el('div', 'modal-card ws-fs');
-  card.appendChild(el('div', 'modal-card-title', '新建工作区'));
+  card.appendChild(el('div', 'modal-card-title', '新建工作区 · 选择目录'));
+  card.appendChild(el('div', 'side-note', '选中目录即注册该目录为工作区（名称 = 文件夹名）'));
 
   let curPath = '';
 
@@ -616,16 +719,10 @@ export function newWorkspace(): void {
   addrRow.appendChild(addrInput);
   addrRow.appendChild(goBtn);
 
-  const nameRow = el('div', 'ws-fs-name');
-  const nameInput = el('input', 'cfg-input') as HTMLInputElement;
-  nameInput.placeholder = '工作区名称（字母/数字/下划线）';
-  nameRow.appendChild(nameInput);
-
   const status = el('div', 'ws-fs-status');
   card.appendChild(crumbs);
   card.appendChild(tree);
   card.appendChild(addrRow);
-  card.appendChild(nameRow);
   card.appendChild(status);
 
   function renderCrumbs(roots: string[], path: string): void {
@@ -712,25 +809,34 @@ export function newWorkspace(): void {
   const close = () => scrim.remove();
   cancel.addEventListener('click', close);
   create.addEventListener('click', () => {
-    const name = nameInput.value.trim();
-    if (!name) {
-      nameInput.focus();
+    const path = curPath || addrInput.value.trim();
+    if (!path) {
+      status.className = 'ws-fs-status err';
+      status.textContent = '请先选择/输入目录路径';
+      addrInput.focus();
       return;
     }
     create.disabled = true;
-    create.textContent = '创建中…';
+    create.textContent = '注册中…';
     void api
-      .createWorkspace(name, curPath || addrInput.value.trim() || undefined)
-      .then(() => {
-        note('工作区已创建：' + name);
+      .createWorkspaceByPath(path)
+      .then((r) => {
+        if (r.ok === false) {
+          status.className = 'ws-fs-status err';
+          status.textContent = '注册失败：' + (r.error || '—');
+          create.disabled = false;
+          create.textContent = '注册';
+          return;
+        }
+        note('工作区已注册：' + path);
         close();
         void loadSessions();
       })
       .catch((err: unknown) => {
         status.className = 'ws-fs-status err';
-        status.textContent = '创建工作区失败：' + (err instanceof Error ? err.message : String(err));
+        status.textContent = '注册失败：' + (err instanceof Error ? err.message : String(err));
         create.disabled = false;
-        create.textContent = '创建';
+        create.textContent = '注册';
       });
   });
   actions.appendChild(cancel);
