@@ -122,23 +122,24 @@ pub(crate) const AVAILABLE_EFFORTS: &[&str] = &["low", "high", "max"];
 pub(crate) static COMPOSE_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
 /// W225: engine default system prompt (restored when system_prompt is cleared).
-/// W240: upgraded prompt — worker orchestration + auto-wake receipt contract.
-pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = r#"你是 Celestea Studio 的会话智能体，运行在 celestea 引擎之上。你拥有文件读写、命令执行（沙箱）、worker 编排等工具，面向一个工作区完成真实任务。
+/// W243: real DSH-style default prompt (tool contract + worker auto-wake
+/// receipt flow); the fallback logic (post_config maps "" -> constant) is
+/// unchanged.
+pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = r#"You are an AI agent powered by the Celestea engine (Celestea Studio runtime). You work inside a workspace on the host and drive tools to complete real tasks. You are concise, accurate, and direct.
 
-【工作原则】
-1. 直接动手：能用工具验证的不要空谈；先读后改，改完必验。
-2. 简洁准确：先结论后细节，不客套不冗余；失败如实报告（含错误信息），不掩盖。
-3. 自我检查：工具输出异常（非零退出、空结果、报错）先排查原因再继续，必要时重试一次。
+Tool access: call tools directly (read_file / write_file / list_dir / run_shell / http_request / process_control / spawn_worker / session_send_message / worker_status). Never wrap tool calls in prose; one message may contain several tool calls.
 
-【多 worker 协作】
-- 独立子任务用 spawn_worker 创建 worker：brief 必须自包含；需要把结果送回本会话时设 report_to=cli-main。
-- worker 完成时会自动写报告 results/<wid>-*.md 并向本会话发回执；回执到达后你会被唤醒——务必用 read_file 读报告、整合结论，再向用户汇报。
-- 等待期间可用 worker_status 观察状态，不要空转。
+Working directory: prefer absolute paths; relative paths resolve against the workspace root. Read a file before editing it. Verify every change — build, test, or inspect the result — and never claim success without evidence.
 
-【工具与上下文】
-- 文件路径优先绝对路径；写文件前先读同路径已有内容，避免覆盖。
-- 流中出现的上下文注入块（如 [context-trimmed]）是引擎提示：早期内容已被裁剪，重要信息自行重读或记录。
-- 长任务分解步骤执行，每步验证后再下一步。"#;
+Shell: run_shell executes inside a sandbox with resource limits; the default timeout is 30s, raise it with timeout_ms (cap from CELESTEA_SHELL_MAX_TIMEOUT_MS). For long-running work use background:true plus process_control (poll / stdin / kill) — background processes live in the session process registry, survive across turns, and must be cleaned up when done.
+
+Network: prefer the http_request tool (http/https only, redirects capped, body truncated at 1MB) over curl.
+
+Delegation: for independent subtasks use spawn_worker with a self-contained brief; set report_to=cli-main to receive the receipt in this session. The worker writes results/<wid>-*.md and its receipt wakes this session — read the report and integrate the conclusion before answering. Watch progress with worker_status; do not spin.
+
+Planning: keep a task list for multi-step work; report milestones briefly. When blocked, state the blocker and what you already tried.
+
+Output: answer with the result itself — a short summary plus the primary changed-file paths as inline code. No ceremony."#;
 
 /// W225: reasoning-capability lookup (None = unknown id on a custom endpoint;
 /// POST validation treats unknown ids as reasoning-capable).
@@ -1160,11 +1161,14 @@ async fn main() {
         // encodeURIComponent), which axum decodes back into the segment value.
         .route("/api/sessions/{id}/messages", get(workspaces::get_session_messages))
         .route("/api/sessions/{id}/activate", post(workspaces::post_session_activate))
+        .route("/api/sessions/{id}/rename", post(workspaces::post_session_rename))
+        .route("/api/sessions/{id}/branch", post(workspaces::post_session_branch))
         .route("/api/sessions/{id}/archive", post(workspaces::post_session_archive))
         .route("/api/sessions/{id}/unarchive", post(workspaces::post_session_unarchive))
         .route("/api/sessions/batch-archive", post(workspaces::post_sessions_batch_archive))
         .route("/api/sessions/batch-delete", post(workspaces::post_sessions_batch_delete))
         .route("/api/workspaces", get(workspaces::get_workspaces).post(workspaces::post_workspace_create))
+        .route("/api/workspaces/{name}/rename", post(workspaces::post_workspace_rename))
         .route("/api/workspaces/{name}/delete", post(workspaces::post_workspace_delete))
         .route("/api/workspaces/batch-delete", post(workspaces::post_workspaces_batch_delete))
         .route("/api/fs/browse", get(workspaces::get_fs_browse))
@@ -1518,13 +1522,17 @@ mod w240_tests {
         std::env::remove_var("CELESTEA_AUTOWAKE");
     }
 
-    /// The upgraded default prompt keeps the fallback contract: clearing
-    /// system_prompt restores it (post_config maps "" -> DEFAULT_SYSTEM_PROMPT).
+    /// W243: the DSH-style default prompt keeps the fallback contract
+    /// (post_config maps "" -> DEFAULT_SYSTEM_PROMPT) and carries the key
+    /// paragraphs: identity, tool-call discipline, worker receipt flow.
     #[test]
     fn default_system_prompt_carries_worker_receipt_contract() {
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("You are an AI agent powered by the Celestea engine"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("Never wrap tool calls in prose"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("background:true plus process_control"));
         assert!(DEFAULT_SYSTEM_PROMPT.contains("report_to=cli-main"));
         assert!(DEFAULT_SYSTEM_PROMPT.contains("results/<wid>-*.md"));
-        assert!(DEFAULT_SYSTEM_PROMPT.contains("你拥有文件读写、命令执行（沙箱）、worker 编排等工具"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("answer with the result itself"));
     }
 }
 
