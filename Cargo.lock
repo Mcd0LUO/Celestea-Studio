@@ -267,9 +267,11 @@ dependencies = [
 name = "celestea-studio"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "celestea-core",
  "celestea-runtime",
+ "celestea-session",
  "futures",
  "reqwest",
  "serde",

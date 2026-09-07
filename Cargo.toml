@@ -21,3 +21,11 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # Same version/features the engine's celestea-llm already resolves, so no new
 # lockfile traffic.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+[dev-dependencies]
+# W239 tests: register REAL worker sessions in the engine's SessionRegistry
+# (the spawn_worker in-memory product) without composing a full Runtime.
+celestea-session = { path = "/src/celestea_harness/crates/session" }
+# W240 tests: scripted FakeLlm over the engine's native async-fn Llm trait
+# (same crate/version the engine tests already resolve).
+async-trait = "0.1"

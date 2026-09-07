@@ -353,6 +353,10 @@ pub struct SpawnReq {
     pub brief: String,
     pub title: Option<String>,
     pub model: Option<String>,
+    /// W240: engine report_to passthrough — the target session for the
+    /// worker's completion receipt ("cli-main" = this host session; the
+    /// receipt then wakes the auto-wake loop into an automatic turn).
+    pub report_to: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -414,6 +418,9 @@ pub async fn post_worker_spawn(
     }
     if let Some(m) = req.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         args["model"] = Value::String(m.to_string());
+    }
+    if let Some(r) = req.report_to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        args["report_to"] = Value::String(r.to_string());
     }
     dispatch_worker_tool(&st, "spawn_worker", args).await
 }

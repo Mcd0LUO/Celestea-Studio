@@ -966,6 +966,7 @@ mod tests {
             workspaces: Arc::new(crate::workspaces::WorkspaceRegistry::new(
                 dir.join("workspaces.json"),
             )),
+            gen_epoch: tokio::sync::watch::channel(0).0,
         });
         assert_eq!(st.gen.read().unwrap().model, "old-model");
 

@@ -55,7 +55,7 @@ use tokio_stream::StreamExt;
 use celestea_core::{Content, ToolDecision};
 use celestea_runtime::{
     load_dotenv, merge_profile, resolve_base_url, resolve_profile, EventSink, LoopEvent,
-    Profile, Runtime, SessionEvent, SessionLog, TurnOutcome,
+    Profile, Runtime, SessionEvent, SessionLog, TurnOutcome, WorkerRegistryService,
 };
 mod api;
 /// W236: model-provider management (providers.json + probe + default-model
@@ -122,8 +122,23 @@ pub(crate) const AVAILABLE_EFFORTS: &[&str] = &["low", "high", "max"];
 pub(crate) static COMPOSE_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
 /// W225: engine default system prompt (restored when system_prompt is cleared).
-pub(crate) const DEFAULT_SYSTEM_PROMPT: &str =
-    "You are celestea, an AI agent. You are concise, accurate and direct.";
+/// W240: upgraded prompt — worker orchestration + auto-wake receipt contract.
+pub(crate) const DEFAULT_SYSTEM_PROMPT: &str = r#"你是 Celestea Studio 的会话智能体，运行在 celestea 引擎之上。你拥有文件读写、命令执行（沙箱）、worker 编排等工具，面向一个工作区完成真实任务。
+
+【工作原则】
+1. 直接动手：能用工具验证的不要空谈；先读后改，改完必验。
+2. 简洁准确：先结论后细节，不客套不冗余；失败如实报告（含错误信息），不掩盖。
+3. 自我检查：工具输出异常（非零退出、空结果、报错）先排查原因再继续，必要时重试一次。
+
+【多 worker 协作】
+- 独立子任务用 spawn_worker 创建 worker：brief 必须自包含；需要把结果送回本会话时设 report_to=cli-main。
+- worker 完成时会自动写报告 results/<wid>-*.md 并向本会话发回执；回执到达后你会被唤醒——务必用 read_file 读报告、整合结论，再向用户汇报。
+- 等待期间可用 worker_status 观察状态，不要空转。
+
+【工具与上下文】
+- 文件路径优先绝对路径；写文件前先读同路径已有内容，避免覆盖。
+- 流中出现的上下文注入块（如 [context-trimmed]）是引擎提示：早期内容已被裁剪，重要信息自行重读或记录。
+- 长任务分解步骤执行，每步验证后再下一步。"#;
 
 /// W225: reasoning-capability lookup (None = unknown id on a custom endpoint;
 /// POST validation treats unknown ids as reasoning-capable).
@@ -341,9 +356,12 @@ pub(crate) fn prepare_gen(pj: Value, api_key: Option<&str>) -> Result<Gen, Strin
 
 /// W236: swap a prepared generation under the gen write lock; returns the
 /// new sanitized config JSON.
+/// W240: bumps the generation epoch — the autowake loop watches it to drop its
+/// old-mailbox recv subscription and rebind onto the new generation's mailbox.
 pub(crate) fn swap_gen(st: &Shared, gen: Gen) -> Value {
     let response = gen.config_json.clone();
     *st.gen.write().unwrap_or_else(|p| p.into_inner()) = gen;
+    let _ = st.gen_epoch.send_modify(|e| *e += 1);
     response
 }
 
@@ -374,6 +392,10 @@ pub(crate) struct AppState {
     /// W237: workspace registry (workspaces.json; the active session id is
     /// persisted here and drives CELESTEA_SESSION_DIR at boot/activation).
     pub(crate) workspaces: Arc<crate::workspaces::WorkspaceRegistry>,
+    /// W240: generation epoch (bumped by swap_gen); the autowake loop uses it
+    /// to detect a hot swap while parked on the old generation's mailbox and
+    /// rebind onto the new one.
+    pub(crate) gen_epoch: watch::Sender<u64>,
 }
 
 impl AppState {
@@ -689,6 +711,88 @@ async fn get_events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+/// W240: shared turn executor — drives one runtime.run_turn with the standard
+/// SSE sink + progress ticker and ALWAYS releases the busy slot afterwards.
+/// POST /api/turn spawns it; the autowake loop awaits it inline. Hard errors
+/// ride the SSE "error" phase and are returned for the caller to log.
+async fn execute_turn(
+    st: Shared,
+    runtime: Arc<Runtime>,
+    turn: u64,
+    input: String,
+    cancel_rx: watch::Receiver<bool>,
+) -> Result<TurnOutcome, String> {
+    let bcast = st.bcast.clone();
+    let seq = st.seq.clone();
+    let tracker = st.status.clone();
+    let view = st.status_view();
+
+    // Turn sink: feed the statusline tracker (steps from tool /
+    // tool_result, delta chars for tokens_per_sec) and forward every
+    // event to the SSE bus.
+    let sink: EventSink = {
+        let sink_bcast = bcast.clone();
+        let sink_seq = seq.clone();
+        let tracker = tracker.clone();
+        Arc::new(move |ev: LoopEvent| {
+            match &ev {
+                LoopEvent::Text(t) => tracker.add_chars(t.chars().count() as u64),
+                LoopEvent::Thinking(t) => tracker.add_chars(t.chars().count() as u64),
+                LoopEvent::ToolCall { .. } | LoopEvent::ToolResult(_) => tracker.add_step(),
+                LoopEvent::Done(_) => {}
+            }
+            let (kind, payload) = loop_event_to_json(ev);
+            let _ = sink_bcast.send(BusEvent {
+                kind,
+                data: json!({
+                    "turn": turn,
+                    "seq": sink_seq.fetch_add(1, Ordering::Relaxed),
+                    "payload": payload,
+                }),
+            });
+        })
+    };
+
+    // Drive the turn; every STATUS_TICK emit a "progress" status event
+    // carrying the live statusline (SSE incremental channel).
+    let mut ticker = tokio::time::interval(STATUS_TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await; // consume the immediate first tick
+    let run = runtime.run_turn(&input, Some(cancel_rx), Some(sink));
+    tokio::pin!(run);
+    let outcome = loop {
+        tokio::select! {
+            out = &mut run => break out,
+            _ = ticker.tick() => {
+                emit(&bcast, &seq, turn, "status", json!({
+                    "phase": "progress",
+                    "statusline": statusline_of(&view),
+                }));
+            }
+        }
+    };
+    let (phase, error) = match &outcome {
+        Ok(TurnOutcome::Completed) => ("completed", None),
+        Ok(TurnOutcome::Cancelled) => ("cancelled", None),
+        Err(e) => ("error", Some(e.to_string())),
+    };
+    let mut final_payload = json!({
+        "phase": phase,
+        "statusline": statusline_of(&view),
+    });
+    if let Some(e) = error {
+        final_payload["error"] = json!(e);
+    }
+    emit(&bcast, &seq, turn, "status", final_payload);
+
+    // W240: the busy-slot release is the LAST step on every path (completed /
+    // cancelled / error), so the next user turn or autowake pass can claim it.
+    let mut busy_slot = st.busy.lock().await;
+    *busy_slot = None;
+
+    outcome.map_err(|e| e.to_string())
+}
+
 async fn post_turn(State(st): State<Shared>, Json(req): Json<TurnReq>) -> impl IntoResponse {
     let input = req.input.trim().to_string();
     if input.is_empty() {
@@ -723,72 +827,10 @@ async fn post_turn(State(st): State<Shared>, Json(req): Json<TurnReq>) -> impl I
         let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
         gen.runtime.clone()
     };
-    let bcast = st.bcast.clone();
-    let seq = st.seq.clone();
-    let busy_slot = st.busy.clone();
-    let tracker = st.status.clone();
-    let view = st.status_view();
     tokio::spawn(async move {
-        // Turn sink: feed the statusline tracker (steps from tool /
-        // tool_result, delta chars for tokens_per_sec) and forward every
-        // event to the SSE bus.
-        let sink: EventSink = {
-            let sink_bcast = bcast.clone();
-            let sink_seq = seq.clone();
-            let tracker = tracker.clone();
-            Arc::new(move |ev: LoopEvent| {
-                match &ev {
-                    LoopEvent::Text(t) => tracker.add_chars(t.chars().count() as u64),
-                    LoopEvent::Thinking(t) => tracker.add_chars(t.chars().count() as u64),
-                    LoopEvent::ToolCall { .. } | LoopEvent::ToolResult(_) => tracker.add_step(),
-                    LoopEvent::Done(_) => {}
-                }
-                let (kind, payload) = loop_event_to_json(ev);
-                let _ = sink_bcast.send(BusEvent {
-                    kind,
-                    data: json!({
-                        "turn": turn,
-                        "seq": sink_seq.fetch_add(1, Ordering::Relaxed),
-                        "payload": payload,
-                    }),
-                });
-            })
-        };
-
-        // Drive the turn; every STATUS_TICK emit a "progress" status event
-        // carrying the live statusline (SSE incremental channel).
-        let mut ticker = tokio::time::interval(STATUS_TICK);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ticker.tick().await; // consume the immediate first tick
-        let run = runtime.run_turn(&input, Some(cancel_rx), Some(sink));
-        tokio::pin!(run);
-        let outcome = loop {
-            tokio::select! {
-                out = &mut run => break out,
-                _ = ticker.tick() => {
-                    emit(&bcast, &seq, turn, "status", json!({
-                        "phase": "progress",
-                        "statusline": statusline_of(&view),
-                    }));
-                }
-            }
-        };
-        let (phase, error) = match outcome {
-            Ok(TurnOutcome::Completed) => ("completed", None),
-            Ok(TurnOutcome::Cancelled) => ("cancelled", None),
-            Err(e) => ("error", Some(e.to_string())),
-        };
-        let mut final_payload = json!({
-            "phase": phase,
-            "statusline": statusline_of(&view),
-        });
-        if let Some(e) = error {
-            final_payload["error"] = json!(e);
+        if let Err(e) = execute_turn(st, runtime, turn, input, cancel_rx).await {
+            eprintln!("[celestea-studio] turn error: {e}");
         }
-        emit(&bcast, &seq, turn, "status", final_payload);
-
-        let mut busy_slot = busy_slot.lock().await;
-        *busy_slot = None;
     });
 
     (
@@ -804,6 +846,156 @@ async fn post_cancel(State(st): State<Shared>) -> Json<Value> {
             Json(json!({"ok": true, "cancelled": true}))
         }
         None => Json(json!({"ok": true, "cancelled": false})),
+    }
+}
+
+// ---- W240: mailbox auto-wake loop ------------------------------------------
+
+/// W240: CELESTEA_AUTOWAKE switch. Default ON; "0"/"off"/"false"/"no" disables
+/// the auto-wake loop (smoke comparisons / A-B runs). Any other value keeps
+/// the default (on).
+pub(crate) fn autowake_enabled() -> bool {
+    !matches!(
+        std::env::var("CELESTEA_AUTOWAKE").ok().as_deref().map(str::trim),
+        Some("0") | Some("off") | Some("false") | Some("no")
+    )
+}
+
+/// W240: spawn the auto-wake loop as a detached background task (started once
+/// at boot from main; lives for the process lifetime, ends on shutdown).
+pub(crate) fn spawn_autowake(st: Shared) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(autowake_loop(st))
+}
+
+/// W240: auto-wake loop — the "delivery wakes the agent" semantics for the
+/// active session's mailbox:
+///   * every iteration rebinds onto the CURRENT generation's cli-main mailbox
+///     (WorkerRegistryService from gen.runtime.ctx) and parks on recv();
+///   * a generation swap (swap_gen bumps gen_epoch) wakes the parked recv via
+///     the epoch watch, discarding the old-generation subscription; a message
+///     popped from a stale mailbox is re-queued onto the new generation's;
+///   * while a turn runs (busy guard taken) a popped message is re-queued and
+///     retried after a short backoff — no message is lost, and FIFO order is
+///     preserved because the drain takes the whole queue at once;
+///   * on wake: drain ALL pending messages (FIFO) into one input, claim the
+///     busy slot and run ONE automatic turn over the standard SSE bus (the
+///     client sees it live, exactly like a POST /api/turn);
+///   * turn errors are logged (eprintln) with a small backoff — never panic,
+///     never spin hot.
+pub(crate) async fn autowake_loop(st: Shared) {
+    /// Engine's host session id — mirrors the engine's pub(crate)
+    /// compose::HOST_SID: engine-side receipts target "cli-main".
+    const HOST_SID: &str = "cli-main";
+    /// Busy-conflict retry cadence (message left queued for the next pass).
+    const BUSY_RETRY: Duration = Duration::from_millis(250);
+    /// Backoff after a hard turn error / missing service.
+    const ERR_BACKOFF: Duration = Duration::from_millis(500);
+
+    loop {
+        // Generation-aware bind: subscribe to the epoch watch FIRST, then
+        // snapshot runtime + mailbox + epoch synchronously (no await in
+        // between), so a swap either lands before the snapshot (we read the
+        // new generation) or wakes the select below (we rebind).
+        let mut gen_watch = st.gen_epoch.subscribe();
+        // resolve the worker service first: the read guard must never be
+        // alive across an await (RwLockReadGuard is !Send and tokio::spawn
+        // requires a Send future)
+        let wr = {
+            let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+            gen.runtime.ctx.get::<WorkerRegistryService>()
+        };
+        let Some(wr) = wr else {
+            eprintln!("[celestea-studio] autowake: WorkerRegistryService missing; retrying");
+            tokio::time::sleep(ERR_BACKOFF).await;
+            continue;
+        };
+        let (runtime, mailbox, epoch) = {
+            let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+            (
+                gen.runtime.clone(),
+                wr.mailbox().clone(),
+                *st.gen_epoch.borrow(),
+            )
+        };
+
+        // Park on THIS generation's cli-main queue. A generation swap drops
+        // this subscription (the epoch watch fires) and the next iteration
+        // rebinds onto the new generation's mailbox.
+        let msg = tokio::select! {
+            m = mailbox.recv(HOST_SID) => m,
+            _ = gen_watch.changed() => continue,
+        };
+
+        // A swap may have raced the select: the popped message belongs to the
+        // OLD generation — hand it to the CURRENT generation's queue, rebind.
+        if *st.gen_epoch.borrow() != epoch {
+            {
+                let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+                if let Some(wr) = gen.runtime.ctx.get::<WorkerRegistryService>() {
+                    wr.mailbox().send(HOST_SID, msg.content, msg.from_label);
+                }
+            }
+            continue;
+        }
+
+        // Busy conflict: leave the message for the next pass — re-enqueue at
+        // the tail (FIFO order is preserved because the drain below takes the
+        // whole queue at once) and back off.
+        if st.busy.lock().await.is_some() {
+            mailbox.send(HOST_SID, msg.content, msg.from_label);
+            tokio::time::sleep(BUSY_RETRY).await;
+            continue;
+        }
+
+        // Claim the single-turn busy slot (same guard as post_turn), then
+        // re-verify the generation: post_config / session activate may have
+        // swapped it in the window before the claim.
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        *st.busy.lock().await = Some(cancel_tx);
+        if *st.gen_epoch.borrow() != epoch {
+            *st.busy.lock().await = None;
+            {
+                let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+                if let Some(wr) = gen.runtime.ctx.get::<WorkerRegistryService>() {
+                    wr.mailbox().send(HOST_SID, msg.content, msg.from_label);
+                }
+            }
+            continue;
+        }
+
+        // Drain everything pending (the recv'd message is already popped) and
+        // run ONE automatic turn with the receipts as its input, streamed
+        // over the standard SSE bus.
+        let mut msgs = vec![msg];
+        msgs.extend(mailbox.poll(HOST_SID));
+        let input = msgs
+            .iter()
+            .map(|m| {
+                if m.from_label.is_empty() {
+                    m.content.clone()
+                } else {
+                    format!("[from {}] {}", m.from_label, m.content)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        st.status.reset();
+        let turn = st.next_turn.fetch_add(1, Ordering::Relaxed);
+        emit(
+            &st.bcast,
+            &st.seq,
+            turn,
+            "status",
+            json!({"phase": "start", "source": "autowake", "statusline": st.statusline()}),
+        );
+        match execute_turn(st.clone(), runtime, turn, input, cancel_rx).await {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[celestea-studio] autowake turn error: {e}");
+                tokio::time::sleep(ERR_BACKOFF).await;
+            }
+        }
     }
 }
 
@@ -935,7 +1127,20 @@ async fn main() {
         status: StatusTracker::new(),
         providers,
         workspaces: registry,
+        gen_epoch: watch::channel(0).0,
     });
+
+    // W240: auto-wake loop — worker receipts delivered to the active session's
+    // cli-main mailbox wake the host agent into an automatic turn (no client
+    // POST /api/turn needed). CELESTEA_AUTOWAKE=0/off disables it.
+    if crate::autowake_enabled() {
+        let _autowake = crate::spawn_autowake(state.clone());
+        eprintln!(
+            "[celestea-studio] autowake loop started (CELESTEA_AUTOWAKE=0/off to disable)"
+        );
+    } else {
+        eprintln!("[celestea-studio] autowake loop disabled (CELESTEA_AUTOWAKE)");
+    }
 
     let app = Router::new()
         .route("/", get(get_static))
@@ -989,6 +1194,337 @@ async fn main() {
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("[celestea-studio] server error: {e}");
         std::process::exit(1);
+    }
+}
+
+// ---- W240 tests ------------------------------------------------------------
+
+#[cfg(test)]
+mod w240_tests {
+    use super::*;
+
+    use celestea_core::{
+        Llm, LlmError, LlmService, LlmStream, Message, ModelRequest, StreamEvent,
+    };
+    use futures::StreamExt;
+
+    /// Scripted LLM: pops the next pre-baked reply per generate() call, so a
+    /// composed Runtime turns are deterministic and network-free.
+    struct FakeLlm {
+        replies: std::sync::Mutex<std::collections::VecDeque<Message>>,
+    }
+    impl FakeLlm {
+        fn new(replies: Vec<Message>) -> Self {
+            Self { replies: std::sync::Mutex::new(replies.into()) }
+        }
+    }
+    #[async_trait::async_trait]
+    impl Llm for FakeLlm {
+        async fn generate(&self, _req: ModelRequest) -> Result<LlmStream, LlmError> {
+            let reply = self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Message::assistant_text("done"));
+            Ok(futures::stream::iter(vec![StreamEvent::Done(reply)]).boxed())
+        }
+    }
+
+    /// Minimal Runtime assembly: engine compose (real tool/session wiring,
+    /// cli-main registered in the WorkerRegistry) with the LLM adapter swapped
+    /// for the scripted fake afterwards (Context::provide replaces by type).
+    fn test_runtime(profile: Profile, replies: Vec<Message>) -> Arc<Runtime> {
+        let mut rt = Runtime::compose(&profile).expect("compose");
+        rt.ctx.provide(LlmService(Arc::new(FakeLlm::new(replies))));
+        Arc::new(rt)
+    }
+
+    /// AppState for the wake loop: one generation over the given runtime.
+    fn build_state(dir: &Path, profile: Profile, runtime: Arc<Runtime>) -> Shared {
+        let gen = Gen {
+            model: profile.model.clone(),
+            base_url: resolve_base_url(profile.base_url.as_deref(), None),
+            reasoning_effort: Value::Null,
+            config_json: json!({}),
+            profile,
+            runtime,
+        };
+        Arc::new(AppState {
+            gen: RwLock::new(gen),
+            bcast: broadcast::channel(64).0,
+            busy: Arc::new(Mutex::new(None)),
+            next_turn: Arc::new(AtomicU64::new(1)),
+            seq: Arc::new(AtomicU64::new(0)),
+            status: StatusTracker::new(),
+            providers: Arc::new(
+                crate::providers::ProvidersStore::open(dir.join("providers.json")).unwrap(),
+            ),
+            workspaces: Arc::new(crate::workspaces::WorkspaceRegistry::new(
+                dir.join("workspaces.json"),
+            )),
+            gen_epoch: watch::channel(0).0,
+        })
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "celestea-studio-w240-{}-{}-{}",
+            std::process::id(),
+            name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn user_count(rt: &Runtime) -> usize {
+        rt.session
+            .events()
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::UserMessage { .. }))
+            .count()
+    }
+
+    async fn wait_until<F: Fn() -> bool>(what: &str, f: F) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if f() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn test_profile() -> Profile {
+        merge_profile(&json!({
+            "model": "deepseek-v4-flash-0731",
+            "api_key_env": "W240_TEST_KEY",
+        }))
+        .expect("lenient merge")
+    }
+
+    /// The core acceptance case: a receipt on the cli-main mailbox runs ONE
+    /// automatic turn (no POST /api/turn) while the busy slot is idle — the
+    /// receipt becomes the turn input with sender provenance, the reply lands
+    /// in the session log, the mailbox drains, the busy slot is released and
+    /// the whole turn rides the standard SSE bus (start with source=autowake,
+    /// done with the reply).
+    #[tokio::test]
+    async fn autowake_runs_auto_turn_on_mailbox_message_when_idle() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("autowake-run");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W240_TEST_KEY", "sk-test");
+
+        let profile = test_profile();
+        let rt = test_runtime(profile.clone(), vec![Message::assistant_text("auto reply")]);
+        let st = build_state(&dir, profile, rt.clone());
+
+        let mut rx = st.bcast.subscribe();
+        let h = spawn_autowake(st.clone());
+
+        // engine-side delivery: a worker receipt lands on cli-main's mailbox
+        rt.workers
+            .mailbox()
+            .send("cli-main", "receipt: all done", "W240");
+
+        // no HTTP request anywhere — the loop wakes on its own
+        wait_until("auto turn to complete", || {
+            rt.session.events().iter().any(|e| {
+                matches!(e, SessionEvent::AssistantMessage { text } if text == "auto reply")
+            })
+        })
+        .await;
+
+        // receipt became the turn input, with sender provenance
+        assert!(rt.session.events().iter().any(|e| {
+            matches!(e, SessionEvent::UserMessage { text } if text == "[from W240] receipt: all done")
+        }));
+        assert_eq!(rt.workers.mailbox().pending("cli-main"), 0, "mailbox drained");
+        assert!(st.busy.lock().await.is_none(), "busy slot released");
+
+        // the automatic turn rode the standard SSE bus
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        let done = events
+            .iter()
+            .find(|e| e.kind == "done")
+            .expect("done event on the SSE bus");
+        assert_eq!(done.data["turn"], 1, "first auto turn");
+        assert_eq!(done.data["payload"]["text"], "auto reply");
+        let start = events
+            .iter()
+            .find(|e| e.kind == "status" && e.data["payload"]["phase"] == "start")
+            .expect("start status event");
+        assert_eq!(start.data["payload"]["source"], "autowake");
+
+        h.abort();
+        std::env::remove_var("W240_TEST_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Generation-aware rebind: after swap_gen the loop drops its old-mailbox
+    /// subscription, follows the epoch bump onto the NEW generation's mailbox
+    /// and runs the auto turn there; a message that later lands on the OLD
+    /// generation's mailbox is left untouched (no spurious turn).
+    #[tokio::test]
+    async fn autowake_rebinds_after_generation_swap() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("autowake-swap");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W240_TEST_KEY", "sk-test");
+
+        let profile = test_profile();
+        let rt_a = test_runtime(profile.clone(), vec![Message::assistant_text("reply-A")]);
+        let st = build_state(&dir, profile.clone(), rt_a.clone());
+        let h = spawn_autowake(st.clone());
+
+        rt_a.workers.mailbox().send("cli-main", "first receipt", "W1");
+        wait_until("turn A to complete", || {
+            rt_a.session
+                .events()
+                .iter()
+                .any(|e| matches!(e, SessionEvent::AssistantMessage { text } if text == "reply-A"))
+        })
+        .await;
+        // let the busy slot settle before the hot swap
+        wait_until("busy release after turn A", || {
+            st.busy.try_lock().map(|b| b.is_none()).unwrap_or(false)
+        })
+        .await;
+
+        // hot swap onto a new generation (new runtime + new mailbox)
+        let rt_b = test_runtime(profile.clone(), vec![Message::assistant_text("reply-B")]);
+        let gen_b = Gen {
+            model: profile.model.clone(),
+            base_url: resolve_base_url(profile.base_url.as_deref(), None),
+            reasoning_effort: Value::Null,
+            config_json: json!({}),
+            profile: profile.clone(),
+            runtime: rt_b.clone(),
+        };
+        let epoch_before = *st.gen_epoch.borrow();
+        swap_gen(&st, gen_b);
+        assert_eq!(
+            *st.gen_epoch.borrow(),
+            epoch_before + 1,
+            "swap bumps the generation epoch"
+        );
+
+        // a receipt on the NEW generation's mailbox still wakes the loop
+        rt_b.workers.mailbox().send("cli-main", "second receipt", "W2");
+        wait_until("turn B to complete", || {
+            rt_b.session
+                .events()
+                .iter()
+                .any(|e| matches!(e, SessionEvent::AssistantMessage { text } if text == "reply-B"))
+        })
+        .await;
+        assert!(rt_b.session.events().iter().any(|e| {
+            matches!(e, SessionEvent::UserMessage { text } if text == "[from W2] second receipt")
+        }));
+        assert_eq!(rt_b.workers.mailbox().pending("cli-main"), 0);
+
+        // the OLD generation's mailbox is no longer subscribed: a stale-gen
+        // message stays queued and never triggers a turn on A
+        let user_before = user_count(&rt_a);
+        rt_a.workers.mailbox().send("cli-main", "stale receipt", "W9");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            rt_a.workers.mailbox().pending("cli-main"),
+            1,
+            "old-generation message left queued"
+        );
+        assert_eq!(
+            user_count(&rt_a),
+            user_before,
+            "no turn ran on the old generation"
+        );
+
+        h.abort();
+        std::env::remove_var("W240_TEST_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The busy-conflict contract: while a turn runs the popped receipt is
+    /// re-queued (no loss) and processed once the busy slot frees up.
+    #[tokio::test]
+    async fn autowake_leaves_message_queued_while_busy() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("autowake-busy");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W240_TEST_KEY", "sk-test");
+
+        let profile = test_profile();
+        let rt = test_runtime(profile.clone(), vec![Message::assistant_text("after busy")]);
+        let st = build_state(&dir, profile, rt.clone());
+        let h = spawn_autowake(st.clone());
+
+        // a turn is already running (busy taken, as post_turn does)
+        let (tx, _rx) = watch::channel(false);
+        *st.busy.lock().await = Some(tx);
+
+        rt.workers.mailbox().send("cli-main", "receipt while busy", "W240");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // message survives the busy window (re-queued, not lost) and no turn
+        // ran on the busy runtime
+        assert_eq!(
+            rt.workers.mailbox().pending("cli-main"),
+            1,
+            "receipt stays queued while busy"
+        );
+        assert_eq!(user_count(&rt), 0, "no turn while busy");
+
+        // free the busy slot -> the loop picks the receipt up and runs
+        *st.busy.lock().await = None;
+        wait_until("auto turn after busy release", || {
+            rt.session.events().iter().any(|e| {
+                matches!(e, SessionEvent::AssistantMessage { text } if text == "after busy")
+            })
+        })
+        .await;
+        assert_eq!(rt.workers.mailbox().pending("cli-main"), 0);
+        assert!(st.busy.lock().await.is_none());
+
+        h.abort();
+        std::env::remove_var("W240_TEST_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// CELESTEA_AUTOWAKE switch parsing: default on, 0/off/false/no off.
+    #[test]
+    fn autowake_switch_parses_env_values() {
+        std::env::remove_var("CELESTEA_AUTOWAKE");
+        assert!(autowake_enabled(), "default on");
+        for off in ["0", "off", "false", "no"] {
+            std::env::set_var("CELESTEA_AUTOWAKE", off);
+            assert!(!autowake_enabled(), "{off} disables");
+        }
+        for on in ["1", "on", "true", "yes", "weird"] {
+            std::env::set_var("CELESTEA_AUTOWAKE", on);
+            assert!(autowake_enabled(), "{on} keeps on");
+        }
+        std::env::remove_var("CELESTEA_AUTOWAKE");
+    }
+
+    /// The upgraded default prompt keeps the fallback contract: clearing
+    /// system_prompt restores it (post_config maps "" -> DEFAULT_SYSTEM_PROMPT).
+    #[test]
+    fn default_system_prompt_carries_worker_receipt_contract() {
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("report_to=cli-main"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("results/<wid>-*.md"));
+        assert!(DEFAULT_SYSTEM_PROMPT.contains("你拥有文件读写、命令执行（沙箱）、worker 编排等工具"));
     }
 }
 
