@@ -536,6 +536,10 @@ fn loop_event_to_json(ev: LoopEvent) -> (&'static str, Value) {
                 }),
             )
         }
+        LoopEvent::TurnEnd(outcome) => (
+            "turn_end",
+            json!({"outcome": outcome_phase(&outcome), "error": outcome_error(&outcome)}),
+        ),
         LoopEvent::Done(m) => {
             let mut text = String::new();
             let mut tool_calls = Vec::new();
@@ -551,6 +555,26 @@ fn loop_event_to_json(ev: LoopEvent) -> (&'static str, Value) {
             }
             ("done", json!({"text": text, "tool_calls": tool_calls}))
         }
+    }
+}
+
+/// Terminal outcome -> SSE phase string (shared by the TurnEnd envelope and
+/// the final status event).
+fn outcome_phase(o: &TurnOutcome) -> &'static str {
+    match o {
+        TurnOutcome::Completed => "completed",
+        TurnOutcome::Cancelled => "cancelled",
+        TurnOutcome::Error { .. } => "error",
+        TurnOutcome::StepLimit => "step_limit",
+        TurnOutcome::Interrupted => "interrupted",
+    }
+}
+
+/// Terminal outcome -> optional error detail for the SSE envelope.
+fn outcome_error(o: &TurnOutcome) -> Option<String> {
+    match o {
+        TurnOutcome::Error { kind, message } => Some(format!("{kind}: {message}")),
+        _ => None,
     }
 }
 
@@ -746,7 +770,7 @@ async fn execute_turn(
                 LoopEvent::Text(t) => tracker.add_chars(t.chars().count() as u64),
                 LoopEvent::Thinking(t) => tracker.add_chars(t.chars().count() as u64),
                 LoopEvent::ToolCall { .. } | LoopEvent::ToolResult(_) => tracker.add_step(),
-                LoopEvent::Done(_) => {}
+                LoopEvent::Done(_) | LoopEvent::TurnEnd(_) => {}
             }
             let (kind, payload) = loop_event_to_json(ev);
             let _ = sink_bcast.send(BusEvent {
@@ -781,6 +805,9 @@ async fn execute_turn(
     let (phase, error) = match &outcome {
         Ok(TurnOutcome::Completed) => ("completed", None),
         Ok(TurnOutcome::Cancelled) => ("cancelled", None),
+        Ok(TurnOutcome::Error { kind, message }) => ("error", Some(format!("{kind}: {message}"))),
+        Ok(TurnOutcome::StepLimit) => ("step_limit", None),
+        Ok(TurnOutcome::Interrupted) => ("interrupted", None),
         Err(e) => ("error", Some(e.to_string())),
     };
     let mut final_payload = json!({

@@ -543,7 +543,7 @@ mod w228_tests {
             SessionEvent::ToolCall { id: "c1".into(), name: "read_file".into(), args: json!({"path": "/tmp/x"}) },
             SessionEvent::ToolResult { id: "c1".into(), value: Some(json!({"ok": true})), error: None },
             SessionEvent::ToolResult { id: "c2".into(), value: None, error: Some("boom".into()) },
-            SessionEvent::TurnEnd { id: "t1".into() },
+            SessionEvent::TurnEnd { id: "t1".into(), outcome: celestea_core::TurnOutcome::Completed },
         ];
         let msgs: Vec<Value> = evs.iter().filter_map(session_event_to_message).collect();
         assert_eq!(msgs.len(), 5);
