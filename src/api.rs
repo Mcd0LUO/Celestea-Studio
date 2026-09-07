@@ -20,6 +20,7 @@
 //! can never drift from the agent tool face; worker_status is built from the
 //! shared WorkerRegistry with the protocol's unified aggregate shape.
 
+use std::path::Path as FsPath;
 use std::time::UNIX_EPOCH;
 
 use axum::extract::{Path, Query, State};
@@ -27,12 +28,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use celestea_core::{SessionLog, ToolInput};
-use celestea_runtime::{merge_profile, validate_model, SessionEvent};
+use celestea_runtime::{validate_model, SessionEvent};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
-    build_gen, model_reasoning, profile_to_json, DEFAULT_SYSTEM_PROMPT, MIN_STEPS,
+    build_and_swap, model_reasoning, profile_to_json, DEFAULT_SYSTEM_PROMPT, MIN_STEPS,
     Shared,
 };
 
@@ -76,12 +77,23 @@ pub async fn get_status(State(st): State<Shared>) -> Json<Value> {
 /// Session list: worker sessions from the SessionRegistry, the host
 /// conversation driven by /api/turn, and (when CELESTEA_SESSION_DIR is set)
 /// every persisted *.jsonl session file in that directory.
+///
+/// W236 id rule: top-level files keep id "<stem>" with workspace "root";
+/// files inside a direct subdirectory get id "<workspace>/<stem>" with
+/// workspace = the subdirectory name. cli-main stays the host entry with
+/// workspace=null; .trash / .archived are never scanned.
 pub async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
     let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
     let mut sessions: Vec<Value> = Vec::new();
 
     // 1. Worker sessions (spawned via /api/worker/spawn or the engine tools).
+    //    The host conversation is registered in the same SessionRegistry as
+    //    cli-main for receipt routing (W232) — skip it here, it is listed as
+    //    the host entry below.
     for meta in gen.runtime.workers.sessions().list() {
+        if meta.id == "cli-main" {
+            continue;
+        }
         let events = gen
             .runtime
             .workers
@@ -121,45 +133,84 @@ pub async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
     }));
 
     // 3. Persisted session files (other sessions sharing CELESTEA_SESSION_DIR).
+    //    W236: scan the session dir by workspace — the top level is workspace
+    //    "root", every direct subdirectory (except the reserved .trash /
+    //    .archived) is its own workspace.
     if let Some(dir) = &sess_dir {
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            for entry in rd.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let Some(stem) = name.strip_suffix(".jsonl") else {
-                    continue;
-                };
-                if stem == "cli-main" {
-                    continue; // host conversation already listed above
-                }
-                let (size, modified) = entry
-                    .metadata()
-                    .map(|m| {
-                        (
-                            m.len(),
-                            m.modified()
-                                .ok()
-                                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0),
-                        )
-                    })
-                    .unwrap_or((0, 0));
-                sessions.push(json!({
-                    "id": stem,
-                    "title": stem,
-                    "kind": "persistent",
-                    // W228: workspace = the jsonl file's parent directory, so
-                    // the frontend can group persisted sessions by workspace.
-                    "workspace": dir.clone(),
-                    "file": format!("{dir}/{name}"),
-                    "size": size,
-                    "modified": modified,
-                }));
-            }
+        let dirp = FsPath::new(dir);
+        push_persistent_sessions(dirp, None, &mut sessions);
+        let mut subs: Vec<String> = match std::fs::read_dir(dirp) {
+            Ok(rd) => rd
+                .flatten()
+                .filter_map(|e| {
+                    let ft = e.file_type().ok()?;
+                    if !ft.is_dir() {
+                        return None;
+                    }
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if name == crate::workspaces::TRASH_DIR
+                        || name == crate::workspaces::ARCHIVED_DIR
+                    {
+                        return None;
+                    }
+                    Some(name)
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        subs.sort();
+        for ws in subs {
+            push_persistent_sessions(&dirp.join(&ws), Some(&ws), &mut sessions);
         }
     }
 
     Json(json!({"sessions": sessions}))
+}
+
+/// W236: append every *.jsonl file directly inside `dir` as a persistent
+/// session entry. ws=None -> workspace "root" and id "<stem>"; ws=Some(name)
+/// -> workspace = name and id "<name>/<stem>". cli-main is only skipped at
+/// the root (the host entry above owns it).
+fn push_persistent_sessions(dir: &FsPath, ws: Option<&str>, sessions: &mut Vec<Value>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".jsonl") else {
+            continue;
+        };
+        if ws.is_none() && stem == "cli-main" {
+            continue; // host conversation already listed above
+        }
+        let (size, modified) = entry
+            .metadata()
+            .map(|m| {
+                (
+                    m.len(),
+                    m.modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0));
+        let id = crate::workspaces::session_id(ws, stem);
+        sessions.push(json!({
+            "id": id,
+            "title": stem,
+            "kind": "persistent",
+            "workspace": ws.map(str::to_string)
+                .unwrap_or_else(|| crate::workspaces::ROOT_WORKSPACE.to_string()),
+            "file": format!("{}/{}", dir.display(), name),
+            "size": size,
+            "modified": modified,
+        }));
+    }
 }
 
 // ---- W228: GET /api/sessions/{id}/messages ---------------------------------
@@ -169,15 +220,18 @@ pub async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
 /// everything else becomes '_', empty ids fall back to "session", always
 /// ending in .jsonl. Replicated read-only so the studio stays on the
 /// celestea-core/runtime surface; identical output means identical lookup.
-fn session_file_name(id: &str) -> String {
+pub(crate) fn session_file_name(id: &str) -> String {
+    // Same predicate as workspaces::sanitize_component: keep CJK/Unicode
+    // letters (Chinese UI), drop separators/control/whitespace to '_'.
+    // Studio-side resolution is self-consistent (create and lookup share
+    // this sanitizer); the engine's file_name_for stays ASCII-only and is
+    // only used for the cli-main PersistentSessionLog.
     let mut name: String = id
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
+        .map(|c| match c {
+            '/' | '\\' | '\u{7f}'..='\u{9f}' => '_',
+            c if c.is_control() || c.is_whitespace() => '_',
+            c => c,
         })
         .collect();
     if name.is_empty() {
@@ -280,9 +334,11 @@ pub async fn get_session_messages(
     } else if let Some(session) = runtime.workers.sessions().get(&id) {
         session.log.events()
     } else {
-        // Persistent JSONL fallback: the engine maps a session id to
-        // <dir>/<sanitized>.jsonl; replicate the mapping and double-check the
-        // resolved path still lives directly inside the session dir.
+        // Persistent JSONL fallback, W236 id rule: a bare stem resolves in
+        // the session dir root first, a "<workspace>/<stem>" id resolves in
+        // that subdirectory. Every segment is sanitized with the engine's
+        // file_name_for character set and the resolved path is
+        // parent-verified (traversal impossible).
         let Some(dir) = std::env::var("CELESTEA_SESSION_DIR")
             .ok()
             .map(|d| d.trim().to_string())
@@ -293,14 +349,12 @@ pub async fn get_session_messages(
                 Json(json!({"ok": false, "error": "unknown session"})),
             );
         };
-        let path = std::path::Path::new(&dir).join(session_file_name(&id));
-        let inside_dir = path.parent().map(|p| p.to_string_lossy().into_owned()) == Some(dir);
-        if !inside_dir {
+        let Some(path) = crate::workspaces::resolve_session_path(FsPath::new(&dir), &id) else {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({"ok": false, "error": "unknown session"})),
             );
-        }
+        };
         match std::fs::read_to_string(&path) {
             Ok(text) => parse_session_jsonl(&text),
             Err(_) => {
@@ -510,33 +564,20 @@ pub async fn post_config(State(st): State<Shared>, Json(req): Json<ConfigReq>) -
     }
 
     // ---- apply --------------------------------------------------------------
-    let new_profile = match merge_profile(&pj) {
-        Ok(p) => p,
+    // W236: shared merge + env-key-injection + compose + swap tail
+    // (main.rs::build_and_swap), also used by the providers default-model
+    // hot-apply. The api key stays in the process env only — never on disk,
+    // never in a log line, never echoed (the response is the sanitized
+    // config).
+    let response = match build_and_swap(&st, pj, req.api_key.as_deref()) {
+        Ok(r) => r,
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"ok": false, "error": e.to_string()})),
+                Json(json!({"ok": false, "error": e})),
             )
         }
     };
-    if let Some(k) = req.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
-        // in-memory only: the engine reads the key from env[api_key_env] at
-        // compose time; the value lives in this process env / the LLM
-        // adapter, never on disk and never in a log line.
-        std::env::set_var(new_profile.api_key_env.as_str(), k);
-    }
-
-    let new_gen = match build_gen(new_profile) {
-        Ok(g) => g,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"ok": false, "error": format!("compose failed: {e}")})),
-            )
-        }
-    };
-    let response = new_gen.config_json.clone();
-    *st.gen.write().unwrap_or_else(|p| p.into_inner()) = new_gen;
     drop(guard);
     (StatusCode::OK, Json(response))
 }
@@ -709,7 +750,7 @@ mod w228_tests {
         assert_eq!(session_file_name("session-0"), "session-0.jsonl");
         assert_eq!(session_file_name("../etc/passwd"), ".._etc_passwd.jsonl"); // "." survives, matching the engine
         assert_eq!(session_file_name(""), "session.jsonl");
-        assert_eq!(session_file_name("a b[c]"), "a_b_c_.jsonl");
+        assert_eq!(session_file_name("a b[c]"), "a_b[c].jsonl"); // brackets are legal in file names; CJK kept as well
     }
 
     #[test]

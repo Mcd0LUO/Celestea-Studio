@@ -6,3 +6,5 @@ frontend/node_modules/
 frontend/dist/
 sessions/
 results/
+# W236: model provider store (plaintext api keys, 0600)
+providers.json

@@ -271,6 +271,7 @@ dependencies = [
  "celestea-core",
  "celestea-runtime",
  "futures",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

@@ -47,10 +47,15 @@ use tokio_stream::StreamExt;
 
 use celestea_core::{Content, ToolDecision};
 use celestea_runtime::{
-    load_dotenv, resolve_base_url, resolve_profile, EventSink, LoopEvent, Profile,
-    Runtime, SessionEvent, SessionLog, TurnOutcome,
+    load_dotenv, merge_profile, resolve_base_url, resolve_profile, EventSink, LoopEvent,
+    Profile, Runtime, SessionEvent, SessionLog, TurnOutcome,
 };
 mod api;
+/// W236: model-provider management (providers.json + probe + default-model
+/// hot-apply).
+mod providers;
+/// W236: workspace / session-file management over CELESTEA_SESSION_DIR.
+mod workspaces;
 
 /// Default bind address (loopback only; access via ssh -L tunnel).
 const DEFAULT_BIND: &str = "127.0.0.1:3777";
@@ -307,6 +312,37 @@ pub(crate) fn build_gen(profile: Profile) -> Result<Gen, String> {
     })
 }
 
+/// W236 shared recompose tail for hot swaps (post_config / providers default):
+/// merge a profile JSON, inject an api key through the process env (the
+/// engine's only key channel — in-memory only, never logged), then compose a
+/// fresh generation. Env injection happens before compose so the new adapter
+/// reads the new key.
+pub(crate) fn prepare_gen(pj: Value, api_key: Option<&str>) -> Result<Gen, String> {
+    let new_profile = merge_profile(&pj).map_err(|e| e.to_string())?;
+    if let Some(k) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        std::env::set_var(new_profile.api_key_env.as_str(), k);
+    }
+    build_gen(new_profile).map_err(|e| format!("compose failed: {e}"))
+}
+
+/// W236: swap a prepared generation under the gen write lock; returns the
+/// new sanitized config JSON.
+pub(crate) fn swap_gen(st: &Shared, gen: Gen) -> Value {
+    let response = gen.config_json.clone();
+    *st.gen.write().unwrap_or_else(|p| p.into_inner()) = gen;
+    response
+}
+
+/// W236: prepare + swap in one step (the post_config tail).
+pub(crate) fn build_and_swap(
+    st: &Shared,
+    pj: Value,
+    api_key: Option<&str>,
+) -> Result<Value, String> {
+    let gen = prepare_gen(pj, api_key)?;
+    Ok(swap_gen(st, gen))
+}
+
 pub(crate) struct AppState {
     /// W225: current engine generation (hot-swapped by POST /api/config).
     pub(crate) gen: RwLock<Gen>,
@@ -318,6 +354,9 @@ pub(crate) struct AppState {
     /// W218: shared statusline tracker (steps / token rate), fed by the turn
     /// sink and read by SSE status payloads + GET /api/status.
     pub(crate) status: Arc<StatusTracker>,
+    /// W236: model providers store (providers.json; api keys live here and
+    /// are never serialized into any response or log line).
+    pub(crate) providers: Arc<crate::providers::ProvidersStore>,
 }
 
 impl AppState {
@@ -791,6 +830,30 @@ async fn main() {
     // "no limit" is expressed as a high floor (4096). A config may only
     // raise the cap, never lower it below MIN_STEPS.
     profile.max_steps = profile.max_steps.max(MIN_STEPS);
+
+    // W236: model providers store. providers.json carries api_key plaintext
+    // (contract), so the file is 0600 + gitignored; CELESTEA_PROVIDERS_FILE
+    // overrides the path (smoke instances). Loading it here — before the
+    // first compose — lets a persisted default_model override the
+    // celestea.toml model at startup.
+    let providers_path = std::env::var("CELESTEA_PROVIDERS_FILE")
+        .ok()
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("providers.json"));
+    let providers = Arc::new(match crate::providers::ProvidersStore::open(providers_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[celestea-studio] providers error: {e}");
+            std::process::exit(1);
+        }
+    });
+    if let Some(dm) = crate::providers::apply_startup_default(&providers, &mut profile) {
+        eprintln!(
+            "[celestea-studio] providers.json default_model '{dm}' overrides celestea.toml (applied before compose)"
+        );
+    }
     let model = profile.model.clone();
     let base_url = resolve_base_url(
         profile.base_url.as_deref(),
@@ -811,6 +874,7 @@ async fn main() {
         next_turn: Arc::new(AtomicU64::new(1)),
         seq: Arc::new(AtomicU64::new(0)),
         status: StatusTracker::new(),
+        providers,
     });
 
     let app = Router::new()
@@ -825,8 +889,23 @@ async fn main() {
         .route("/api/cancel", post(post_cancel))
         .route("/api/tools", get(api::get_tools))
         .route("/api/config", get(api::get_config).post(api::post_config))
-        .route("/api/sessions", get(api::get_sessions))
+        .route("/api/sessions", get(api::get_sessions).post(workspaces::post_session_create))
+        // W236: workspace session ids contain a slash ("<workspace>/<stem>");
+        // clients pass them percent-encoded (the W227 frontend uses
+        // encodeURIComponent), which axum decodes back into the segment value.
         .route("/api/sessions/{id}/messages", get(api::get_session_messages))
+        .route("/api/sessions/{id}/archive", post(workspaces::post_session_archive))
+        .route("/api/sessions/{id}/unarchive", post(workspaces::post_session_unarchive))
+        .route("/api/sessions/batch-archive", post(workspaces::post_sessions_batch_archive))
+        .route("/api/sessions/batch-delete", post(workspaces::post_sessions_batch_delete))
+        .route("/api/workspaces", get(workspaces::get_workspaces).post(workspaces::post_workspace_create))
+        .route("/api/workspaces/{name}/delete", post(workspaces::post_workspace_delete))
+        .route("/api/workspaces/batch-delete", post(workspaces::post_workspaces_batch_delete))
+        .route("/api/providers", get(providers::get_providers).post(providers::post_providers))
+        .route("/api/providers/{id}/delete", post(providers::post_provider_delete))
+        .route("/api/providers/test", post(providers::post_provider_test))
+        .route("/api/providers/{id}/models/fetch", post(providers::post_models_fetch))
+        .route("/api/providers/default", post(providers::post_provider_default))
         .route("/api/clear", post(api::post_clear))
         .route("/api/worker/spawn", post(api::post_worker_spawn))
         .route("/api/worker/send", post(api::post_worker_send))
