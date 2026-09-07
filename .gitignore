@@ -8,3 +8,6 @@ sessions/
 results/
 # W236: model provider store (plaintext api keys, 0600)
 providers.json
+
+# W237: workspace registry (no secrets; runtime state)
+workspaces.json

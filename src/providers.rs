@@ -936,6 +936,9 @@ mod tests {
 
     #[tokio::test]
     async fn default_model_hot_applies_engine_gen_and_persists() {
+        // W237: this test mutates process-global env vars and composes the
+        // engine — serialize with the workspaces activation/replay test.
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
         let dir = scratch("hotapply");
         std::fs::create_dir_all(&dir).unwrap();
         let store = Arc::new(ProvidersStore::open(dir.join("providers.json")).unwrap());
@@ -960,6 +963,9 @@ mod tests {
             seq: Arc::new(AtomicU64::new(0)),
             status: StatusTracker::new(),
             providers: store.clone(),
+            workspaces: Arc::new(crate::workspaces::WorkspaceRegistry::new(
+                dir.join("workspaces.json"),
+            )),
         });
         assert_eq!(st.gen.read().unwrap().model, "old-model");
 

@@ -15,6 +15,13 @@
 //! (start / progress / completed / cancelled / error / lagged carry it) and
 //! through GET /api/status as the fallback channel.
 //!
+//! W237: no global main session — sessions are per-workspace DIRECTORIES
+//! (cli-main.jsonl inside; the engine's PersistentSessionLog replay unit),
+//! listed/created/switched through workspaces.rs + a workspaces.json
+//! registry. The persisted active session is restored before the first
+//! compose: CELESTEA_SESSION_DIR names the active session directory and the
+//! engine replays it — zero engine changes.
+//!
 //! SSE event names (mirroring the engine LoopEvent variants):
 //!   - text        {"delta": String}
 //!   - thinking    {"delta": String}
@@ -54,7 +61,8 @@ mod api;
 /// W236: model-provider management (providers.json + probe + default-model
 /// hot-apply).
 mod providers;
-/// W236: workspace / session-file management over CELESTEA_SESSION_DIR.
+/// W237: workspace registry (workspaces.json) + per-session directories
+/// over CELESTEA_SESSION_DIR.
 mod workspaces;
 
 /// Default bind address (loopback only; access via ssh -L tunnel).
@@ -106,6 +114,12 @@ pub(crate) const AVAILABLE_MODELS: &[ModelMeta] = &[
 /// high -> High, max -> High (the engine's ceiling; POST also accepts the
 /// engine-native "medium" and "off"/null for back-compat with celestea.toml).
 pub(crate) const AVAILABLE_EFFORTS: &[&str] = &["low", "high", "max"];
+
+/// W237: serializes tests that mutate process-global env vars before an
+/// engine compose (CELESTEA_SESSION_DIR / API-key env channels) — cargo
+/// test threads share one process env.
+#[cfg(test)]
+pub(crate) static COMPOSE_ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
 /// W225: engine default system prompt (restored when system_prompt is cleared).
 pub(crate) const DEFAULT_SYSTEM_PROMPT: &str =
@@ -357,6 +371,9 @@ pub(crate) struct AppState {
     /// W236: model providers store (providers.json; api keys live here and
     /// are never serialized into any response or log line).
     pub(crate) providers: Arc<crate::providers::ProvidersStore>,
+    /// W237: workspace registry (workspaces.json; the active session id is
+    /// persisted here and drives CELESTEA_SESSION_DIR at boot/activation).
+    pub(crate) workspaces: Arc<crate::workspaces::WorkspaceRegistry>,
 }
 
 impl AppState {
@@ -795,23 +812,65 @@ async fn post_cancel(State(st): State<Shared>) -> Json<Value> {
 #[tokio::main]
 async fn main() {
     load_dotenv();
-    // W225: hot config reload keeps the host conversation alive by
-    // re-composing the engine onto the SAME persistent session: force the
-    // CELESTEA_SESSION_DIR switch (engine default is in-memory) before the
-    // first compose. A user-supplied value wins; otherwise <cwd>/sessions.
-    if std::env::var("CELESTEA_SESSION_DIR")
+    // W237: workspace registry. workspaces.json lives next to the binary's
+    // cwd (CELESTEA_WORKSPACES_FILE overrides it for smoke instances); when
+    // it is missing the legacy flat sessions/ layout is migrated into
+    // per-session directories and the default workspace (默认 ->
+    // <cwd>/sessions, active "默认/cli-main") is registered.
+    let registry_path = std::env::var("CELESTEA_WORKSPACES_FILE")
         .ok()
-        .map(|d| d.trim().is_empty())
-        .unwrap_or(true)
-    {
-        let dir = std::env::current_dir()
-            .map(|cwd| cwd.join("sessions"))
-            .unwrap_or_else(|_| PathBuf::from("sessions"));
-        std::env::set_var("CELESTEA_SESSION_DIR", &dir);
-        eprintln!(
-            "[celestea-studio] CELESTEA_SESSION_DIR unset; host session persisted at {}",
-            dir.display()
-        );
+        .map(|f| f.trim().to_string())
+        .filter(|f| !f.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("workspaces.json"));
+    let sessions_root = std::env::current_dir()
+        .map(|cwd| cwd.join("sessions"))
+        .unwrap_or_else(|_| PathBuf::from("sessions"));
+    let registry = Arc::new(match crate::workspaces::load_registry(registry_path, &sessions_root) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[celestea-studio] workspaces registry error: {e}");
+            std::process::exit(1);
+        }
+    });
+    // W237: restore the persisted active session BEFORE the first compose —
+    // CELESTEA_SESSION_DIR names the session DIRECTORY and the engine
+    // replays <dir>/cli-main.jsonl through PersistentSessionLog. A dangling
+    // id falls back to the first registered workspace's cli-main session.
+    let mut active_id = registry.active_session();
+    let mut active_dir = active_id.as_deref().and_then(|id| {
+        crate::workspaces::resolve_session_dir(&registry.snapshot(), id)
+            .ok()
+            .map(|r| r.2)
+            .filter(|d| d.parent().is_some_and(|p| p.is_dir()))
+    });
+    if active_dir.is_none() {
+        if let Some(ws) = registry.snapshot().workspaces.first() {
+            let dir = Path::new(&ws.path).join("cli-main");
+            let id = format!("{}/cli-main", ws.name);
+            eprintln!(
+                "[celestea-studio] active session '{:?}' unusable; falling back to workspace '{}' session 'cli-main'",
+                active_id, ws.name,
+            );
+            if registry.set_active(Some(id.clone())).is_ok() {
+                active_id = Some(id);
+                active_dir = Some(dir);
+            }
+        }
+    }
+    match &active_dir {
+        Some(dir) => {
+            std::env::set_var("CELESTEA_SESSION_DIR", dir);
+            eprintln!(
+                "[celestea-studio] active session {} -> {}",
+                active_id.as_deref().unwrap_or("?"),
+                dir.display()
+            );
+        }
+        None => {
+            std::env::remove_var("CELESTEA_SESSION_DIR");
+            eprintln!("[celestea-studio] no workspace registered; engine session is in-memory");
+        }
     }
     let mut profile = match resolve_profile(
         None,
@@ -875,6 +934,7 @@ async fn main() {
         seq: Arc::new(AtomicU64::new(0)),
         status: StatusTracker::new(),
         providers,
+        workspaces: registry,
     });
 
     let app = Router::new()
@@ -889,11 +949,12 @@ async fn main() {
         .route("/api/cancel", post(post_cancel))
         .route("/api/tools", get(api::get_tools))
         .route("/api/config", get(api::get_config).post(api::post_config))
-        .route("/api/sessions", get(api::get_sessions).post(workspaces::post_session_create))
-        // W236: workspace session ids contain a slash ("<workspace>/<stem>");
+        .route("/api/sessions", get(workspaces::get_sessions).post(workspaces::post_session_create))
+        // W236/W237: session ids contain a slash ("<workspace>/<session>");
         // clients pass them percent-encoded (the W227 frontend uses
         // encodeURIComponent), which axum decodes back into the segment value.
-        .route("/api/sessions/{id}/messages", get(api::get_session_messages))
+        .route("/api/sessions/{id}/messages", get(workspaces::get_session_messages))
+        .route("/api/sessions/{id}/activate", post(workspaces::post_session_activate))
         .route("/api/sessions/{id}/archive", post(workspaces::post_session_archive))
         .route("/api/sessions/{id}/unarchive", post(workspaces::post_session_unarchive))
         .route("/api/sessions/batch-archive", post(workspaces::post_sessions_batch_archive))
@@ -901,12 +962,13 @@ async fn main() {
         .route("/api/workspaces", get(workspaces::get_workspaces).post(workspaces::post_workspace_create))
         .route("/api/workspaces/{name}/delete", post(workspaces::post_workspace_delete))
         .route("/api/workspaces/batch-delete", post(workspaces::post_workspaces_batch_delete))
+        .route("/api/fs/browse", get(workspaces::get_fs_browse))
         .route("/api/providers", get(providers::get_providers).post(providers::post_providers))
         .route("/api/providers/{id}/delete", post(providers::post_provider_delete))
         .route("/api/providers/test", post(providers::post_provider_test))
         .route("/api/providers/{id}/models/fetch", post(providers::post_models_fetch))
         .route("/api/providers/default", post(providers::post_provider_default))
-        .route("/api/clear", post(api::post_clear))
+        .route("/api/clear", post(workspaces::post_clear))
         .route("/api/worker/spawn", post(api::post_worker_spawn))
         .route("/api/worker/send", post(api::post_worker_send))
         .route("/api/worker/status", get(api::get_worker_status))
