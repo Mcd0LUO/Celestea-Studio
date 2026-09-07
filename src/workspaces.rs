@@ -750,7 +750,9 @@ pub(crate) async fn post_workspaces_batch_delete(
 
 #[derive(Deserialize)]
 pub(crate) struct SessionCreateReq {
-    pub(crate) workspace: String,
+    /// Optional: None -> the ACTIVE session's workspace (or the first
+    /// registered workspace). The UI's "root" option sends null.
+    pub(crate) workspace: Option<String>,
     pub(crate) title: String,
 }
 
@@ -878,7 +880,16 @@ pub(crate) async fn post_session_create(
     Json(req): Json<SessionCreateReq>,
 ) -> Response {
     let data = st.workspaces.snapshot();
-    let ws_name = req.workspace.trim().to_string();
+    let ws_name = match req.workspace.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+        Some(w) => w.to_string(),
+        None => data
+            .active_session
+            .as_deref()
+            .and_then(|id| id.split('/').next())
+            .map(str::to_string)
+            .or_else(|| data.workspaces.first().map(|w| w.name.clone()))
+            .unwrap_or_default(),
+    };
     let Some(ws) = data.workspaces.iter().find(|w| w.name == ws_name) else {
         return err_response(StatusCode::NOT_FOUND, format!("unknown workspace '{ws_name}'"));
     };
