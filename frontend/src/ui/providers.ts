@@ -32,10 +32,10 @@ function modelCount(p: ProviderInfo): number {
   return p.models?.length ?? 0;
 }
 
-function renderProviders(): void {
-  boxEl.innerHTML = '';
+function renderProviders(container: HTMLElement): void {
+  container.innerHTML = '';
   if (!providers.length) {
-    boxEl.appendChild(el('div', 'side-note', '暂无提供商 · 点击上方「添加提供商」创建'));
+    container.appendChild(el('div', 'side-note', '暂无提供商 · 点击上方「添加提供商」创建'));
     return;
   }
   const table = el('table', 'prov-table');
@@ -90,10 +90,10 @@ function renderProviders(): void {
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
-  boxEl.appendChild(table);
+  container.appendChild(table);
 }
 
-function renderDefaultPicker(): void {
+function renderDefaultPicker(container: HTMLElement): void {
   const wrap = el('div', 'prov-default-card');
   const head = el('div', 'prov-default-head');
   head.appendChild(el('span', 'prov-default-title', '默认模型'));
@@ -143,7 +143,7 @@ function renderDefaultPicker(): void {
   body.appendChild(sel);
   body.appendChild(msg);
   wrap.appendChild(body);
-  boxEl.appendChild(wrap);
+  container.appendChild(wrap);
 }
 
 function setMsg(text: string, cls = ''): void {
@@ -153,20 +153,23 @@ function setMsg(text: string, cls = ''): void {
   m.className = 'prov-list-msg' + (cls ? ' ' + cls : '');
 }
 
+/** 载入并渲染提供商列表 + 默认模型卡片（增删改后调用）。
+ *  第 11 轮：离屏构建 + 一次性替换（旧列表保留到新列表就绪，无「加载中…」空白帧）。 */
 export async function loadProviders(): Promise<void> {
-  boxEl.innerHTML = '<div class="side-note">加载中…</div>';
+  const off = document.createElement('div');
   try {
     const d = await api.providers();
     providers = d.providers ?? [];
     defaultModel = d.default_model ?? null;
   } catch (err) {
-    boxEl.innerHTML = '';
-    boxEl.appendChild(el('div', 'side-note err', '提供商接口暂不可用'));
-    boxEl.appendChild(el('div', 'side-note', fmtErr(err)));
+    off.appendChild(el('div', 'side-note err', '提供商接口暂不可用'));
+    off.appendChild(el('div', 'side-note', fmtErr(err)));
+    boxEl.replaceChildren(...off.childNodes);
     return;
   }
-  renderProviders();
-  renderDefaultPicker();
+  renderProviders(off);
+  renderDefaultPicker(off);
+  boxEl.replaceChildren(...off.childNodes);
 }
 
 // ---- 编辑弹窗 ---------------------------------------------------------------------

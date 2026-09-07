@@ -10,12 +10,12 @@ import type { ToolInfo } from '../types';
 const boxEl = need<HTMLElement>('#settingsTools');
 const countEl = need<HTMLElement>('#toolsCount');
 
-function renderTools(tools: ToolInfo[] | undefined): void {
+function renderTools(tools: ToolInfo[] | undefined, container: HTMLElement): void {
   const arr = tools ?? [];
   countEl.textContent = String(arr.length);
-  boxEl.innerHTML = '';
+  container.innerHTML = '';
   if (!arr.length) {
-    boxEl.appendChild(el('div', 'side-note', '未获取到工具'));
+    container.appendChild(el('div', 'side-note', '未获取到工具'));
     return;
   }
   const table = el('table', 'tools-table');
@@ -38,22 +38,24 @@ function renderTools(tools: ToolInfo[] | undefined): void {
     tbody.appendChild(tr);
   }
   table.appendChild(tbody);
-  boxEl.appendChild(table);
+  container.appendChild(table);
 }
 
-/** 载入并渲染工具清单区块（打开设置页 / 点击刷新时调用）。 */
+/** 载入并渲染工具清单区块（打开设置页 / 点击刷新时调用）。
+ *  第 11 轮：离屏构建 + 一次性替换（旧内容保留到新内容就绪，无「加载中…」空白帧）。 */
 export function loadToolsSection(): Promise<void> {
-  boxEl.innerHTML = '<div class="side-note">加载中…</div>';
+  const off = document.createElement('div');
   return api
     .tools()
     .then((d) => {
-      renderTools(d.tools);
+      renderTools(d.tools, off);
+      boxEl.replaceChildren(...off.childNodes);
     })
     .catch((err: unknown) => {
       countEl.textContent = '—';
-      boxEl.innerHTML = '';
-      boxEl.appendChild(el('div', 'side-note err', '工具接口不可用'));
-      boxEl.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+      off.appendChild(el('div', 'side-note err', '工具接口不可用'));
+      off.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+      boxEl.replaceChildren(...off.childNodes);
     });
 }
 

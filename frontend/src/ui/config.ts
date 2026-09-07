@@ -71,8 +71,8 @@ function toNum(v: string): number | null {
 
 // ---- 表单 ---------------------------------------------------------------------
 
-function renderForm(cfg: ConfigInfo, statusWindow: number | null): void {
-  box.innerHTML = '';
+function renderForm(cfg: ConfigInfo, statusWindow: number | null, container: HTMLElement): void {
+  container.innerHTML = '';
   const form = el('form', 'cfg-form');
 
   // W227 修复：available.models 是 {id,name,reasoning} 对象数组——
@@ -127,7 +127,7 @@ function renderForm(cfg: ConfigInfo, statusWindow: number | null): void {
   const status = el('div', 'cfg-status');
   form.appendChild(status);
 
-  box.appendChild(form);
+  container.appendChild(form);
 
   // ---- 校验 + 保存 ----
   const parseNum = (ctl2: HTMLInputElement, name: string): number | null => {
@@ -190,16 +190,17 @@ function renderForm(cfg: ConfigInfo, statusWindow: number | null): void {
   reloadBtn.addEventListener('click', doReload);
 }
 
-/** 载入当前配置并渲染表单（含 status 补充窗口信息）。 */
+/** 载入当前配置并渲染表单（含 status 补充窗口信息）。
+ *  第 11 轮：离屏构建 + 一次性替换（旧表单保留到新表单就绪，无空白帧）。 */
 export async function loadConfig(): Promise<void> {
-  box.innerHTML = '<div class="side-note">加载中…</div>';
+  const off = document.createElement('div');
   let cfg: ConfigInfo;
   try {
     cfg = await api.config();
   } catch (err) {
-    box.innerHTML = '';
-    box.appendChild(el('div', 'side-note err', '配置接口不可用'));
-    box.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+    off.appendChild(el('div', 'side-note err', '配置接口不可用'));
+    off.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+    box.replaceChildren(...off.childNodes);
     statusHint.textContent = '';
     return;
   }
@@ -211,14 +212,15 @@ export async function loadConfig(): Promise<void> {
     /* status 仅作窗口补充，缺失无碍 */
   }
   try {
-    renderForm(cfg, statusWindow);
+    renderForm(cfg, statusWindow, off);
     statusHint.textContent = '数据源：GET /api/config' +
       (statusWindow !== null ? ' · 窗口补充：GET /api/status' : '') +
       ' · 保存 POST /api/config（后端需支持热调）';
+    box.replaceChildren(...off.childNodes);
   } catch (err) {
-    box.innerHTML = '';
-    box.appendChild(el('div', 'side-note err', '配置接口不可用'));
-    box.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+    off.appendChild(el('div', 'side-note err', '配置接口不可用'));
+    off.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
+    box.replaceChildren(...off.childNodes);
     statusHint.textContent = '';
   }
 }
@@ -238,10 +240,10 @@ function navEl(name: PaneName): HTMLElement {
   return need<HTMLElement>('.settings-nav-item[data-page="' + name + '"]');
 }
 
-function showPane(name: PaneName): void {
-  currentPane = name;
-  for (const n of PANES) paneEl(n).classList.toggle('active', n === name);
-  for (const n of PANES) navEl(n).classList.toggle('active', n === name);
+const paneLoaded: Partial<Record<PaneName, boolean>> = {};
+
+/** 加载指定 pane 内容（双缓冲；仅在首次或强制刷新时重建，切回零重建）。 */
+function loadPane(name: PaneName): void {
   if (name === 'config') {
     void loadConfig();
   } else if (name === 'tools') {
@@ -256,23 +258,32 @@ function showPane(name: PaneName): void {
   }
 }
 
-function reloadCurrentPane(): void {
-  if (currentPane === 'config') void loadConfig();
-  else if (currentPane === 'tools') void loadToolsSection();
-  else if (currentPane === 'sessions') {
-    void loadSessionTree(
-      need<HTMLElement>('#settingsSessions'),
-      need<HTMLElement>('#settingsSessionCount'),
-    );
-  } else {
-    void loadProviders();
+function showPane(name: PaneName): void {
+  currentPane = name;
+  for (const n of PANES) paneEl(n).classList.toggle('active', n === name);
+  for (const n of PANES) navEl(n).classList.toggle('active', n === name);
+  // 第 11 轮：切页只切 class（无重建）；内容首次加载后缓存，切回零闪烁
+  if (!paneLoaded[name]) {
+    paneLoaded[name] = true;
+    loadPane(name);
   }
+}
+
+/** 强制刷新当前 pane（「重新载入」按钮 / 打开设置页时配置页）。 */
+function forceLoadPane(name: PaneName): void {
+  loadPane(name);
+}
+
+function reloadCurrentPane(): void {
+  forceLoadPane(currentPane);
 }
 
 // ---- 页面开关 ----------------------------------------------------------------
 
 export function openSettings(): void {
   page.classList.remove('hidden');
+  // 打开时配置页强制刷新（热调可能被 statusline 快速切换等改变）
+  forceLoadPane('config');
   showPane('config');
 }
 

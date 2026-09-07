@@ -654,17 +654,18 @@ export function newWorkspace(): void {
   }
 
   async function loadDirs(path: string): Promise<void> {
+    // 第 11 轮：目录跳转双缓冲——旧目录列表保留到新列表就绪，一次替换
     status.className = 'ws-fs-status';
     status.textContent = '加载中…';
-    tree.innerHTML = '<div class="side-note">加载中…</div>';
     let r;
     try {
       r = await api.fsBrowse(path);
     } catch (err) {
       status.className = 'ws-fs-status err';
       status.textContent = '文件浏览暂不可用（' + (err instanceof Error ? err.message : String(err)) + '）· 请直接在下方输入路径';
-      tree.innerHTML = '';
-      tree.appendChild(el('div', 'side-note', '可编辑底部路径后点「跳转」，或直接填写名称+路径创建'));
+      const off = document.createElement('div');
+      off.appendChild(el('div', 'side-note', '可编辑底部路径后点「跳转」，或直接填写名称+路径创建'));
+      tree.replaceChildren(...off.childNodes);
       addrInput.value = path;
       curPath = path;
       return;
@@ -679,9 +680,9 @@ export function newWorkspace(): void {
     curPath = r.path ?? path;
     addrInput.value = r.path ?? path;
     renderCrumbs(r.roots ?? [], r.path ?? path);
-    tree.innerHTML = '';
+    const off = document.createElement('div');
     const dirs = r.dirs ?? [];
-    if (!dirs.length) tree.appendChild(el('div', 'side-note', '（该目录下没有子目录）'));
+    if (!dirs.length) off.appendChild(el('div', 'side-note', '（该目录下没有子目录）'));
     for (const d of dirs) {
       const row = el('div', 'ws-fs-dir');
       row.appendChild(el('span', 'ws-fs-dir-icon', '▸'));
@@ -690,8 +691,9 @@ export function newWorkspace(): void {
         const next = (curPath ? curPath.replace(/\/+$/, '') : '') + '/' + d;
         void loadDirs(next);
       });
-      tree.appendChild(row);
+      off.appendChild(row);
     }
+    tree.replaceChildren(...off.childNodes);
   }
 
   goBtn.addEventListener('click', () => {
