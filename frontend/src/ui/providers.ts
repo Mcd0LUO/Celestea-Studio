@@ -37,24 +37,33 @@ function renderProviders(): void {
     boxEl.appendChild(el('div', 'side-note', '暂无提供商 · 点击上方「添加提供商」创建'));
     return;
   }
+  const table = el('table', 'prov-table');
+  const thead = el('thead');
+  const hr = el('tr');
+  for (const h of ['名称', '备注', '请求格式', '模型', '状态', '操作']) {
+    hr.appendChild(el('th', null, h));
+  }
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = el('tbody');
   for (const p of providers) {
-    const row = el('div', 'prov-row' + (p.is_default ? ' is-default' : ''));
-    const main = el('div', 'prov-main');
-    const head = el('div', 'prov-title');
-    head.appendChild(el('span', 'prov-name', p.name || p.id));
-    if (p.is_default) head.appendChild(el('span', 'prov-badge', '默认'));
-    if (p.has_key) head.appendChild(el('span', 'prov-badge key', '已配 Key'));
-    if (p.note) head.appendChild(el('span', 'prov-note', String(p.note)));
-    main.appendChild(head);
-    const meta = el('div', 'prov-meta');
-    const bits: string[] = [];
-    if (p.request_format) bits.push('格式：' + p.request_format);
-    bits.push('模型：' + modelCount(p));
-    if (p.base_url) bits.push(p.base_url);
-    meta.textContent = bits.join(' · ');
-    main.appendChild(meta);
-    row.appendChild(main);
-    const actions = el('div', 'prov-actions');
+    const tr = el('tr');
+    if (p.is_default) tr.classList.add('is-default');
+    const tdName = el('td', 'prov-td-name');
+    tdName.appendChild(el('span', 'prov-name', p.name || p.id));
+    tr.appendChild(tdName);
+    const tdNote = el('td', 'prov-td-note', p.note ?? '—');
+    tr.appendChild(tdNote);
+    const tdFmt = el('td', 'prov-td-fmt', p.request_format ?? '—');
+    tr.appendChild(tdFmt);
+    const tdModels = el('td', 'prov-td-models', String(modelCount(p)));
+    tr.appendChild(tdModels);
+    const tdState = el('td', 'prov-td-state');
+    if (p.is_default) tdState.appendChild(el('span', 'prov-badge', '默认'));
+    if (p.has_key) tdState.appendChild(el('span', 'prov-badge key', '已配 Key'));
+    if (!p.is_default && !p.has_key) tdState.textContent = '—';
+    tr.appendChild(tdState);
+    const tdOps = el('td', 'prov-td-ops');
     const edit = el('button', 'btn-mini', '编辑') as HTMLButtonElement;
     edit.type = 'button';
     edit.addEventListener('click', () => openEditor(p.id));
@@ -67,16 +76,23 @@ function renderProviders(): void {
         .then(() => void loadProviders())
         .catch((err: unknown) => setMsg('删除失败：' + fmtErr(err)));
     });
-    actions.appendChild(edit);
-    actions.appendChild(del);
-    row.appendChild(actions);
-    boxEl.appendChild(row);
+    tdOps.appendChild(edit);
+    tdOps.appendChild(del);
+    tr.appendChild(tdOps);
+    tbody.appendChild(tr);
   }
+  table.appendChild(tbody);
+  boxEl.appendChild(table);
 }
 
 function renderDefaultPicker(): void {
-  const wrap = el('div', 'prov-default');
-  wrap.appendChild(el('span', 'prov-default-label', '默认模型：'));
+  const wrap = el('div', 'prov-default-card');
+  const head = el('div', 'prov-default-head');
+  head.appendChild(el('span', 'prov-default-title', '默认模型'));
+  head.appendChild(el('span', 'prov-default-note', '切换即热应用（POST /api/providers/default）'));
+  wrap.appendChild(head);
+  const body = el('div', 'prov-default-body');
+  body.appendChild(el('span', 'prov-default-label', '当前默认'));
   const sel = document.createElement('select');
   sel.className = 'cfg-input prov-default-sel';
   const known = new Set<string>();
@@ -116,8 +132,9 @@ function renderDefaultPicker(): void {
         sel.value = defaultModel ?? '';
       });
   });
-  wrap.appendChild(sel);
-  wrap.appendChild(msg);
+  body.appendChild(sel);
+  body.appendChild(msg);
+  wrap.appendChild(body);
   boxEl.appendChild(wrap);
 }
 

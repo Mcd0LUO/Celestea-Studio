@@ -19,7 +19,7 @@ import { connectSse, initChat } from './chat';
 import { setStatus } from './ui/statusbar';
 import { initSettingsPage } from './ui/config';
 import { initSessionsPanel } from './ui/sessions';
-import { restoreCliMainHistory } from './ui/restore';
+import { restoreActiveHistory } from './ui/restore';
 import { initRail } from './ui/rail';
 import { initSidebar } from './ui/sidebar';
 import { Statusline } from './statusline';
@@ -60,11 +60,11 @@ function init(): void {
   // 5) 「通用设置」页（取代原 #modal 弹层；热调 + 工具列表；保存成功后刷新健康信息）
   initSettingsPage();
 
-  // 6) 消息 rail（左侧灵动长条）+ 聊天主循环 + 启动恢复 + SSE
+  // 6) 消息 rail（左侧灵动长条）+ 聊天主循环 + 启动恢复（按活跃会话） + SSE
   initRail();
   initChat();
   refreshHealthChip(statusline);
-  void restoreCliMainHistory();
+  void restoreActiveHistory();
   connectSse(statusline);
 
   // 配置保存成功 → 顶栏/statusline 反映新模型

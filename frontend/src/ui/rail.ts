@@ -11,9 +11,11 @@ import { el } from '../utils/dom';
 
 const PREVIEW_MS = 350; // hover 停留防抖
 const PREVIEW_CHARS = 40;
-const RAIL_HIT = 110;   // 邻近度生效的横向距离（px，自消息区左缘）
-const GROW_RANGE = 190; // 纵向衰减半径（px）
-const ITEM_H = 20;
+const RAIL_GAP = 10;    // rail 与主消息列(mcol)之间的间距
+const RAIL_HIT = 46;    // 邻近度生效的横向距离（px，自 rail 轨道左缘）
+const GROW_RANGE = 170; // 纵向衰减半径（px）
+const ITEM_H = 14;      // 紧凑条目高度
+let railX = 0;          // 轨道左缘（相对 #messages padding box）
 
 interface RailItem {
   col: HTMLElement;
@@ -38,6 +40,32 @@ function ensureTrack(): boolean {
     msgsEl.appendChild(track);
   }
   return true;
+}
+
+/** rail 贴主消息列（mcol）左缘：轨道 left 随 mcol 位置动态对齐。 */
+function syncRailX(): void {
+  if (!msgsEl || !track) return;
+  const col = msgsEl.querySelector<HTMLElement>('.mcol');
+  if (!col) {
+    track.style.left = '0px';
+    railX = 0;
+    return;
+  }
+  const m = msgsEl.getBoundingClientRect();
+  const c = col.getBoundingClientRect();
+  const x = Math.max(2, Math.round(c.left - m.left - RAIL_GAP - 18));
+  track.style.left = x + 'px';
+  railX = x;
+}
+
+/** 消息容器尺寸/滚动内容变化时重算轨道位置（ResizeObserver + 侧栏宽度变化）。 */
+let ro: ResizeObserver | null = null;
+function watchRailX(): void {
+  if (!msgsEl) return;
+  ro?.disconnect();
+  ro = new ResizeObserver(() => syncRailX());
+  ro.observe(msgsEl);
+  window.addEventListener('resize', syncRailX);
 }
 
 /** 创建消息时注册（addUserMessage / ensureAssistant 调用）。 */
@@ -97,7 +125,8 @@ export function railSync(): void {
 }
 
 function syncTop(it: RailItem): void {
-  const t = it.col.offsetTop + Math.max(0, (it.col.offsetHeight - ITEM_H) / 2 - 4);
+  // 紧凑：条目贴消息顶部附近（含 caption 行），不垂直居中
+  const t = Math.max(0, it.col.offsetTop + 3);
   it.top = t;
   it.el.style.top = t + 'px';
 }
@@ -143,6 +172,7 @@ function showCard(it: RailItem): void {
   removeCard();
   const card = el('div', 'msgrail-card');
   card.style.top = it.top + 'px';
+  card.style.left = railX + 22 + 'px';
   const q = firstLine(it.col, PREVIEW_CHARS);
   if (q) {
     const ql = el('div', 'msgrail-card-q');
@@ -173,7 +203,7 @@ function onMove(e: MouseEvent): void {
   if (!msgsEl || !items.length) return;
   const rect = msgsEl.getBoundingClientRect();
   const x = e.clientX - rect.left;
-  if (x > RAIL_HIT) {
+  if (x > railX + RAIL_HIT) {
     // 鼠标离开 rail 区域：全部缩回细条
     if (rafPending) return;
     rafPending = true;
@@ -212,6 +242,8 @@ export function initRail(): void {
   msgsEl = document.getElementById('messages');
   if (!msgsEl) return;
   ensureTrack();
+  syncRailX();
+  watchRailX();
   msgsEl.addEventListener('mousemove', onMove);
   msgsEl.addEventListener('mouseleave', onLeave);
   msgsEl.addEventListener('mouseover', (e) => {

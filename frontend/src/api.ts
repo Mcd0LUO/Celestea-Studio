@@ -3,11 +3,13 @@
 // 封装：请求/响应解析/ApiError；不持有 UI 状态、不做 DOM 操作。
 // ============================================================================
 import type {
+  ActivateResp,
   BatchIdsReq,
   BatchNamesReq,
   CancelResp,
   ClearResp,
   ConfigInfo,
+  FsBrowseResp,
   ConfigPatch,
   ConfigSaveResp,
   HealthInfo,
@@ -87,7 +89,8 @@ export const api = {
   cancel: () => postJson<CancelResp>('/api/cancel', {}),
   // ---- 工作区 / 会话管理（W236；缺失时 404 优雅降级） ----
   workspaces: () => requestJson<WorkspacesResp>('/api/workspaces'),
-  createWorkspace: (name: string) => postJson<ClearResp>('/api/workspaces', { name }),
+  createWorkspace: (name: string, path?: string) =>
+    postJson<ClearResp>('/api/workspaces', path ? { name, path } : { name }),
   deleteWorkspace: (name: string) =>
     postJson<ClearResp>('/api/workspaces/' + encodeURIComponent(name) + '/delete', {}),
   batchDeleteWorkspaces: (names: string[]) =>
@@ -97,6 +100,12 @@ export const api = {
     postJson<ClearResp>('/api/sessions/' + encodeURIComponent(id) + '/archive', {}),
   unarchiveSession: (id: string) =>
     postJson<ClearResp>('/api/sessions/' + encodeURIComponent(id) + '/unarchive', {}),
+  /** 激活会话（W237）：POST /api/sessions/{id}/activate；409=轮次中。 */
+  activateSession: (id: string) =>
+    postJson<ActivateResp>('/api/sessions/' + encodeURIComponent(id) + '/activate', {}),
+  /** 目录浏览（W237）：GET /api/fs/browse?path=（懒加载列目录，只显示目录）。 */
+  fsBrowse: (path?: string) =>
+    requestJson<FsBrowseResp>('/api/fs/browse' + (path ? '?path=' + encodeURIComponent(path) : '')),
   batchArchiveSessions: (ids: string[]) =>
     postJson<ClearResp>('/api/sessions/batch-archive', { ids } as BatchIdsReq),
   batchDeleteSessions: (ids: string[]) =>

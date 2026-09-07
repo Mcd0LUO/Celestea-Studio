@@ -112,6 +112,8 @@ export interface SessionInfo {
   size?: number;
   modified?: number;
   archived?: boolean;
+  /** W237：是否为当前活跃会话 */
+  active?: boolean;
 }
 
 export interface SessionsResp {
@@ -147,6 +149,23 @@ export interface WorkspaceInfo {
 export interface WorkspacesResp {
   ok?: boolean;
   workspaces?: WorkspaceInfo[];
+  active_session?: string | null;
+  error?: string;
+}
+
+/** POST /api/sessions/{id}/activate 响应。 */
+export interface ActivateResp {
+  ok?: boolean;
+  active_session?: string;
+  error?: string;
+}
+
+/** GET /api/fs/browse?path= 响应（目录浏览；只列目录）。 */
+export interface FsBrowseResp {
+  path?: string;
+  parent?: string | null;
+  dirs?: string[];
+  roots?: string[];
   error?: string;
 }
 

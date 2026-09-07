@@ -1,6 +1,6 @@
 // ============================================================================
-// ui/restore.ts — 启动时恢复主会话（cli-main）历史（方案A）：
-//   GET /api/sessions/cli-main/messages → 用与 live 相同的渲染管线渲染最近
+// ui/restore.ts — 启动/切换会话时恢复活跃会话历史：
+//   GET /api/sessions/{id}/messages → 用与 live 相同的渲染管线渲染最近
 //   N=200 条存量（更早的加折叠提示）→ 尾部加「以下为本次会话」分隔线 →
 //   之后的 SSE 增量照旧。衔接去重：SSE 重放的助手文本若与已恢复尾部同内容
 //   （前缀匹配）则吞掉，直到发散；done 全量一致时丢弃重复气泡。
@@ -15,10 +15,10 @@ import {
   autoscroll,
   ensureAssistant,
   finalizeAssistant,
+  resetMessages,
 } from './messages';
 
 const MAX_RESTORE = 200;
-const CLIENT_MAIN = 'cli-main';
 
 // ---- 衔接去重状态 ------------------------------------------------------------
 
@@ -81,6 +81,13 @@ export function finalAssistantDedup(text?: string): boolean {
 
 // ---- 渲染 ---------------------------------------------------------------------
 
+function appendNote(text: string): void {
+  const msgs = document.getElementById('messages');
+  if (msgs && !msgs.querySelector('.restore-note')) {
+    msgs.appendChild(el('div', 'restore-note', text));
+  }
+}
+
 function appendFoldNote(): void {
   const msgs = document.getElementById('messages');
   if (!msgs) return;
@@ -128,20 +135,18 @@ function renderOne(m: HistoryMsg): void {
   if (msgs) msgs.appendChild(col);
 }
 
-/** 启动恢复：cli-main 最近 200 条 + 分隔线。失败 → 空视图 + 轻提示。 */
-export async function restoreCliMainHistory(): Promise<void> {
+/**
+ * 渲染指定会话历史（最近 200 条 + 折叠提示 + 「以下为本次会话」分隔线）。
+ * 404/超时/端点缺失 → 空视图 + 轻提示，不崩溃。
+ */
+export async function restoreSessionHistory(id: string): Promise<void> {
   let resp;
   try {
-    resp = await api.messages(CLIENT_MAIN);
+    resp = await api.messages(id);
   } catch (err) {
     // 404/超时/端点缺失：保持空视图，仅轻提示
     if (!S.streaming) {
-      const msgs = document.getElementById('messages');
-      if (msgs && !msgs.querySelector('.restore-note')) {
-        msgs.appendChild(
-          el('div', 'restore-note', '历史恢复暂不可用（' + (err instanceof Error ? err.message : String(err)) + '）'),
-        );
-      }
+      appendNote('历史恢复暂不可用（' + (err instanceof Error ? err.message : String(err)) + '）');
     }
     return;
   }
@@ -153,4 +158,48 @@ export async function restoreCliMainHistory(): Promise<void> {
   appendLiveSeparator();
   autoscroll(true);
   tail = recent[recent.length - 1] ?? null;
+}
+
+/**
+ * 解析当前活跃会话 id（W237）：
+ *   1) GET /api/sessions 的 active 字段；2) GET /api/workspaces 的 active_session；
+ *   3) 兜底：旧后端无 active 概念 → 若 cli-main 存在则用之；否则 null。
+ */
+export async function resolveActiveSession(): Promise<string | null> {
+  try {
+    const d = await api.sessions();
+    const act = (d.sessions ?? []).find((s) => s.active === true);
+    if (act?.id) return act.id;
+  } catch {
+    /* fall through */
+  }
+  try {
+    const w = await api.workspaces();
+    if (w.active_session) return w.active_session;
+  } catch {
+    /* fall through */
+  }
+  try {
+    const d = await api.sessions();
+    if ((d.sessions ?? []).some((s) => s.id === 'cli-main')) return 'cli-main';
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** 启动恢复：按当前活跃会话拉取历史（不再特设 cli-main）。 */
+export async function restoreActiveHistory(): Promise<void> {
+  const id = await resolveActiveSession();
+  if (id === null) {
+    if (!S.streaming) appendNote('未找到活跃会话 · 发送第一条消息后自动建立');
+    return;
+  }
+  await restoreSessionHistory(id);
+}
+
+/** 激活会话后切换聊天区：清空现有视图并渲染目标会话历史（rail 同步复位）。 */
+export function switchToSession(id: string): void {
+  resetMessages(); // 清空消息流 + rail + 流式状态
+  void restoreSessionHistory(id);
 }

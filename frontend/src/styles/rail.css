@@ -1,15 +1,14 @@
 /* ============================================================================
- * 消息 rail —— 聊天区左侧灵动长条（W236）
- *   未悬停/鼠标远离 = 细条不干扰阅读；靠近 = 邻近者变长，向两侧递减。
+ * 消息 rail —— 聊天区内部、贴主消息列左侧的紧凑独立细条（W237）
+ *   与左侧工作区/会话面板完全无关；未悬停 = 细点条不干扰阅读；
+ *   鼠标靠近 = 邻近者变长吸附，向两侧按距离递减。
  *   全部走 tokens.css 的 DSH night 变量。
  * ============================================================================ */
 
-#messages { padding-left: 40px; }
-
 .msgrail {
   position: absolute;
-  left: 6px; top: 0; bottom: 0;
-  width: 26px;
+  top: 0; bottom: 0;
+  width: 16px;
   z-index: 24;
   pointer-events: none; /* 轨道不挡消息，条目自身可点击 */
 }
@@ -17,40 +16,39 @@
 .msgrail-item {
   position: absolute; left: 0; top: 0;
   --grow: 0;
-  width: calc(24px + var(--grow) * 150px);
-  height: 20px;
-  display: flex; align-items: center; gap: 6px;
-  padding: 0 8px;
+  width: calc(10px + var(--grow) * 96px);
+  height: 14px;
+  display: flex; align-items: center; gap: 5px;
+  padding: 0 5px;
   border: 1px solid var(--c-border-subtle);
-  border-radius: 10px;
+  border-radius: 7px;
   background: var(--c-surface-raised);
   cursor: pointer;
   pointer-events: auto;
   overflow: hidden;
   white-space: nowrap;
-  transition: width .2s cubic-bezier(.23, .9, .3, 1.14), border-color .15s ease, background .15s ease;
+  transition: width .18s cubic-bezier(.23, .9, .3, 1.14), border-color .15s ease, background .15s ease;
 }
 .msgrail-item:hover { --grow: 1; border-color: var(--c-accent-ring); }
 .msgrail-item.is-reply { background: var(--c-accent-soft); border-color: var(--c-accent-ring); }
 
 .msgrail-dot {
   flex: 0 0 auto;
-  width: 5px; height: 5px; border-radius: 50%;
+  width: 4px; height: 4px; border-radius: 50%;
   background: var(--c-text-3);
 }
 .msgrail-item.is-reply .msgrail-dot { background: var(--c-accent); }
 
 .msgrail-label {
-  font-size: 10px; color: var(--c-text-2);
+  font-size: 9.5px; color: var(--c-text-2);
   opacity: calc(var(--grow, 0) * 1);
   overflow: hidden; text-overflow: ellipsis;
-  transition: opacity .15s ease;
+  transition: opacity .12s ease;
 }
 
-/* ---- 预览卡片 ---- */
+/* ---- 预览卡片（锚定 rail 右侧） ---- */
 .msgrail-card {
   position: absolute;
-  left: 34px;
   top: 0;
   width: 280px;
   z-index: 40;
