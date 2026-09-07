@@ -18,7 +18,7 @@ export interface SseEnvelope {
 }
 
 /** SSE event names (mirrored from the engine LoopEvent variants). */
-export type SseEventName = 'status' | 'text' | 'thinking' | 'tool' | 'tool_result' | 'done';
+export type SseEventName = 'status' | 'text' | 'thinking' | 'tool' | 'tool_result' | 'done' | 'context';
 
 export type ConnState = 'connecting' | 'online' | 'down';
 
@@ -78,6 +78,13 @@ export interface DonePayload {
   turn?: number;
   text?: string;
   tool_calls?: ToolPayload[];
+}
+
+/** context 类事件（W240：上下文注入 / 裁剪等系统提示）。 */
+export interface ContextPayload {
+  turn?: number;
+  text?: string;
+  cls?: string;
 }
 
 // ---- REST -------------------------------------------------------------------

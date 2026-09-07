@@ -83,12 +83,28 @@ export function pushToolCard(p: ToolPayload): HTMLElement {
 
   const head = document.createElement('summary');
   head.className = 'toolcard-head';
+  head.setAttribute('aria-expanded', 'false');
   const row1 = el('div', 'toolcard-row1');
   row1.appendChild(el('span', 'step-tag', 'step ' + toolStep));
   row1.appendChild(el('span', 'toolcard-name', String(p.name || 'tool')));
   const state = el('span', 'toolcard-state');
   state.innerHTML = '<span class="ts-dot"></span><span class="ts-label">运行中</span>';
   row1.appendChild(state);
+  // 复制（参数+结果）——独立小操作，不遮挡整卡展开热区
+  const copyBtn = el('button', 'toolcard-copy', '复制') as HTMLButtonElement;
+  copyBtn.type = 'button';
+  copyBtn.title = '复制参数与结果（JSON）';
+  copyBtn.addEventListener('click', (e) => {
+    e.preventDefault(); // 阻止 summary 切换展开
+    e.stopPropagation();
+    const res = opIndex.get(String(p.id));
+    const outEl = res?.card.querySelector<HTMLElement>('.tool-out');
+    const text = toJsonText(p.args) + '\n' + (outEl?.textContent ?? '');
+    void navigator.clipboard.writeText(text).catch(() => {
+      /* clipboard unavailable */
+    });
+  });
+  row1.appendChild(copyBtn);
   head.appendChild(row1);
   const argsPv = el('div', 'toolcard-args-preview');
   const a = argsSummary(p.args);
@@ -99,14 +115,15 @@ export function pushToolCard(p: ToolPayload): HTMLElement {
   head.appendChild(resultPv);
   card.appendChild(head);
 
-  // 展开后可见：参数全文
+  // 展开后可见：参数全文（平铺，无需二级展开）
   const body = el('div', 'toolcard-body');
-  const argsDet = document.createElement('details');
-  argsDet.className = 'tool-details';
-  argsDet.appendChild(el('summary', null, '参数'));
-  argsDet.appendChild(el('div', 'tool-args', toJsonText(p.args)));
-  body.appendChild(argsDet);
+  body.appendChild(el('div', 'tool-args', toJsonText(p.args)));
   card.appendChild(body);
+
+  // 整卡单击展开/收起详情：同步 aria-expanded
+  card.addEventListener('toggle', () => {
+    head.setAttribute('aria-expanded', card.open ? 'true' : 'false');
+  });
 
   bubble.appendChild(card);
   msg.appendChild(bubble);
@@ -143,15 +160,12 @@ export function applyToolResult(p: ToolResultPayload): void {
   rec.resultPreview.textContent = r ? '结果：' + r : '';
   if (r) rec.resultPreview.classList.add('has');
 
-  // 展开区：结果全文
+  // 展开区：结果全文（平铺，跟随整卡展开/收起）
   const body = card?.querySelector<HTMLElement>('.toolcard-body');
-  if (body) {
-    const res = document.createElement('details');
-    res.className = 'tool-details';
-    res.appendChild(el('summary', null, failed ? '错误' : '结果'));
-    const out = el('div', 'tool-out' + (failed ? ' err-c' : ''), p.error ? String(p.error) : toJsonText(p.value));
-    res.appendChild(out);
-    body.appendChild(res);
+  if (body && !body.querySelector('.tool-out')) {
+    body.appendChild(
+      el('div', 'tool-out' + (failed ? ' err-c' : ''), p.error ? String(p.error) : toJsonText(p.value)),
+    );
   }
   autoscroll();
 }

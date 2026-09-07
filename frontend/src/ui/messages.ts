@@ -1,8 +1,11 @@
 // ============================================================================
-// ui/messages.ts — 消息流（单一职责）：
-//   用户/助手气泡 · thinking（默认收起 + 时长徽标）· 流式 markdown 增量渲染
-// 流式渲染：delta 增量累积 + 固定节拍重渲染（时间节流），完成时冲刷一次，
-// 避免每个 delta 全量重解析造成的闪烁/跳变。
+// ui/messages.ts — 消息流（单一职责，W240 连续事件流重构）：
+//   一轮 = 按事件真实时间顺序渲染成一条连续流：
+//     用户消息 → 思考段（弱化块，按序）→ 文本段（markdown 气泡）→
+//     工具调用卡（内联条目）→ 工具结果 → 继续文本段 → ……
+//   文本增量按节拍重渲染；工具事件到达时当前文本段收尾（flushTextSegment），
+//   后续文本开启新段 —— 不再按"思考/文本/工具"分区聚合。
+//   thinking 弱化为独立信息块按序出现；context/status 类事件渲染为信息块。
 // ============================================================================
 import { $, el, esc, fmtNow, need } from '../utils/dom';
 import { highlightCode } from '../utils/hljs';
@@ -10,7 +13,7 @@ import { marked } from 'marked';
 import type { AssistantView } from './view';
 import { S } from '../state';
 import { railAdd, railReset, railSync } from './rail';
-import { resetToolCards } from './toolcards'; // 灵动选择条 v3（W238 重做）
+import { resetToolCards } from './toolcards';
 
 marked.setOptions({ breaks: true, gfm: true });
 
@@ -49,9 +52,9 @@ export function renderEmptyHint(): void {
   MsgsEl.appendChild(hint);
 }
 
-/** 助手气泡是否已有任何内容（正文/思考/工具卡）——占位判定。 */
+/** 助手文本段是否已有内容（占位判定）。 */
 export function assistantHasContent(view: AssistantView): boolean {
-  return view.text.trim() !== '' || view.thinkText.trim() !== '' || view.content.childElementCount > 0;
+  return view.text.trim() !== '' || view.content.childElementCount > 0;
 }
 
 /** 直接移除空占位助手气泡（不渲染空块）。 */
@@ -60,20 +63,17 @@ export function removeAssistant(view: AssistantView): void {
   S.assistant = null;
 }
 
-/** 清空消息流并重建空态（/api/clear 成功后调用；同时重置流式/思考状态）。 */
+/** 清空消息流并重建空态（/api/clear 成功后调用；同时重置流式状态）。 */
 export function resetMessages(): void {
-  stopThinkTimer();
-  thinkStart = 0;
-  thinkLast = 0;
-  thinkView = null;
   if (renderTimer !== null) {
     window.clearTimeout(renderTimer);
     renderTimer = null;
   }
   S.assistant = null;
   S.turn = null;
+  thinkSeg = null;
   resetToolCards(); // 工具卡片（消息流级条目）复位
-  railReset(); // 清空选择条 v3 条目
+  railReset(); // 消息 rail 复位
   renderEmptyHint();
 }
 
@@ -86,7 +86,7 @@ function renderTextView(view: AssistantView): void {
   view.content.innerHTML = md(view.text);
   highlightCode(view.content);
   autoscroll();
-  railSync(); // 流式高度变化 → 选择条计数/重排同步
+  railSync();
 }
 
 function scheduleTextView(view: AssistantView): void {
@@ -122,71 +122,73 @@ export function applyFinalText(view: AssistantView, text: string): void {
   flushTextView(view);
 }
 
-// ---- thinking（默认收起 · 时长） ------------------------------------------------
-const THINK_IDLE_MS = 5000; // 超过 5s 无增量 → 视为思考结束，冻结时长
-let thinkStart = 0;
-let thinkLast = 0;
-let thinkTimer: number | null = null;
-let thinkView: AssistantView | null = null;
-
-function fmtThinkDur(ms: number): string {
-  const t = Math.max(0, Math.floor(ms / 1000));
-  if (t < 60) return t + 's';
-  const m = Math.floor(t / 60);
-  const s = t % 60;
-  return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
-}
-
-function renderThinkTime(view: AssistantView): void {
-  if (thinkStart === 0) return;
-  view.thinkTime.textContent = fmtThinkDur(thinkLast - thinkStart);
-}
-
-function tickThink(): void {
-  const now = Date.now();
-  if (now - thinkLast > THINK_IDLE_MS) {
-    stopThinkTimer(); // 冻结
-    return;
+/** 冻结当前文本段：有内容则收尾为完整气泡，并解除当前段（工具事件/新段前调用）。 */
+export function flushTextSegment(): void {
+  if (S.assistant) {
+    const a = S.assistant;
+    S.assistant = null;
+    if (assistantHasContent(a)) {
+      a.bubble.classList.remove('streaming');
+      a.bubble.classList.add('complete');
+      flushTextView(a);
+      autoscroll(true);
+    } else {
+      a.root.remove(); // 空占位不渲染
+    }
   }
-  if (thinkView) renderThinkTime(thinkView);
 }
 
-function stopThinkTimer(): void {
-  if (thinkTimer !== null) {
-    window.clearInterval(thinkTimer);
-    thinkTimer = null;
-  }
-  if (thinkView) renderThinkTime(thinkView);
+// ---- thinking（弱化独立段，按事件顺序出现，不再聚合进气泡） ----------------------
+
+interface ThinkSeg {
+  root: HTMLElement;
+  body: HTMLElement;
+  text: string;
 }
 
-/** Append a thinking delta（块保持收起；首次出现时显示并启动时长计时）。 */
-export function appendThinking(view: AssistantView, delta: string): void {
-  view.thinkText += delta || '';
-  view.think.classList.remove('idle');
-  view.think.classList.add('summarizing');
-  if (thinkTimer === null) {
-    // 新一轮思考会话：重置起点（上一轮已在 finalize 后停止）
-    thinkStart = Date.now();
-    thinkLast = thinkStart;
-    thinkView = view;
-    thinkTimer = window.setInterval(tickThink, 500);
-    view.thinkTime.textContent = '';
+let thinkSeg: ThinkSeg | null = null;
+
+/** Append a thinking delta（弱化块：左侧色条 + 浅色底 + 小字；按序独立成段）。 */
+export function appendThinking(delta: string): void {
+  if (!thinkSeg) {
+    hideEmptyHint();
+    thinkSeg = { root: el('div', 'mcol'), body: el('div', 'think-seg-body'), text: '' };
+    const msg = el('div', 'msg think-seg');
+    const cap = el('div', 'msg-caption');
+    cap.appendChild(el('span', 'who', '思考'));
+    cap.appendChild(el('span', null, fmtNow()));
+    msg.appendChild(cap);
+    const bubble = el('div', 'bubble think-seg-bubble');
+    bubble.appendChild(thinkSeg.body);
+    msg.appendChild(bubble);
+    thinkSeg.root.appendChild(msg);
+    MsgsEl.appendChild(thinkSeg.root);
   }
-  thinkLast = Date.now();
-  renderThinkTime(view);
-  view.thinkBody.textContent = view.thinkText;
+  thinkSeg.text += delta || '';
+  thinkSeg.body.textContent = thinkSeg.text;
   autoscroll();
   railSync();
 }
 
-/** Transition the bubble out of streaming state（冲刷正文 + 冻结思考时长）。 */
-export function finalizeAssistant(view: AssistantView): void {
-  stopThinkTimer();
-  thinkView = null;
-  view.think.classList.remove('summarizing');
-  view.bubble.classList.remove('streaming');
-  view.bubble.classList.add('complete');
-  flushTextView(view); // 最终渲染，丢弃未冲刷的 delta
+// ---- 信息块（context/status 类事件：注入、lagged、error 提示等） ------------------
+
+/** 渲染一条可见信息块（按序出现在流中；样式与普通消息区分：左侧色条 + 浅色底）。 */
+export function renderInfoBlock(text: string, cls?: 'err' | 'warn'): void {
+  if (!text) return;
+  hideEmptyHint();
+  const col = el('div', 'mcol');
+  const msg = el('div', 'msg info' + (cls ? ' ' + cls : ''));
+  const cap = el('div', 'msg-caption');
+  cap.appendChild(el('span', 'who', '系统'));
+  cap.appendChild(el('span', null, fmtNow()));
+  msg.appendChild(cap);
+  const bubble = el('div', 'bubble info-bubble');
+  const body = el('div', 'content info-content');
+  body.textContent = text;
+  bubble.appendChild(body);
+  msg.appendChild(bubble);
+  col.appendChild(msg);
+  MsgsEl.appendChild(col);
   autoscroll(true);
 }
 
@@ -208,12 +210,12 @@ export function addUserMessage(text: string): void {
   msg.appendChild(bubble);
   col.appendChild(msg);
   MsgsEl.appendChild(col);
-  railAdd(col, 'user'); // 选择条 v3：用户消息 → 一根长条
+  railAdd(col, 'user');
   railSync();
   autoscroll(true);
 }
 
-/** Get the active assistant view or create a fresh streaming bubble. */
+/** 获取当前文本段视图或创建新的流式文本气泡（连续流中的一段）。 */
 export function ensureAssistant(): AssistantView {
   if (S.assistant) return S.assistant;
   hideEmptyHint();
@@ -224,39 +226,22 @@ export function ensureAssistant(): AssistantView {
   cap.appendChild(el('span', null, fmtNow()));
   msg.appendChild(cap);
   const bubble = el('div', 'bubble streaming');
-
-  // thinking：默认收起 + 时长徽标；无思考增量时整块隐藏（idle）
-  const think = document.createElement('details');
-  think.className = 'thinking idle';
-  const thinkSummary = document.createElement('summary');
-  thinkSummary.appendChild(el('span', 'think-dot'));
-  thinkSummary.appendChild(el('span', 'think-label', '思考过程'));
-  const thinkTime = el('span', 'think-time');
-  thinkSummary.appendChild(thinkTime);
-  think.appendChild(thinkSummary);
-  const thinkBody = el('div', 'thinking-body');
-  think.appendChild(thinkBody);
-  bubble.appendChild(think);
-
-  const cards = el('div', 'toolcards');
-  bubble.appendChild(cards);
-
   const content = el('div', 'content');
   bubble.appendChild(content);
-
   msg.appendChild(bubble);
   col.appendChild(msg);
   MsgsEl.appendChild(col);
-  railAdd(col, 'assistant'); // 选择条 v3：助手回复 → 一根长条
+  railAdd(col, 'assistant');
   railSync();
 
+  // think/cards 字段为类型兼容保留（不挂载；thinking/工具卡均独立成段）
   const view: AssistantView = {
     root: msg,
     bubble,
-    think,
-    thinkBody,
-    thinkTime,
-    cards,
+    think: document.createElement('details'),
+    thinkBody: document.createElement('div'),
+    thinkTime: document.createElement('span'),
+    cards: document.createElement('div'),
     content,
     text: '',
     thinkText: '',
@@ -266,4 +251,12 @@ export function ensureAssistant(): AssistantView {
   S.assistant = view;
   autoscroll(true);
   return view;
+}
+
+/** 文本段收尾（turn 结束 / done 冲刷）。 */
+export function finalizeAssistant(view: AssistantView): void {
+  view.bubble.classList.remove('streaming');
+  view.bubble.classList.add('complete');
+  flushTextView(view);
+  autoscroll(true);
 }

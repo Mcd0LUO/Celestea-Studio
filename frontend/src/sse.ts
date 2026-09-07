@@ -6,6 +6,7 @@
 // ============================================================================
 import type {
   ConnState,
+  ContextPayload,
   DonePayload,
   SseEnvelope,
   SseEventName,
@@ -23,6 +24,7 @@ export interface SseHandlerMap {
   tool: (p: ToolPayload) => void;
   tool_result: (p: ToolResultPayload) => void;
   done: (p: DonePayload) => void;
+  context: (p: ContextPayload) => void;
 }
 
 export type SseHandler<K extends SseEventName> = SseHandlerMap[K];
@@ -34,6 +36,7 @@ const EVENT_NAMES: readonly SseEventName[] = [
   'tool',
   'tool_result',
   'done',
+  'context',
 ];
 
 export class SseClient {

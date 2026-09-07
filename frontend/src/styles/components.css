@@ -328,3 +328,36 @@
   white-space: pre-wrap; word-break: break-all;
   font-family: var(--mono); font-size: 12px; color: var(--c-text-2);
 }
+/* ============================================================================
+ * W240：连续事件流 —— 思考段（弱化）/ 信息块（context/status 类事件）
+ * ============================================================================ */
+.msg.think-seg .msg-caption .who { color: var(--c-text-3); }
+.think-seg-bubble {
+  border-left: 3px solid var(--c-border-strong);
+  background: var(--c-code-bg);
+  color: var(--c-text-3);
+}
+.think-seg-body {
+  white-space: pre-wrap; word-break: break-word;
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  max-height: 220px; overflow-y: auto;
+}
+
+/* 信息块（左侧色条 + 浅色底，与普通消息区分） */
+.msg.info .msg-caption .who { color: var(--c-text-3); }
+.info-bubble {
+  border-left: 3px solid var(--c-warn);
+  background: var(--c-warn-dim);
+}
+.msg.info.err .info-bubble { border-left-color: var(--c-err); background: var(--c-err-dim); }
+.info-content { font-size: 12px; color: var(--c-text-2); white-space: pre-wrap; word-break: break-word; }
+
+/* 工具卡：复制按钮（不遮挡展开热区） */
+.toolcard-copy {
+  margin-left: auto; flex: 0 0 auto;
+  background: transparent; border: 1px solid var(--c-border-subtle);
+  border-radius: 4px; color: var(--c-text-3);
+  font-size: 10px; font-family: var(--mono);
+  padding: 1px 6px; cursor: pointer;
+}
+.toolcard-copy:hover { color: var(--c-text-1); border-color: var(--c-accent-ring); }

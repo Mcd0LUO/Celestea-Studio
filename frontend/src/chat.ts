@@ -15,7 +15,6 @@ import type {
   ToolResultPayload,
 } from './types';
 import { S } from './state';
-import { el } from './utils/dom';
 import {
   addUserMessage,
   appendText,
@@ -25,7 +24,9 @@ import {
   autoscroll,
   ensureAssistant,
   finalizeAssistant,
+  flushTextSegment,
   removeAssistant,
+  renderInfoBlock,
 } from './ui/messages';
 import { applyToolResult, getToolStep, pushToolCard } from './ui/toolcards';
 import { clearInput, initInputBar, setBusy } from './ui/inputbar';
@@ -94,13 +95,19 @@ function onStatus(p: StatusPayload): void {
     return;
   }
   if (p.phase === 'completed' || p.phase === 'cancelled' || p.phase === 'error') {
-    const a = S.assistant;
     finalizeTurn(p.phase || '');
-    if (p.phase === 'error' && a && p.error) {
-      a.bubble.appendChild(el('div', 'err-inline', String(p.error)));
+    if (p.phase === 'error') {
+      // 出错提示作为信息块按序出现在流中
+      renderInfoBlock('本轮出错：' + (p.error || '未知错误'), 'err');
     }
   }
-  // 'lagged'：慢客户端，静默容忍
+  if (p.phase === 'lagged') {
+    // 慢客户端：可见信息块（不再静默）
+    renderInfoBlock('检测到慢客户端事件（lagged），已合并跳过', 'warn');
+  }
+  if (p.hint) {
+    renderInfoBlock(String(p.hint), 'warn');
+  }
 }
 
 function onText(p: TextPayload): void {
@@ -120,13 +127,14 @@ function onText(p: TextPayload): void {
 function onThinking(p: ThinkingPayload): void {
   if (S.turn === null) S.turn = p.turn ?? null;
   if (p.turn !== undefined && p.turn !== S.turn) return;
-  const a = ensureAssistant();
-  appendThinking(a, p.delta || '');
+  appendThinking(p.delta || ''); // 弱化思考段：按事件顺序独立渲染
 }
 
 function onTool(p: ToolPayload): void {
   if (S.turn === null) S.turn = p.turn ?? null;
   if (p.turn !== undefined && S.turn !== null && p.turn !== S.turn) return;
+  // 连续流：文本段先收尾，工具卡按事件顺序排在文本段之后
+  flushTextSegment();
   pushToolCard(p); // 消息流级条目：按事件时间内联在消息流中
   setStatusStep(getToolStep() > 0 ? String(getToolStep()) : null);
   autoscroll();
@@ -210,6 +218,14 @@ export function connectSse(statusline: Statusline): SseClient {
       onDone(p);
     } catch (err) {
       console.warn('SSE done', err);
+    }
+  });
+  sse.on('context', (p) => {
+    try {
+      // 上下文注入/裁剪等系统事件 → 信息块按序出现在流中
+      renderInfoBlock(p.text || '上下文事件', p.cls === 'err' ? 'err' : p.cls === 'warn' ? 'warn' : undefined);
+    } catch (err) {
+      console.warn('SSE context', err);
     }
   });
   sse.connect();
