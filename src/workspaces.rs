@@ -584,12 +584,14 @@ pub(crate) struct BrowseQuery {
 }
 
 pub(crate) async fn get_fs_browse(Query(q): Query<BrowseQuery>) -> Response {
-    let Some(raw) = q.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-        return err_response(
-            StatusCode::BAD_REQUEST,
-            "path is required (an absolute directory)".to_string(),
-        );
-    };
+    // Missing/empty path = the initial view: list the filesystem root, so the
+    // picker opens with a usable tree instead of an error fallback.
+    let raw = q
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/");
     let p = Path::new(raw);
     match browse_dirs(p) {
         Ok(dirs) => (
