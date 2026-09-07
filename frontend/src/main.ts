@@ -11,33 +11,31 @@ import './styles/components.css';
 import './styles/statusline.css';
 
 import './styles/settings.css';
+import './styles/sessions.css';
 
 import { api } from './api';
 import { connectSse, initChat } from './chat';
 import { setStatus } from './ui/statusbar';
 import { initSettingsPage } from './ui/config';
 import { initSessionsPanel } from './ui/sessions';
+import { restoreCliMainHistory } from './ui/restore';
 import { initSidebar } from './ui/sidebar';
 import { Statusline } from './statusline';
 import { S } from './state';
 import { initTheme, setupThemeSwitcher } from './theme';
 import { need } from './utils/dom';
 
-/** 健康信息 → 顶栏模型币 + 侧栏脚注 + statusline（模型兜底）。 */
+/** 健康信息 → 侧栏脚注 + statusline（模型兜底）。 */
 function refreshHealthChip(statusline: Statusline): void {
   void api
     .health()
     .then((h) => {
-      const chip = need<HTMLElement>('#modelChip');
-      chip.textContent = h.model || '—';
-      chip.title = (h.base_url || '') + ' · ' + (h.name || '');
       need<HTMLElement>('#sideFoot').textContent = (h.base_url || '') + ' · ' + h.model;
       // /api/status 未上线前，用 health 的模型填补 statusline
       if (h.model) statusline.merge({ model: h.model });
       if (!S.streaming) setStatus('就绪 · 在线', 'ok');
     })
     .catch(() => {
-      need<HTMLElement>('#modelChip').textContent = '离线';
       if (!S.streaming) setStatus('后端不可达', 'err');
     });
 }
@@ -60,9 +58,10 @@ function init(): void {
   // 5) 「通用设置」页（取代原 #modal 弹层；热调 + 工具列表；保存成功后刷新健康信息）
   initSettingsPage();
 
-  // 6) 聊天主循环 + SSE
+  // 6) 聊天主循环 + 启动恢复（cli-main 历史；失败轻提示） + SSE
   initChat();
   refreshHealthChip(statusline);
+  void restoreCliMainHistory();
   connectSse(statusline);
 
   // 配置保存成功 → 顶栏/statusline 反映新模型

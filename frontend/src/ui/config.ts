@@ -1,14 +1,14 @@
 // ============================================================================
-// ui/config.ts — 「通用设置」页（单一职责，取代原 #modal 弹层）：
-//   打开时 GET /api/config（+ /api/status 补充窗口信息）→ 渲染可热调表单；
-//   model 下拉用 available.models（value=id / label=name，缺失时降级手输）；
-//   reasoning_effort 档位 + 「标准（清除）」；工具清单区块见 ui/tools.ts；
-//   保存 POST /api/config {patch}（404/405/400/409 时给出明确提示）。
+// ui/config.ts — 「通用设置」页（左导航 + 右内容，取代原 #modal 弹层）：
+//   导航页：「通用配置」（热调表单）/「工具」（清单表格）/「会话」（管理）。
+//   模型下拉用 available.models（value=id / label=name，缺失降级手输）；
+//   effort 档位 + 「标准（清除）」；保存 POST /api/config（409/404/405/400 有提示）。
 // ============================================================================
 import { api, ApiError } from '../api';
 import { el, need } from '../utils/dom';
 import type { ConfigInfo, ConfigPatch } from '../types';
 import { initToolsSection, loadToolsSection } from './tools';
+import { clearCurrentSession, loadSessionBars } from './sessions';
 
 const page = need<HTMLElement>('#settingsPage');
 const box = need<HTMLElement>('#settingsConfig');
@@ -222,12 +222,53 @@ export async function loadConfig(): Promise<void> {
   }
 }
 
+// ---- 左导航 + 右内容 -----------------------------------------------------------
+
+const PANES = ['config', 'tools', 'sessions'] as const;
+type PaneName = (typeof PANES)[number];
+
+let currentPane: PaneName = 'config';
+
+function paneEl(name: PaneName): HTMLElement {
+  return need<HTMLElement>('.settings-pane[data-pane="' + name + '"]');
+}
+
+function navEl(name: PaneName): HTMLElement {
+  return need<HTMLElement>('.settings-nav-item[data-page="' + name + '"]');
+}
+
+function showPane(name: PaneName): void {
+  currentPane = name;
+  for (const n of PANES) paneEl(n).classList.toggle('active', n === name);
+  for (const n of PANES) navEl(n).classList.toggle('active', n === name);
+  if (name === 'config') {
+    void loadConfig();
+  } else if (name === 'tools') {
+    void loadToolsSection();
+  } else {
+    void loadSessionBars(
+      need<HTMLElement>('#settingsSessions'),
+      need<HTMLElement>('#settingsSessionCount'),
+    );
+  }
+}
+
+function reloadCurrentPane(): void {
+  if (currentPane === 'config') void loadConfig();
+  else if (currentPane === 'tools') void loadToolsSection();
+  else {
+    void loadSessionBars(
+      need<HTMLElement>('#settingsSessions'),
+      need<HTMLElement>('#settingsSessionCount'),
+    );
+  }
+}
+
 // ---- 页面开关 ----------------------------------------------------------------
 
 export function openSettings(): void {
   page.classList.remove('hidden');
-  void loadConfig();
-  void loadToolsSection();
+  showPane('config');
 }
 
 export function closeSettings(): void {
@@ -236,14 +277,22 @@ export function closeSettings(): void {
 
 export function initSettingsPage(): void {
   need<HTMLElement>('#btnConfig').addEventListener('click', openSettings);
-  need<HTMLElement>('#modelChip').addEventListener('click', openSettings);
   need<HTMLElement>('#btnSettingsClose').addEventListener('click', closeSettings);
-  need<HTMLElement>('#btnSettingsReload').addEventListener('click', () => {
-    void loadConfig();
-    void loadToolsSection();
+  need<HTMLElement>('#btnSettingsReload').addEventListener('click', reloadCurrentPane);
+  for (const n of PANES) {
+    navEl(n).addEventListener('click', () => showPane(n));
+  }
+  need<HTMLButtonElement>('#btnReloadSessionsSettings').addEventListener('click', () => {
+    void loadSessionBars(
+      need<HTMLElement>('#settingsSessions'),
+      need<HTMLElement>('#settingsSessionCount'),
+    );
+  });
+  need<HTMLButtonElement>('#btnClearSessSettings').addEventListener('click', () => {
+    clearCurrentSession();
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !page.classList.contains('hidden')) closeSettings();
   });
-  initToolsSection();
+  initToolsSection(); // #btnReloadTools
 }

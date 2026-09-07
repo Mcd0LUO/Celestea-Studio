@@ -17,7 +17,6 @@
         <span class="brand-tag">v2 · TS</span>
       </div>
       <div class="topbar-right">
-        <span id="modelChip" class="chip" title="模型">—</span>
         <button id="btnTheme" class="btn btn-quiet btn-theme" title="切换主题（夜航黑 / 樱花粉 / 克莱因蓝）">夜航</button>
         <button id="btnSidebar" class="btn btn-quiet" title="收起/展开左侧面板">收起</button>
         <button id="btnConfig" class="btn btn-quiet" title="运行配置（热调 model/推理档位/密钥等）">配置</button>
@@ -107,33 +106,49 @@
     </div>
   </div>
 
-  <!-- ===================== 通用设置页（取代原配置弹层） ===================== -->
+  <!-- ===================== 通用设置页（左导航 + 右内容） ===================== -->
   <div id="settingsPage" class="settings-page hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
     <div class="settings-shell">
       <header class="settings-head">
         <h3 id="settingsTitle">通用设置</h3>
         <div class="settings-actions">
-          <button class="btn-mini" id="btnSettingsReload" title="重新载入后端当前配置与工具清单">重新载入</button>
+          <button class="btn-mini" id="btnSettingsReload" title="重新载入当前页内容">重新载入</button>
           <button class="btn-mini" id="btnSettingsClose">关闭</button>
         </div>
       </header>
-      <div class="settings-body">
-        <section class="settings-sec">
-          <header class="settings-sec-head">
-            <h4>运行配置</h4>
-            <span class="settings-sec-note">热调 · 保存后下一轮生效</span>
-          </header>
-          <div id="settingsConfig"><div class="side-note">加载中…</div></div>
-        </section>
-        <section class="settings-sec">
-          <header class="settings-sec-head">
-            <h4>工具列表</h4>
-            <span class="sec-note" id="toolsCount">…</span>
-            <button class="btn-mini" id="btnReloadTools" title="重新加载工具清单">刷新</button>
-          </header>
-          <div id="settingsTools"><div class="side-note">加载中…</div></div>
-        </section>
-        <div class="cfg-hintline" id="settingsHint"></div>
+      <div class="settings-layout">
+        <nav class="settings-nav" aria-label="设置导航">
+          <button class="settings-nav-item active" type="button" data-page="config">通用配置</button>
+          <button class="settings-nav-item" type="button" data-page="tools">工具</button>
+          <button class="settings-nav-item" type="button" data-page="sessions">会话</button>
+        </nav>
+        <div class="settings-content">
+          <section class="settings-pane active" data-pane="config">
+            <header class="settings-pane-head">
+              <h4>运行配置</h4>
+              <span class="settings-sec-note">热调 · 保存后下一轮生效</span>
+            </header>
+            <div class="settings-pane-body" id="settingsConfig"><div class="side-note">加载中…</div></div>
+            <div class="cfg-hintline" id="settingsHint"></div>
+          </section>
+          <section class="settings-pane" data-pane="tools">
+            <header class="settings-pane-head">
+              <h4>工具列表</h4>
+              <span class="sec-note" id="toolsCount">…</span>
+              <button class="btn-mini" id="btnReloadTools" title="重新加载工具清单">刷新</button>
+            </header>
+            <div class="settings-pane-body" id="settingsTools"><div class="side-note">加载中…</div></div>
+          </section>
+          <section class="settings-pane" data-pane="sessions">
+            <header class="settings-pane-head">
+              <h4>会话管理</h4>
+              <span class="sec-note" id="settingsSessionCount">…</span>
+              <button class="btn-mini" id="btnReloadSessionsSettings" title="重新加载会话列表">刷新</button>
+              <button class="btn-mini" id="btnClearSessSettings" title="清空当前会话">清空当前会话</button>
+            </header>
+            <div class="settings-pane-body" id="settingsSessions"><div class="side-note">加载中…</div></div>
+          </section>
+        </div>
       </div>
     </div>
   </div>

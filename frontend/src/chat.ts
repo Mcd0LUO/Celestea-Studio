@@ -27,6 +27,7 @@ import {
 } from './ui/messages';
 import { applyToolResult, pushToolCard } from './ui/toolcards';
 import { clearInput, initInputBar, setBusy } from './ui/inputbar';
+import { feedAssistantDelta, finalAssistantDedup } from './ui/restore';
 import {
   setStatus,
   setStatusStep,
@@ -99,8 +100,11 @@ function onText(p: TextPayload): void {
     S.streaming = true;
     setBusy(true);
   }
+  // 衔接去重：SSE 重放的增量若与已恢复尾部同内容则吞掉
+  const delta = feedAssistantDelta(p.delta || '');
+  if (delta === null) return;
   const a = ensureAssistant();
-  appendText(a, p.delta || '');
+  appendText(a, delta);
 }
 
 function onThinking(p: ThinkingPayload): void {
@@ -133,6 +137,12 @@ function onDone(p: DonePayload): void {
   if (p.turn !== undefined && S.turn !== null && p.turn !== S.turn) return;
   const a = S.assistant;
   if (!a) return;
+  if (finalAssistantDedup(p.text)) {
+    // 整条为已恢复尾部的重放：移除重复气泡
+    a.root.remove();
+    S.assistant = null;
+    return;
+  }
   if (typeof p.text === 'string') applyFinalText(a, p.text);
   // done = 一轮模型输出结束；在 status completed/cancelled/error 之前可能还有工具轮次
   autoscroll();

@@ -44,13 +44,17 @@ export function initSidebar(): void {
 
   let collapsed = readStoredCollapsed();
 
+  // W227 任务1：同步 --sidebar-w 供聊天列宽度动态跟随（.mcol max-width）
   const applyCollapsed = () => {
     app.classList.toggle('sidebar-collapsed', collapsed);
+    app.style.setProperty('--sidebar-w', collapsed ? '0px' : sidebar.style.width || '316px');
     btn.textContent = collapsed ? '展开' : '收起';
     btn.title = collapsed ? '展开左侧面板' : '收起左侧面板';
   };
   const applyWidth = (w: number) => {
-    sidebar.style.width = clampWidth(w) + 'px';
+    const px = clampWidth(w) + 'px';
+    sidebar.style.width = px;
+    app.style.setProperty('--sidebar-w', px);
   };
 
   applyCollapsed();

@@ -28,14 +28,6 @@
   border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 1px 5px;
 }
 .topbar-right { display: flex; align-items: center; gap: 8px; }
-.chip {
-  font-family: var(--mono); font-size: 12px; color: var(--c-text-2);
-  background: var(--c-surface-raised); border: 1px solid var(--c-border-subtle);
-  border-radius: 6px; padding: 3px 10px; max-width: 340px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  cursor: pointer; user-select: none;
-}
-.chip:hover { border-color: var(--c-accent-ring); color: var(--c-text-1); }
 
 /* ---- 布局 ---- */
 #layout { flex: 1; display: flex; min-height: 0; }

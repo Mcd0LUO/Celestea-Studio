@@ -119,6 +119,22 @@ export interface SessionsResp {
   error?: string;
 }
 
+// ---- 会话历史（GET /api/sessions/{id}/messages，回放/恢复用） --------------------
+
+export type HistoryRole = 'user' | 'assistant' | 'tool';
+
+export interface HistoryMsg {
+  role: HistoryRole;
+  content: string;
+}
+
+export interface MessagesResp {
+  ok?: boolean;
+  session?: string;
+  messages?: HistoryMsg[];
+  error?: string;
+}
+
 export interface OkResp {
   ok?: boolean;
   error?: string;

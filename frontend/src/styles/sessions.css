@@ -1,0 +1,86 @@
+/* ============================================================================
+ * 会话列表 · Codex 风格横向长条（W227 续）
+ *   悬停变长（--grow 邻近度权重 + transition 吸附）/ 停留展开 Q·A 预览 /
+ *   工作区分组小节标题。全部走 tokens.css 的 DSH night 变量。
+ * ============================================================================ */
+
+.sess-group { margin-bottom: 10px; }
+.sess-group-title {
+  display: flex; align-items: center; gap: 8px;
+  padding: 2px 2px 5px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: 1.2px;
+  text-transform: uppercase; color: var(--c-text-3);
+}
+.sess-group-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-group-count {
+  margin-left: auto; flex: 0 0 auto;
+  font-family: var(--mono); font-size: 10px;
+  border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 5px;
+  color: var(--c-text-3);
+}
+
+/* ---- 长条本体：宽度 = 基础 + 邻近度权重 ---- */
+.sess-bar {
+  --grow: 0;
+  width: calc(84% + var(--grow) * 16%);
+  min-width: 0;
+  margin-bottom: 6px;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 8px;
+  background: var(--c-surface-raised);
+  cursor: pointer;
+  overflow: hidden;
+  transition: width .22s cubic-bezier(.23, .9, .3, 1.12), border-color .15s ease, background .15s ease;
+}
+.sess-bar:hover { --grow: 1; border-color: var(--c-accent-ring); }
+.sess-bar.active { border-color: var(--c-accent-ring); background: var(--c-accent-soft); }
+
+.sess-bar-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px;
+}
+.sess-bar-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--c-text-3); flex: 0 0 auto; }
+.sess-bar-dot.live { background: var(--c-ok); }
+.sess-bar-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12.5px; color: var(--c-text-1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sess-bar-meta {
+  flex: 0 0 auto;
+  font-family: var(--mono); font-size: 10.5px; color: var(--c-text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%;
+}
+
+/* ---- 展开预览（停留吸附后展开；高度过渡） ---- */
+.sess-bar-preview {
+  max-height: 0; opacity: 0; overflow: hidden;
+  border-top: 1px solid transparent;
+  transition: max-height .25s ease, opacity .18s ease, border-color .2s ease;
+}
+.sess-bar-preview.open {
+  max-height: 110px; opacity: 1;
+  border-top-color: var(--c-border-subtle);
+}
+.sess-bar-pv-line {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 6px 10px;
+  font-size: 11.5px; color: var(--c-text-2);
+}
+.sess-bar-pv-line span:last-child {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sess-bar-pv-tag {
+  flex: 0 0 auto;
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 4px;
+  color: var(--c-text-3);
+}
+.sess-bar-pv-q .sess-bar-pv-tag { color: var(--c-accent); border-color: var(--c-accent-ring); }
+.sess-bar-pv-a .sess-bar-pv-tag { color: var(--c-text-2); }
+.sess-bar-pv-a { color: var(--c-text-3); }
+.sess-bar-pv-sep { height: 1px; margin: 0 10px; background: var(--c-border-subtle); }
+.sess-bar-pv-note {
+  padding: 6px 10px; font-size: 11.5px; color: var(--c-text-3);
+}
+.sess-bar-pv-note.err { color: var(--c-err); }
