@@ -45,7 +45,7 @@ use crate::{prepare_gen, profile_to_json, swap_gen, Shared};
 
 // ---- builtin base sections ----------------------------------------------------
 
-pub(crate) const SECTION_IDENTITY: &str = r#"You are an AI agent powered by the Celestea engine (Celestea Studio runtime). You are currently running on model {{model}} ({{provider}} via {{base_url}}); the active workspace is {{workspace}} and the active session is {{session}}."#;
+pub(crate) const SECTION_IDENTITY: &str = r#"You are an AI agent powered by the Celestea engine (Celestea Studio runtime). You are currently running on model {{model}} provided by {{provider}} (endpoint {{base_url}}); the active workspace is {{workspace}} and the active session is {{session}}. When a user asks which model you are running on, state the model id above directly and factually — never claim you cannot confirm your own model."#;
 pub(crate) const SECTION_ENVIRONMENT: &str = r#"The Celestea Studio backend serves the public site at https://studio.celestea.top (backend on 127.0.0.1:3777). Your working directory is /src/celestea_studio; the working directory and any referenced workspace path are separate values and may differ — never infer one from the other; use `pwd` via run_shell when it matters. Use this directory only to work on the Studio project.
 
 You are interacting with the user through the Celestea Studio web UI. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this UI. The browser provides no implicit DOM, route, or screenshot context. Frontend changes under frontend/ take effect only after `pnpm build` refreshes frontend/dist (served by the backend); backend changes need a rebuild and a service restart — never restart the service yourself, report when a restart is required."#;
@@ -227,7 +227,8 @@ pub(crate) struct PromptVars {
     pub(crate) date: String,
 }
 
-/// Host[:port] of a base URL, used as the "provider" variable (no aliases).
+/// Display name of the active provider (registry lookup), falling back to
+/// the host[:port] of the base URL when no registry entry matches.
 fn base_url_host(base_url: &str) -> String {
     let rest = base_url.split_once("://").map(|(_, r)| r).unwrap_or(base_url);
     rest.split('/').next().unwrap_or(rest).to_string()
