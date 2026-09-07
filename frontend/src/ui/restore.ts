@@ -198,8 +198,8 @@ export async function restoreActiveHistory(): Promise<void> {
   await restoreSessionHistory(id);
 }
 
-/** 激活会话后切换聊天区：清空现有视图并渲染目标会话历史（rail 同步复位）。 */
+/** 激活会话后切换聊天区：清空现有视图并渲染目标会话历史（选择条同步复位）。 */
 export function switchToSession(id: string): void {
-  resetMessages(); // 清空消息流 + rail + 流式状态
+  resetMessages(); // 清空消息流 + 选择条 + 流式状态
   void restoreSessionHistory(id);
 }

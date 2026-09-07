@@ -9,7 +9,7 @@ import { highlightCode } from '../utils/hljs';
 import { marked } from 'marked';
 import type { AssistantView } from './view';
 import { S } from '../state';
-import { railAdd, railReset, railSync } from './rail';
+import { railAdd, railReset, railSync } from './rail'; // 灵动选择条 v3（W238 重做）
 
 marked.setOptions({ breaks: true, gfm: true });
 
@@ -60,7 +60,7 @@ export function resetMessages(): void {
   }
   S.assistant = null;
   S.turn = null;
-  railReset();
+  railReset(); // 清空选择条 v3 条目
   renderEmptyHint();
 }
 
@@ -73,7 +73,7 @@ function renderTextView(view: AssistantView): void {
   view.content.innerHTML = md(view.text);
   highlightCode(view.content);
   autoscroll();
-  railSync(); // 流式高度变化 → 同步 rail 条目位置
+  railSync(); // 流式高度变化 → 选择条计数/重排同步
 }
 
 function scheduleTextView(view: AssistantView): void {
@@ -195,7 +195,7 @@ export function addUserMessage(text: string): void {
   msg.appendChild(bubble);
   col.appendChild(msg);
   MsgsEl.appendChild(col);
-  railAdd(col, 'user');
+  railAdd(col, 'user'); // 选择条 v3：用户消息 → 一根长条
   railSync();
   autoscroll(true);
 }
@@ -234,7 +234,7 @@ export function ensureAssistant(): AssistantView {
   msg.appendChild(bubble);
   col.appendChild(msg);
   MsgsEl.appendChild(col);
-  railAdd(col, 'assistant');
+  railAdd(col, 'assistant'); // 选择条 v3：助手回复 → 一根长条
   railSync();
 
   const view: AssistantView = {
