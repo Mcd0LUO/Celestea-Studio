@@ -123,13 +123,21 @@
   cursor: pointer; list-style: none; user-select: none;
 }
 .toolcard > summary.toolcard-head::-webkit-details-marker { display: none; }
-.toolcard > summary.toolcard-head::before { content: "▸ "; color: var(--c-text-3); font-size: 11px; }
-.toolcard[open] > summary.toolcard-head::before { content: "▾ "; }
 .toolcard-head {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 2px;
   padding: 6px 10px;
 }
 .toolcard-head:hover { color: var(--c-text-1); }
+.toolcard-row1 { display: flex; align-items: center; gap: 8px; width: 100%; }
+.toolcard-args-preview,
+.toolcard-result-preview {
+  width: 100%;
+  font-family: var(--mono); font-size: 11px; color: var(--c-text-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.toolcard-result-preview { color: var(--c-text-2); }
+.toolcard.err .toolcard-result-preview { color: var(--c-err); }
+.toolcard.ok .toolcard-result-preview { color: var(--c-ok); }
 .toolcard-head .step-tag {
   font-family: var(--mono); font-size: 11px; color: var(--c-text-3);
   flex: 0 0 auto;

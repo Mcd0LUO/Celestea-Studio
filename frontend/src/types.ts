@@ -108,6 +108,7 @@ export interface SessionInfo {
   workspace?: string | null;
   events?: number;
   live?: boolean;
+  model?: string;
   file?: string;
   size?: number;
   modified?: number;

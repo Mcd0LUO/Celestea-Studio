@@ -28,6 +28,9 @@ let wsList: WorkspaceInfo[] = [];
 let sessions: SessionInfo[] = [];
 let activeSession: string | null = null;
 let selectedWs: string | null = null;
+let workerTimer: number | null = null; // 引擎 Worker 组轮询
+
+const WORKER_POLL_MS = 5000;
 
 function note(text: string): void {
   const foot = document.getElementById('sideFoot');
@@ -50,6 +53,13 @@ function pickSelectedWs(): string | null {
 
 function currentWsSessions(): SessionInfo[] {
   return sessions.filter((s) => !s.archived && wsNameOf(s) === selectedWs);
+}
+
+/** 引擎 Worker 条目（W239：kind="worker"、workspace="engine"、id 形如 "worker:<sid>"）。 */
+function workerSessions(list: SessionInfo[]): SessionInfo[] {
+  return list.filter(
+    (s) => s.kind === 'worker' || (s.id ?? '').startsWith('worker:'),
+  );
 }
 
 // ---- 批量模式 ----------------------------------------------------------------------
@@ -328,6 +338,77 @@ function truncateName(id: string): string {
   return i >= 0 ? id.slice(i + 1) : id;
 }
 
+// ---- 引擎 Worker 组 ------------------------------------------------------------------
+
+function renderWorkerGroup(container: HTMLElement, workers: SessionInfo[]): void {
+  const group = el('div', 'ws-worker-group');
+  const head = el('div', 'ws-worker-head');
+  head.appendChild(el('span', null, '引擎 Worker'));
+  head.appendChild(el('span', 'ws-worker-count', String(workers.length)));
+  group.appendChild(head);
+  for (const w of workers) {
+    const id = w.id ?? '';
+    const row = el('div', 'ws-worker-row' + (S.selSession === id ? ' active' : ''));
+    row.dataset.id = id;
+    row.appendChild(el('span', 'sess-dot live'));
+    const name = el('span', 'ws-worker-name', w.title || truncateName(id) || id);
+    row.appendChild(name);
+    const bits: string[] = [];
+    if (w.model) bits.push(String(w.model));
+    if (w.events !== undefined) bits.push('ev:' + w.events);
+    row.appendChild(el('span', 'ws-worker-meta', bits.join(' · ')));
+    row.title = id + (w.model ? ' · ' + w.model : '');
+    // 点击仅选中高亮（延续 W230 决策，不切换聊天区）
+    row.addEventListener('click', () => {
+      S.selSession = id;
+      for (const n of container.querySelectorAll<HTMLElement>('.ws-worker-row')) {
+        n.classList.toggle('active', n.dataset.id === id);
+      }
+    });
+    group.appendChild(row);
+  }
+  container.appendChild(group);
+}
+
+/** 轮询刷新引擎 Worker 组（worker 状态会变；仅重渲染该组）。 */
+async function refreshWorkers(container: HTMLElement): Promise<void> {
+  if (!container.isConnected) return;
+  let list: SessionInfo[];
+  try {
+    const d = await api.sessions();
+    list = d.sessions ?? [];
+  } catch {
+    return;
+  }
+  const workers = workerSessions(list);
+  const old = container.querySelector<HTMLElement>('.ws-worker-group');
+  if (!workers.length) {
+    old?.remove();
+    return;
+  }
+  if (old) {
+    old.remove();
+    renderWorkerGroup(container, workers);
+  } else {
+    renderWorkerGroup(container, workers);
+  }
+}
+
+function stopWorkerPoll(): void {
+  if (workerTimer !== null) {
+    window.clearInterval(workerTimer);
+    workerTimer = null;
+  }
+}
+
+/** 若列表含 worker 条目则启动轮询（幂等）。 */
+function ensureWorkerPoll(container: HTMLElement): void {
+  if (workerTimer !== null) return;
+  workerTimer = window.setInterval(() => {
+    void refreshWorkers(container);
+  }, WORKER_POLL_MS);
+}
+
 // ---- 新建入口 -----------------------------------------------------------------------
 
 /** 新建会话弹窗：标题 + 选择工作区（presetWs 预选）。 */
@@ -577,6 +658,7 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
     const act = (d.sessions ?? []).find((s) => s.active === true);
     if (act?.id) activeSession = act.id;
   } catch (err) {
+    stopWorkerPoll();
     container.innerHTML = '';
     container.appendChild(el('div', 'side-note err', '会话接口不可用'));
     container.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
@@ -622,6 +704,15 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
   }
   for (const s of cur) list.appendChild(renderSessionRow(container, s));
   container.appendChild(list);
+
+  // 3) 引擎 Worker 组（W239；未就绪/无条目时整组隐藏，不轮询）
+  const workers = workerSessions(sessions);
+  if (workers.length) {
+    renderWorkerGroup(container, workers);
+    ensureWorkerPoll(container);
+  } else {
+    stopWorkerPoll();
+  }
 }
 
 // ---- 装配 ------------------------------------------------------------------------

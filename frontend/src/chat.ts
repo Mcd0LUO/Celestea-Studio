@@ -21,11 +21,13 @@ import {
   appendText,
   appendThinking,
   applyFinalText,
+  assistantHasContent,
   autoscroll,
   ensureAssistant,
   finalizeAssistant,
+  removeAssistant,
 } from './ui/messages';
-import { applyToolResult, pushToolCard } from './ui/toolcards';
+import { applyToolResult, getToolStep, pushToolCard } from './ui/toolcards';
 import { clearInput, initInputBar, setBusy } from './ui/inputbar';
 import { feedAssistantDelta, finalAssistantDedup } from './ui/restore';
 import {
@@ -55,7 +57,12 @@ function finalizeTurn(phase: string): void {
     phase === 'error' || phase === 'cancelled' ? 'err' : 'ok',
   );
   if (S.assistant) {
-    finalizeAssistant(S.assistant);
+    if (assistantHasContent(S.assistant)) {
+      finalizeAssistant(S.assistant);
+    } else {
+      // 空占位气泡（无正文/思考/工具内容）：不渲染空块
+      removeAssistant(S.assistant);
+    }
   }
   S.assistant = null;
   if (wasStreaming) autoscroll(true);
@@ -63,8 +70,11 @@ function finalizeTurn(phase: string): void {
 
 function onStatus(p: StatusPayload): void {
   if (p.phase === 'start') {
-    // 新 turn：结束上一个未完成的会话视图
-    if (S.streaming && S.assistant) finalizeTurn('completed');
+    // 新 turn：若上一视图已有内容则收尾；空占位气泡直接复用，避免双块
+    if (S.streaming && S.assistant) {
+      if (assistantHasContent(S.assistant)) finalizeTurn('completed');
+      else removeAssistant(S.assistant); // 丢弃空占位（含 DOM），本轮重建唯一块
+    }
     S.turn = p.turn ?? null;
     S.streaming = true;
     setBusy(true);
@@ -117,18 +127,16 @@ function onThinking(p: ThinkingPayload): void {
 function onTool(p: ToolPayload): void {
   if (S.turn === null) S.turn = p.turn ?? null;
   if (p.turn !== undefined && S.turn !== null && p.turn !== S.turn) return;
-  const a = ensureAssistant();
-  pushToolCard(a, p);
-  setStatusStep(a.steps > 0 ? String(a.steps) : null);
+  pushToolCard(p); // 消息流级条目：按事件时间内联在消息流中
+  setStatusStep(getToolStep() > 0 ? String(getToolStep()) : null);
   autoscroll();
 }
 
 function onToolResult(p: ToolResultPayload): void {
   if (S.turn === null) S.turn = p.turn ?? null;
   if (p.turn !== undefined && S.turn !== null && p.turn !== S.turn) return;
-  if (!S.assistant) return;
-  applyToolResult(S.assistant, p);
-  setStatusStep(S.assistant.steps > 0 ? String(S.assistant.steps) : null);
+  applyToolResult(p);
+  setStatusStep(getToolStep() > 0 ? String(getToolStep()) : null);
   autoscroll();
 }
 

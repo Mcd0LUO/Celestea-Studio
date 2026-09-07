@@ -112,6 +112,7 @@ function renderOne(m: HistoryMsg): void {
     return;
   }
   if (m.role === 'assistant') {
+    if (content.trim() === '') return; // 空内容不渲染空块
     // 与 live 相同的 marked 渲染管线（ensureAssistant → finalizeAssistant 冲刷）
     const a = ensureAssistant();
     a.text = content;

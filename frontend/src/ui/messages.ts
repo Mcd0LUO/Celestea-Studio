@@ -9,7 +9,8 @@ import { highlightCode } from '../utils/hljs';
 import { marked } from 'marked';
 import type { AssistantView } from './view';
 import { S } from '../state';
-import { railAdd, railReset, railSync } from './rail'; // 灵动选择条 v3（W238 重做）
+import { railAdd, railReset, railSync } from './rail';
+import { resetToolCards } from './toolcards'; // 灵动选择条 v3（W238 重做）
 
 marked.setOptions({ breaks: true, gfm: true });
 
@@ -48,6 +49,17 @@ export function renderEmptyHint(): void {
   MsgsEl.appendChild(hint);
 }
 
+/** 助手气泡是否已有任何内容（正文/思考/工具卡）——占位判定。 */
+export function assistantHasContent(view: AssistantView): boolean {
+  return view.text.trim() !== '' || view.thinkText.trim() !== '' || view.content.childElementCount > 0;
+}
+
+/** 直接移除空占位助手气泡（不渲染空块）。 */
+export function removeAssistant(view: AssistantView): void {
+  view.root.remove();
+  S.assistant = null;
+}
+
 /** 清空消息流并重建空态（/api/clear 成功后调用；同时重置流式/思考状态）。 */
 export function resetMessages(): void {
   stopThinkTimer();
@@ -60,6 +72,7 @@ export function resetMessages(): void {
   }
   S.assistant = null;
   S.turn = null;
+  resetToolCards(); // 工具卡片（消息流级条目）复位
   railReset(); // 清空选择条 v3 条目
   renderEmptyHint();
 }
