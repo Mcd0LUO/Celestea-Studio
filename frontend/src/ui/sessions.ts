@@ -608,6 +608,35 @@ export function newSession(presetWs?: string): void {
       modelSel.appendChild(o);
     });
 
+  // 可选提示词（W245 任务2）：跟随默认 + 注册的 prompts（标注全局/工作区）；404 隐藏
+  const promptRow = el('label', 'prov-field');
+  promptRow.appendChild(el('span', 'prov-field-label', '提示词'));
+  const promptSel = document.createElement('select');
+  promptSel.className = 'cfg-input';
+  const optPrompt = document.createElement('option');
+  optPrompt.value = '';
+  optPrompt.textContent = '跟随默认';
+  promptSel.appendChild(optPrompt);
+  promptRow.appendChild(promptSel);
+  promptRow.style.display = 'none';
+  card.appendChild(promptRow);
+  void api
+    .prompts()
+    .then((d) => {
+      const ps = d.prompts ?? [];
+      if (!ps.length) return; // 无注册提示词：保持隐藏
+      for (const p of ps) {
+        const o = document.createElement('option');
+        o.value = p.id;
+        o.textContent = p.name + '（' + (p.scope === 'global' ? '全局' : '工作区') + '）' + (p.is_default ? ' · 默认' : '');
+        promptSel.appendChild(o);
+      }
+      promptRow.style.display = ''; // 数据就绪才显示（404 保持隐藏）
+    })
+    .catch(() => {
+      /* 404：提示词注册未开放，保持隐藏 */
+    });
+
   const status = el('div', 'ws-fs-status');
   card.appendChild(status);
   const actions = el('div', 'modal-card-actions');
@@ -627,10 +656,13 @@ export function newSession(presetWs?: string): void {
     }
     const ws = wsSel.value === '' ? null : wsSel.value;
     const model = modelSel.value === '' ? undefined : modelSel.value;
+    const prompt = promptSel.value === '' ? undefined : promptSel.value;
     create.disabled = true;
     create.textContent = '创建中…';
     const doCreate = (withModel: boolean) =>
-      api.createSession(withModel && model ? { workspace: ws, title: t, model } : { workspace: ws, title: t });
+      api.createSession(
+        withModel && model ? { workspace: ws, title: t, model, prompt } : { workspace: ws, title: t, prompt },
+      );
     void doCreate(true)
       .catch((err: unknown) => {
         // 降级：后端未支持 model 字段时（4xx）重试不带 model

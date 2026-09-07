@@ -182,6 +182,8 @@ export interface SessionCreateReq {
   title: string;
   /** W243：可选模型（空=跟随默认）。 */
   model?: string;
+  /** W245：绑定提示词（空=跟随默认）。 */
+  prompt?: string;
 }
 
 /** POST /api/sessions 响应（W243 起携带新会话 id）。 */
@@ -236,6 +238,41 @@ export interface ProviderFetchResp {
   ok?: boolean;
   models?: { id: string }[];
   error?: string;
+}
+
+// ---- 提示词系统（W245） -----------------------------------------------------------
+
+export interface PromptSection {
+  id: string;
+  name: string;
+  template: string;
+  order: number;
+  scope: 'builtin' | 'global' | 'workspace';
+}
+
+export interface PromptInfo {
+  id: string;
+  name: string;
+  is_default?: boolean;
+  scope: 'global' | 'workspace';
+}
+
+export interface PromptsResp {
+  ok?: boolean;
+  sections?: PromptSection[];
+  prompts?: PromptInfo[];
+  default_prompt?: string | null;
+  active_prompt?: string | null;
+  error?: string;
+}
+
+/** POST /api/prompts upsert 载荷（不传 workspace=全局）。 */
+export interface PromptUpsertReq {
+  workspace?: string | null;
+  id: string;
+  name: string;
+  section_overrides: Record<string, string>;
+  is_default?: boolean;
 }
 
 export interface OkResp {

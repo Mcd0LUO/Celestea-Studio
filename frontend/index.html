@@ -122,6 +122,7 @@
           <button class="settings-nav-item" type="button" data-page="tools">工具</button>
           <button class="settings-nav-item" type="button" data-page="sessions">会话</button>
           <button class="settings-nav-item" type="button" data-page="providers">模型提供商</button>
+          <button class="settings-nav-item" type="button" data-page="prompts">提示词</button>
         </nav>
         <div class="settings-content">
           <section class="settings-pane active" data-pane="config">
@@ -155,6 +156,16 @@
               <button class="btn-mini" id="btnAddProvider" type="button">添加提供商</button>
             </header>
             <div class="settings-pane-body" id="settingsProviders"><div class="side-note">加载中…</div></div>
+          </section>
+          <section class="settings-pane" data-pane="prompts">
+            <header class="settings-pane-head">
+              <h4>提示词</h4>
+              <button class="btn-mini" id="btnNewPrompt" type="button">新建提示词</button>
+            </header>
+            <div class="settings-pane-body">
+              <div id="promptsWrap"></div>
+              <div id="settingsPrompts"><div class="side-note">加载中…</div></div>
+            </div>
           </section>
         </div>
       </div>

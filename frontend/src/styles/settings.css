@@ -231,3 +231,80 @@
 /* ---- 通用配置表单：对齐微调（label 等宽右对齐、提示统一缩进） ---- */
 .cfg-field { grid-template-columns: 148px minmax(0, 1fr); }
 .cfg-hint { padding-left: 2px; }
+
+/* ============================================================================
+ * 提示词页（W245）
+ * ============================================================================ */
+.prompts-scope {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 10px;
+}
+.prompts-scope-btn {
+  background: transparent; border: 1px solid var(--c-border-subtle);
+  border-radius: 999px; color: var(--c-text-2);
+  padding: 3px 14px; font-size: 12px; cursor: pointer;
+}
+.prompts-scope-btn:hover { border-color: var(--c-accent-ring); color: var(--c-text-1); }
+.prompts-scope-btn.active { background: var(--c-accent-soft); border-color: var(--c-accent-ring); color: var(--c-text-1); font-weight: 600; }
+.prompts-ws-sel { max-width: 220px; }
+
+.prompts-table {
+  width: 100%; border-collapse: collapse; font-size: 12.5px;
+}
+.prompts-table th, .prompts-table td {
+  border: 1px solid var(--c-border-subtle); padding: 7px 10px; text-align: left; vertical-align: middle;
+}
+.prompts-table thead th {
+  background: var(--c-surface-raised); color: var(--c-text-3);
+  font-family: var(--mono); font-size: 11px; letter-spacing: .8px; font-weight: 600;
+}
+.prompts-table tbody tr:nth-child(even) { background: var(--c-surface); }
+.prompts-table tbody tr:hover { background: var(--c-accent-soft); }
+.prompts-table tbody tr.is-active td { border-left: 2px solid var(--c-ok); }
+.prompt-name { font-weight: 600; color: var(--c-text-1); }
+.prompt-badge {
+  font-size: 10px; font-family: var(--mono);
+  border: 1px solid var(--c-accent-ring); border-radius: 4px; padding: 0 5px;
+  color: var(--c-accent); margin-left: 6px;
+}
+.prompt-badge.active { color: var(--c-ok); border-color: var(--c-ok); }
+.prompt-badge.def { color: var(--c-text-2); border-color: var(--c-border-strong); }
+.prompts-td-scope { font-size: 11.5px; color: var(--c-text-2); }
+.prompts-td-state { white-space: nowrap; }
+.prompts-td-ops { text-align: right; white-space: nowrap; }
+.prompts-td-ops .btn-mini + .btn-mini { margin-left: 4px; }
+.prompts-note { font-size: 11px; color: var(--c-text-3); margin-top: 8px; }
+
+/* ---- 编辑弹窗 ---- */
+.prompt-modal { width: min(640px, calc(100vw - 40px)); max-height: 86vh; overflow-y: auto; }
+.prompt-vars {
+  border: 1px solid var(--c-border-subtle); border-radius: 8px;
+  background: var(--c-code-bg); margin-bottom: 10px;
+}
+.prompt-vars summary {
+  cursor: pointer; padding: 6px 10px; font-size: 12px; color: var(--c-text-2);
+  user-select: none; list-style: none;
+}
+.prompt-vars summary::-webkit-details-marker { display: none; }
+.prompt-vars summary::before { content: "▸ "; color: var(--c-text-3); }
+.prompt-vars[open] summary::before { content: "▾ "; }
+.prompt-vars-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.prompt-vars-table td { border-top: 1px solid var(--c-border-subtle); padding: 3px 10px; }
+.prompt-var-code { font-family: var(--mono); color: var(--c-accent); width: 40%; }
+.prompt-var-desc { color: var(--c-text-2); }
+
+.prompt-secs { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.prompt-sec-row {
+  border: 1px solid var(--c-border-subtle); border-radius: 8px;
+  background: var(--c-surface); padding: 6px 8px;
+}
+.prompt-sec-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.prompt-sec-name { font-size: 12.5px; font-weight: 600; color: var(--c-text-1); }
+.prompt-sec-scope { font-size: 10px; color: var(--c-text-3); font-family: var(--mono); border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 4px; }
+.prompt-inherit-label {
+  margin-left: auto; display: flex; align-items: center; gap: 4px;
+  font-size: 11px; color: var(--c-text-2); cursor: pointer;
+}
+.prompt-inherit { accent-color: var(--c-accent); }
+.prompt-sec-row.inherited .prompt-sec-ta { opacity: .5; }
+.prompt-sec-ta { resize: vertical; min-height: 56px; font-size: 12px; font-family: var(--mono); }

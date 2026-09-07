@@ -10,6 +10,7 @@ import type { ConfigInfo, ConfigPatch } from '../types';
 import { initToolsSection, loadToolsSection } from './tools';
 import { clearCurrentSession, loadTreeInto as loadSessionTree } from './sessions';
 import { initProvidersSection, loadProviders } from './providers';
+import { initPromptsSection, loadPrompts } from './prompts';
 
 const page = need<HTMLElement>('#settingsPage');
 const box = need<HTMLElement>('#settingsConfig');
@@ -227,7 +228,7 @@ export async function loadConfig(): Promise<void> {
 
 // ---- 左导航 + 右内容 -----------------------------------------------------------
 
-const PANES = ['config', 'tools', 'sessions', 'providers'] as const;
+const PANES = ['config', 'tools', 'sessions', 'providers', 'prompts'] as const;
 type PaneName = (typeof PANES)[number];
 
 let currentPane: PaneName = 'config';
@@ -253,8 +254,10 @@ function loadPane(name: PaneName): void {
       need<HTMLElement>('#settingsSessions'),
       need<HTMLElement>('#settingsSessionCount'),
     );
-  } else {
+  } else if (name === 'providers') {
     void loadProviders();
+  } else {
+    void loadPrompts();
   }
 }
 
@@ -312,4 +315,5 @@ export function initSettingsPage(): void {
   });
   initToolsSection(); // #btnReloadTools
   initProvidersSection(); // #btnAddProvider
+  initPromptsSection(); // #btnNewPrompt + scope 切换
 }
