@@ -978,9 +978,21 @@ pub(crate) fn session_meta(dir: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// W244: write {"model": "<id>"} into "<dir>/session.json".
-pub(crate) fn write_session_meta(dir: &Path, model: &str) -> Result<(), String> {
-    let text = serde_json::to_string_pretty(&json!({"model": model}))
+/// W244/W245: write "<dir>/session.json" with the present fields
+/// ({"model"?: "<id>", "prompt"?: "<id>"}).
+pub(crate) fn write_session_meta(
+    dir: &Path,
+    model: Option<&str>,
+    prompt: Option<&str>,
+) -> Result<(), String> {
+    let mut m = serde_json::Map::new();
+    if let Some(v) = model {
+        m.insert("model".to_string(), json!(v));
+    }
+    if let Some(v) = prompt {
+        m.insert("prompt".to_string(), json!(v));
+    }
+    let text = serde_json::to_string_pretty(&Value::Object(m))
         .map_err(|e| format!("session meta serialize failed: {e}"))?;
     std::fs::write(dir.join(SESSION_META), text.as_bytes())
         .map_err(|e| format!("cannot write '{}': {e}", dir.join(SESSION_META).display()))
@@ -995,6 +1007,10 @@ pub(crate) struct SessionCreateReq {
     /// W244: optional model id persisted into "<dir>/session.json".
     #[serde(default)]
     pub(crate) model: Option<String>,
+    /// W245: optional prompt id binding (session.json "prompt"); the bound
+    /// prompt's section_overrides rank above global/workspace overrides.
+    #[serde(default)]
+    pub(crate) prompt: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1149,6 +1165,11 @@ pub(crate) async fn post_session_create(
             return err_response(StatusCode::BAD_REQUEST, format!("invalid model: {e}"));
         }
     }
+    if let Some(p) = req.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        if let Err(e) = crate::prompts::validate_prompt_id(p) {
+            return err_response(StatusCode::BAD_REQUEST, format!("invalid prompt: {e}"));
+        }
+    }
     let base = sanitize_component(req.title.trim());
     if base.is_empty() || base == "." || base == ".." {
         return err_response(StatusCode::BAD_REQUEST, "title must not be empty".to_string());
@@ -1182,10 +1203,17 @@ pub(crate) async fn post_session_create(
     if let Err(e) = std::fs::File::create(dir.join(SESSION_FILE)) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"));
     }
-    if let Some(m) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-        if let Err(e) = write_session_meta(&dir, m) {
-            let _ = std::fs::remove_dir_all(&dir);
-            return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("meta write failed: {e}"));
+    {
+        let model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+        let prompt = req.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty());
+        if model.is_some() || prompt.is_some() {
+            if let Err(e) = write_session_meta(&dir, model, prompt) {
+                let _ = std::fs::remove_dir_all(&dir);
+                return err_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("meta write failed: {e}"),
+                );
+            }
         }
     }
     let id = format!("{}/{}", workspace_basename(&ws.path).unwrap_or_default(), name);
@@ -2038,9 +2066,13 @@ mod tests {
         reg.register(&ws_path.display().to_string()).unwrap();
 
         // write -> read roundtrip; absent file -> None; malformed -> None
-        write_session_meta(&sess, "test-model-x").unwrap();
+        write_session_meta(&sess, Some("test-model-x"), None).unwrap();
         assert_eq!(session_meta(&sess).as_deref(), Some("test-model-x"));
         assert!(sess.join(SESSION_META).is_file());
+        // W245: the prompt binding lives in the same file
+        write_session_meta(&other, Some("test-model-x"), Some("p1")).unwrap();
+        assert_eq!(crate::prompts::session_prompt_id(&other).as_deref(), Some("p1"));
+        std::fs::remove_file(other.join(SESSION_META)).unwrap();
         assert_eq!(session_meta(&other), None);
         std::fs::write(other.join(SESSION_META), "not json").unwrap();
         assert_eq!(session_meta(&other), None, "malformed meta is tolerated");
@@ -2068,7 +2100,7 @@ mod tests {
         assert_eq!(gen2.model, "deepseek-v4-flash-0731");
 
         // invalid meta model is rejected by the same validation
-        write_session_meta(&other, "bad model!").unwrap();
+        write_session_meta(&other, Some("bad model!"), None).unwrap();
         let m = session_meta(&other).unwrap();
         assert!(crate::api::validate_model_name(&m).is_err());
 

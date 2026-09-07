@@ -320,9 +320,15 @@ pub async fn post_config(State(st): State<Shared>, Json(req): Json<ConfigReq>) -
     if let Some(s) = req.system_prompt.as_deref() {
         let s = s.trim();
         if s.is_empty() {
-            pj["system_prompt"] = json!(DEFAULT_SYSTEM_PROMPT);
+            // clear -> registry-managed assembly again (base sections when
+            // there are no overrides)
+            pj["system_prompt"] = json!(DEFAULT_SYSTEM_PROMPT());
+            crate::prompts::set_user_override(None);
         } else {
+            // direct override -> bypass the section registry (in-memory slot;
+            // the assembled/registry value is restored by clearing)
             pj["system_prompt"] = json!(s);
+            crate::prompts::set_user_override(Some(s.to_string()));
         }
     }
 
