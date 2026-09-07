@@ -1059,10 +1059,11 @@ async fn main() {
     if active_dir.is_none() {
         if let Some(ws) = registry.snapshot().workspaces.first() {
             let dir = Path::new(&ws.path).join("cli-main");
-            let id = format!("{}/cli-main", ws.name);
+            let base = crate::workspaces::workspace_basename(&ws.path).unwrap_or_default();
+            let id = format!("{base}/cli-main");
             eprintln!(
                 "[celestea-studio] active session '{:?}' unusable; falling back to workspace '{}' session 'cli-main'",
-                active_id, ws.name,
+                active_id, base,
             );
             if registry.set_active(Some(id.clone())).is_ok() {
                 active_id = Some(id);

@@ -1,17 +1,26 @@
 //! W237: workspace registry + per-session directories over CELESTEA_SESSION_DIR.
+//! W244: workspace KEY = folder basename (v2 registry) + optional session
+//! metadata (session.json model).
 //!
 //! Model ("no global main session; every session is an independently
 //! switchable unit"):
 //!   - workspace = a USER folder registered by path in `workspaces.json`
-//!     (atomic tmp+rename writes). Deleting a workspace only DEREGISTERS it —
-//!     the user's folder on disk is never touched.
+//!     (atomic tmp+rename writes). The workspace key in every id/contract is
+//!     the folder basename (`Path::file_name`) — names are NEVER stored
+//!     (v2: {"workspaces":[{"path":...}],"active_session":"<basename>/<sess>"};
+//!     v1 "name" fields are migrated away at load, active_session's ws
+//!     segment rewritten to the basename, idempotent). Deleting a workspace
+//!     only DEREGISTERS it — the folder is never touched; RENAMING a
+//!     workspace renames the folder itself (fs::rename).
 //!   - session = a directory directly inside a workspace path containing
 //!     `cli-main.jsonl` (the engine's PersistentSessionLog replay file; the
 //!     engine replays `<CELESTEA_SESSION_DIR>/cli-main.jsonl` at compose
-//!     time). The session id is "<workspace>/<dir>". `cli-main` is just the
+//!     time). The session id is "<basename>/<dir>". `cli-main` is just the
 //!     engine's internal file name — it holds no privileges; the ONLY
 //!     restriction is that the active session cannot be archived or deleted
-//!     (400).
+//!     (400). An optional `session.json` ({"model":"<id>"}) per session is
+//!     honored by activate (model hot-apply via the post_config/prepare_gen
+//!     path) and travels with branches.
 //!   - activation = point CELESTEA_SESSION_DIR at the session directory and
 //!     re-compose the engine generation (the compose replays cli-main.jsonl
 //!     through PersistentSessionLog) — zero engine changes.
@@ -20,8 +29,8 @@
 //!   sessions/cli-main.jsonl       -> sessions/cli-main/cli-main.jsonl
 //!   sessions/<loose>.jsonl        -> sessions/<loose>/cli-main.jsonl
 //!   sessions/<ws>/<file>.jsonl    -> sessions/<ws>/<file>/cli-main.jsonl
-//!   workspaces.json = {"workspaces":[{"name":"默认","path":"<cwd>/sessions"}],
-//!                       "active_session":"默认/cli-main"}
+//!   workspaces.json = {"workspaces":[{"path":"<cwd>/sessions"}],
+//!                       "active_session":"sessions/cli-main"}
 //!   Legacy hidden dirs (.trash / .archived) and already-migrated session
 //!   files are never touched; every move checks its target first, so a
 //!   re-run is a no-op.
@@ -33,8 +42,11 @@
 //! directly inside the registered workspace path — no traversal.
 //!
 //! Endpoints (mounted in main):
-//!   GET  /api/workspaces                 -> {"workspaces":[{"name","path","sessions"}],"active_session"}
-//!   POST /api/workspaces {"name","path"} -> register (absolute existing dir; dup name/path 409)
+//!   GET  /api/workspaces                 -> {"workspaces":[{"name":<basename>,"path","sessions"}],"active_session"}
+//!   POST /api/workspaces {"path"}        -> register (absolute existing dir; key = folder
+//!                                           basename; dup path/basename 409; v1 "name" ignored)
+//!   POST /api/workspaces/{name}/rename   -> rename the FOLDER itself (sanitize keeps CJK;
+//!                                           target exists 409; active session re-composed)
 //!   POST /api/workspaces/{name}/delete   -> deregister only, {"ok":true}
 //!   POST /api/workspaces/batch-delete    -> same, {"names":[...]}
 //!   GET  /api/fs/browse?path=            -> {"path","parent","dirs","roots","error"?}
@@ -93,10 +105,9 @@ pub(crate) const SESSION_FILE: &str = "cli-main.jsonl";
 /// compose::HOST_SID). Never listed as a worker session — the host session
 /// is already listed from its workspace directory.
 pub(crate) const WORKER_HOST_SHADOW_SID: &str = "cli-main";
-/// Default workspace name created by the legacy migration.
-pub(crate) const DEFAULT_WORKSPACE: &str = "默认";
-/// Active session after migration: "<默认>/cli-main".
-pub(crate) const DEFAULT_ACTIVE: &str = "默认/cli-main";
+/// W244: optional per-session metadata file inside the session directory
+/// (currently {"model":"<id>"}); absent = defaults.
+pub(crate) const SESSION_META: &str = "session.json";
 /// W237 fs-browse contract: the suggested starting points for the frontend
 /// file manager (informational only — browsing is not restricted to them).
 pub(crate) const FS_ROOTS: [&str; 4] = ["/src", "/tmp", "/srv", "/home"];
@@ -105,11 +116,17 @@ const MAX_DIR_ENTRIES: usize = 200;
 
 // ---- registry -----------------------------------------------------------------
 
-/// One registered workspace: a display name + the user folder it maps to.
+/// One registered workspace: the user folder path. The workspace KEY in
+/// every id/contract is the folder basename (`Path::file_name`) — names are
+/// never stored (v1 "name" fields are migrated away at load).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Workspace {
-    pub(crate) name: String,
     pub(crate) path: String,
+}
+
+/// The workspace key: the folder basename of the registered path.
+pub(crate) fn workspace_basename(path: &str) -> Option<String> {
+    Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
 /// The workspaces.json root: workspaces + the persisted active session id
@@ -147,22 +164,33 @@ impl WorkspaceRegistry {
         self.snapshot().active_session
     }
 
-    /// Register a workspace (name pre-sanitized by the caller). Duplicate
-    /// name or duplicate path -> 409; persistence failure -> 500.
-    pub(crate) fn register(&self, name: &str, path: &str) -> Result<(), (StatusCode, String)> {
+    /// W244: register a user folder by path — the workspace key is the
+    /// folder basename (never a caller-supplied name). Duplicate path -> 409;
+    /// a DIFFERENT path whose folder basename collides with an existing
+    /// workspace -> 409 (hint: rename one folder). Returns the basename key.
+    pub(crate) fn register(&self, path: &str) -> Result<String, (StatusCode, String)> {
         let mut data = self.inner.write().unwrap_or_else(|p| p.into_inner());
-        if data.workspaces.iter().any(|w| w.name == name) {
-            return Err((StatusCode::CONFLICT, format!("workspace '{name}' already exists")));
-        }
         if let Some(w) = data.workspaces.iter().find(|w| w.path == path) {
             return Err((
                 StatusCode::CONFLICT,
-                format!("path '{path}' is already registered as workspace '{}'", w.name),
+                format!("path '{path}' is already registered as workspace '{}'", workspace_basename(&w.path).unwrap_or_default()),
             ));
         }
-        data.workspaces.push(Workspace { name: name.to_string(), path: path.to_string() });
+        let base = workspace_basename(path)
+            .ok_or_else(|| (StatusCode::BAD_REQUEST, format!("path '{path}' has no folder name")))?;
+        if let Some(w) = data.workspaces.iter().find(|w| workspace_basename(&w.path).as_deref() == Some(base.as_str())) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!(
+                    "workspace '{base}' already exists (folder '{path}' and '{}' share the same folder name; rename one folder first)",
+                    w.path
+                ),
+            ));
+        }
+        data.workspaces.push(Workspace { path: path.to_string() });
         self.persist_locked(&data)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        Ok(base)
     }
 
     /// Deregister a workspace — the user folder is NOT touched. When the
@@ -172,7 +200,8 @@ impl WorkspaceRegistry {
     pub(crate) fn deregister(&self, name: &str) -> Result<(), (StatusCode, String)> {
         let mut data = self.inner.write().unwrap_or_else(|p| p.into_inner());
         let before = data.workspaces.len();
-        data.workspaces.retain(|w| w.name != name);
+        data.workspaces
+            .retain(|w| workspace_basename(&w.path).as_deref() != Some(name));
         if data.workspaces.len() == before {
             return Err((StatusCode::NOT_FOUND, format!("unknown workspace '{name}'")));
         }
@@ -185,23 +214,41 @@ impl WorkspaceRegistry {
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
     }
 
-    /// W243: rename a workspace in the REGISTRY ONLY (the user folder is
-    /// never touched). An active session id under the renamed workspace is
-    /// re-pointed ("<old>/<sess>" -> "<new>/<sess>"). Unknown old name ->
-    /// 404; duplicate new name -> 409; renaming onto itself is a no-op.
+    /// W244: rename the workspace FOLDER on disk (fs::rename — this DOES
+    /// move the user folder; new_name is pre-sanitized by the caller and the
+    /// target must not exist). Updates the registered path and re-points the
+    /// active session id ("<old>/<sess>" -> "<new>/<sess>"). Unknown old key
+    /// -> 404; duplicate workspace key -> 409; target exists -> 409. A
+    /// failed persist rolls the disk move back.
     pub(crate) fn rename_workspace(
         &self,
         old: &str,
         new_name: &str,
     ) -> Result<(), (StatusCode, String)> {
         let mut data = self.inner.write().unwrap_or_else(|p| p.into_inner());
-        let Some(pos) = data.workspaces.iter().position(|w| w.name == old) else {
+        let Some(pos) = data.workspaces.iter().position(|w| workspace_basename(&w.path).as_deref() == Some(old)) else {
             return Err((StatusCode::NOT_FOUND, format!("unknown workspace '{old}'")));
         };
-        if new_name != old && data.workspaces.iter().any(|w| w.name == new_name) {
+        if new_name == old {
+            return Ok(()); // no-op
+        }
+        if data.workspaces.iter().enumerate().any(|(i, w)| i != pos && workspace_basename(&w.path).as_deref() == Some(new_name)) {
             return Err((StatusCode::CONFLICT, format!("workspace '{new_name}' already exists")));
         }
-        data.workspaces[pos].name = new_name.to_string();
+        let old_path = PathBuf::from(&data.workspaces[pos].path);
+        let parent = old_path.parent().ok_or_else(|| {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("path '{}' has no parent", old_path.display()))
+        })?;
+        let new_path = parent.join(new_name);
+        if new_path.exists() {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("target '{}' already exists; rename the folder first", new_path.display()),
+            ));
+        }
+        std::fs::rename(&old_path, &new_path)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("move failed: {e}")))?;
+        data.workspaces[pos].path = new_path.display().to_string();
         if let Some(active) = &data.active_session {
             if let Some(rest) = active.strip_prefix(old) {
                 if rest.starts_with('/') {
@@ -209,8 +256,20 @@ impl WorkspaceRegistry {
                 }
             }
         }
-        self.persist_locked(&data)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+        if let Err(e) = self.persist_locked(&data) {
+            // roll the disk move back and restore the in-memory registry
+            let _ = std::fs::rename(&new_path, &old_path);
+            data.workspaces[pos].path = old_path.display().to_string();
+            if let Some(active) = &data.active_session {
+                if let Some(rest) = active.strip_prefix(new_name) {
+                    if rest.starts_with('/') {
+                        data.active_session = Some(format!("{old}{rest}"));
+                    }
+                }
+            }
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, e));
+        }
+        Ok(())
     }
 
     /// Persist the active session id (or clear it with None).
@@ -234,12 +293,60 @@ impl WorkspaceRegistry {
     }
 }
 
+/// W244 v1->v2 registry normalization (idempotent): v1 stored a free-form
+/// "name" per workspace; v2 keys every workspace by its folder basename.
+/// Load drops any "name" field, re-derives keys from the paths, and rewrites
+/// active_session's workspace segment to the basename. The file is only
+/// rewritten when something changed, so re-loading is a no-op. Two
+/// workspaces resolving to the same basename is a hard error (ambiguous
+/// keys — rename one folder). A malformed file is a hard error too.
+pub(crate) fn normalize_registry(
+    mut data: RegistryData,
+    v1_names: &[(String, String)], // (old v1 name, folder basename) pairs
+) -> Result<(RegistryData, bool), String> {
+    let mut changed = false;
+    let mut seen = std::collections::HashSet::new();
+    for w in &data.workspaces {
+        let base = workspace_basename(&w.path).ok_or_else(|| {
+            format!("workspace path '{}' has no folder name", w.path)
+        })?;
+        if !seen.insert(base.clone()) {
+            return Err(format!(
+                "two workspaces resolve to the same folder name '{base}' (workspace keys must be unique basenames; rename one folder)"
+            ));
+        }
+    }
+    if let Some(active) = &data.active_session {
+        if let Some((ws, sess)) = active.split_once('/') {
+            // v1 name -> basename mapping takes priority; a v2 id already uses
+            // the basename and simply matches its workspace directly.
+            let expected = v1_names
+                .iter()
+                .find(|(n, _)| n == ws)
+                .map(|(_, b)| b.clone())
+                .or_else(|| {
+                    data.workspaces
+                        .iter()
+                        .find(|w| workspace_basename(&w.path).as_deref() == Some(ws))
+                        .and_then(|w| workspace_basename(&w.path))
+                });
+            if let Some(expected) = expected {
+                if ws != expected {
+                    data.active_session = Some(format!("{expected}/{sess}"));
+                    changed = true;
+                }
+            }
+        }
+    }
+    Ok((data, changed))
+}
+
 /// Load the registry from `path`. A missing file triggers the W237
 /// bootstrap: migrate the legacy flat `sessions/` layout into per-session
 /// directories, then create workspaces.json with the single default
-/// workspace ("默认" -> `default_root`) and active_session "默认/cli-main".
-/// A malformed file is a hard error (never overwrite a registry we cannot
-/// read).
+/// workspace (folder basename of `default_root`) and active_session
+/// "<basename>/cli-main". A malformed file is a hard error (never overwrite
+/// a registry we cannot read).
 pub(crate) fn load_registry(
     path: PathBuf,
     default_root: &Path,
@@ -249,6 +356,40 @@ pub(crate) fn load_registry(
             let data: RegistryData = serde_json::from_str(&text).map_err(|e| {
                 format!("workspaces.json '{}' is malformed: {e}", path.display())
             })?;
+            // v1 detection + name->basename map: v1 workspaces carry a
+            // free-form "name" field and the active id uses that name as its
+            // workspace segment, so the migration needs the old mapping.
+            let mut v1_names: Vec<(String, String)> = Vec::new();
+            if let Ok(raw) = serde_json::from_str::<Value>(&text) {
+                if let Some(arr) = raw.get("workspaces").and_then(|w| w.as_array()) {
+                    for w in arr {
+                        if let (Some(name), Some(path)) = (
+                            w.get("name").and_then(|n| n.as_str()),
+                            w.get("path").and_then(|p| p.as_str()),
+                        ) {
+                            if let Some(base) = workspace_basename(path) {
+                                v1_names.push((name.to_string(), base));
+                            }
+                        }
+                    }
+                }
+            }
+            let had_names = !v1_names.is_empty();
+            let (data, changed) = normalize_registry(data, &v1_names)?;
+            if changed || had_names {
+                let reg = WorkspaceRegistry { path: path.clone(), inner: RwLock::new(data.clone()) };
+                reg.persist_locked(&data)?;
+                if had_names {
+                    eprintln!(
+                        "[celestea-studio] workspaces.json v1 -> v2 migrated: 'name' dropped, workspace key = folder basename ({} registered)",
+                        data.workspaces.len(),
+                    );
+                }
+                eprintln!(
+                    "[celestea-studio] workspaces.json normalized: active_session={:?}",
+                    data.active_session,
+                );
+            }
             eprintln!(
                 "[celestea-studio] workspaces: {} registered, active_session={:?}",
                 data.workspaces.len(),
@@ -258,18 +399,19 @@ pub(crate) fn load_registry(
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let moved = migrate_legacy_layout(default_root)?;
+            let base = workspace_basename(&default_root.display().to_string())
+                .ok_or_else(|| format!("default root '{}' has no folder name", default_root.display()))?;
             let data = RegistryData {
                 workspaces: vec![Workspace {
-                    name: DEFAULT_WORKSPACE.to_string(),
                     path: default_root.display().to_string(),
                 }],
-                active_session: Some(DEFAULT_ACTIVE.to_string()),
+                active_session: Some(format!("{base}/cli-main")),
             };
             let reg = WorkspaceRegistry { path, inner: RwLock::new(data.clone()) };
             reg.persist_locked(&data)?;
             eprintln!(
                 "[celestea-studio] workspaces.json created: workspace '{}' -> {} ({} legacy file(s) migrated)",
-                DEFAULT_WORKSPACE,
+                base,
                 default_root.display(),
                 moved,
             );
@@ -429,9 +571,10 @@ pub(crate) fn sanitize_component(s: &str) -> String {
         .collect()
 }
 
-/// Validate a workspace name for registration: sanitize, then reject empty /
-/// "." / "..". (Workspace names are registry keys only — never path
-/// components — so hidden-dir reservations no longer apply.)
+/// W244: validate a FOLDER name for workspace rename (sanitize keeps CJK,
+/// separators/whitespace -> '_'), then reject empty / "." / "..". The name
+/// becomes a real path component via fs::rename, but sanitize_component has
+/// already removed separators; hidden-dir reservations don't apply.
 pub(crate) fn validate_workspace_name(name: &str) -> Result<String, String> {
     if name.trim().is_empty() {
         return Err("workspace name must not be empty".to_string());
@@ -475,7 +618,11 @@ pub(crate) fn resolve_session_dir(
             format!("invalid session id '{id}': expected '<workspace>/<session>'"),
         ));
     };
-    let Some(ws) = data.workspaces.iter().find(|w| w.name == ws_name) else {
+    let Some(ws) = data
+        .workspaces
+        .iter()
+        .find(|w| workspace_basename(&w.path).as_deref() == Some(ws_name))
+    else {
         return Err((StatusCode::NOT_FOUND, format!("unknown workspace '{ws_name}'")));
     };
     let name = sanitize_component(sess);
@@ -634,7 +781,7 @@ pub(crate) fn workspaces_view(st: &Shared) -> Value {
         .iter()
         .map(|w| {
             json!({
-                "name": w.name,
+                "name": workspace_basename(&w.path),
                 "path": w.path,
                 "sessions": count_session_dirs(Path::new(&w.path)),
             })
@@ -650,8 +797,12 @@ pub(crate) async fn get_workspaces(State(st): State<Shared>) -> Json<Value> {
 
 #[derive(Deserialize)]
 pub(crate) struct WorkspaceCreateReq {
-    pub(crate) name: String,
+    /// W244: the workspace key IS the folder basename — nothing else is
+    /// needed. The v1 "name" field is tolerated and ignored.
     pub(crate) path: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -659,17 +810,15 @@ pub(crate) struct WorkspaceRenameReq {
     pub(crate) new_name: String,
 }
 
-/// POST /api/workspaces {"name","path"} — register a user folder as a
-/// workspace. The path must be an absolute existing directory; the folder is
-/// never created or modified by the studio. Duplicate name/path -> 409.
+/// POST /api/workspaces {"path"} — register a user folder as a workspace;
+/// the workspace key is the folder basename (the v1 "name" field is
+/// tolerated and ignored). The path must be an absolute existing directory;
+/// the folder is never created or modified by the studio. Duplicate path or
+/// duplicate basename -> 409.
 pub(crate) async fn post_workspace_create(
     State(st): State<Shared>,
     Json(req): Json<WorkspaceCreateReq>,
 ) -> Response {
-    let name = match validate_workspace_name(&req.name) {
-        Ok(n) => n,
-        Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
-    };
     let path = req.path.trim().to_string();
     if path.is_empty() {
         return err_response(StatusCode::BAD_REQUEST, "path must not be empty".to_string());
@@ -684,8 +833,12 @@ pub(crate) async fn post_workspace_create(
             format!("path '{path}' is not an existing directory"),
         );
     }
-    match st.workspaces.register(&name, &path) {
-        Ok(()) => (StatusCode::OK, Json(json!({"ok": true}))).into_response(),
+    match st.workspaces.register(&path) {
+        Ok(base) => (
+            StatusCode::OK,
+            Json(json!({"ok": true, "name": base})),
+        )
+            .into_response(),
         Err((code, e)) => err_response(code, e),
     }
 }
@@ -707,9 +860,13 @@ pub(crate) async fn post_workspace_delete(
     }
 }
 
-/// POST /api/workspaces/{name}/rename {"new_name"} — registry-only rename:
-/// the user folder is never touched. Duplicate name -> 409; unknown -> 404.
-/// Response: the new registry view (same shape as GET /api/workspaces).
+/// POST /api/workspaces/{name}/rename {"new_name"} — W244: rename the
+/// workspace FOLDER on disk (fs::rename; sanitize keeps CJK; existing target
+/// -> 409) and update the registered path + active_session references. When
+/// the active session lives in the workspace, CELESTEA_SESSION_DIR is
+/// re-pointed at the moved session dir and the generation re-composed
+/// (activate path; busy 409; a failed compose/persist rolls the folder move
+/// back). Response: the new registry view.
 pub(crate) async fn post_workspace_rename(
     State(st): State<Shared>,
     AxPath(name): AxPath<String>,
@@ -719,10 +876,72 @@ pub(crate) async fn post_workspace_rename(
         Ok(n) => n,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, e),
     };
-    match st.workspaces.rename_workspace(&name, &new_name) {
-        Ok(()) => (StatusCode::OK, Json(workspaces_view(&st))).into_response(),
-        Err((code, e)) => err_response(code, e),
+    let data = st.workspaces.snapshot();
+    let active_here = data
+        .active_session
+        .as_deref()
+        .and_then(|a| a.split_once('/').map(|(ws, _)| ws))
+        .is_some_and(|ws| ws == name);
+    let guard = if active_here { Some(st.busy.lock().await) } else { None };
+    if guard.as_ref().is_some_and(|g| g.is_some()) {
+        return err_response(
+            StatusCode::CONFLICT,
+            "turn in progress; rename applies between turns".to_string(),
+        );
     }
+    let active_old = match &data.active_session {
+        Some(active) if active_here => session_dir_for(&data, active).ok().map(|r| r.2),
+        _ => None,
+    };
+    if let Err((code, e)) = st.workspaces.rename_workspace(&name, &new_name) {
+        return err_response(code, e);
+    }
+    if let Some(old_dir) = active_old {
+        // activate tail: env -> re-compose -> persist -> swap, with rollback
+        let session_part = data
+            .active_session
+            .as_deref()
+            .and_then(|a| a.split_once('/').map(|(_, s)| s.to_string()))
+            .unwrap_or_default();
+        let Some(new_dir) = old_dir
+            .parent()
+            .and_then(|ws| ws.parent())
+            .map(|p| p.join(&new_name).join(&session_part))
+        else {
+            return err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot derive the moved session dir".to_string(),
+            );
+        };
+        let pj = {
+            let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+            profile_to_json(&gen.profile)
+        };
+        std::env::set_var("CELESTEA_SESSION_DIR", &new_dir);
+        let gen = match prepare_gen(pj, None) {
+            Ok(g) => g,
+            Err(e) => {
+                let _ = st.workspaces.rename_workspace(&new_name, &name);
+                std::env::set_var("CELESTEA_SESSION_DIR", &old_dir);
+                return err_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("compose failed: {e}"),
+                );
+            }
+        };
+        let new_id = format!("{new_name}/{session_part}");
+        if let Err(e) = st.workspaces.set_active(Some(new_id.clone())) {
+            let _ = st.workspaces.rename_workspace(&new_name, &name);
+            std::env::set_var("CELESTEA_SESSION_DIR", &old_dir);
+            return err_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot persist active session: {e}"),
+            );
+        }
+        let _ = swap_gen(&st, gen);
+    }
+    drop(guard);
+    (StatusCode::OK, Json(workspaces_view(&st))).into_response()
 }
 
 /// POST /api/workspaces/batch-delete {"names":[...]} — per-name
@@ -748,12 +967,34 @@ pub(crate) async fn post_workspaces_batch_delete(
 
 // ---- session handlers ----------------------------------------------------------
 
+/// W244: read the optional session meta model ("<dir>/session.json").
+/// Missing file / malformed JSON / missing model -> None (tolerant).
+pub(crate) fn session_meta(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(SESSION_META)).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v.get("model")
+        .and_then(|m| m.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// W244: write {"model": "<id>"} into "<dir>/session.json".
+pub(crate) fn write_session_meta(dir: &Path, model: &str) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(&json!({"model": model}))
+        .map_err(|e| format!("session meta serialize failed: {e}"))?;
+    std::fs::write(dir.join(SESSION_META), text.as_bytes())
+        .map_err(|e| format!("cannot write '{}': {e}", dir.join(SESSION_META).display()))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct SessionCreateReq {
     /// Optional: None -> the ACTIVE session's workspace (or the first
     /// registered workspace). The UI's "root" option sends null.
     pub(crate) workspace: Option<String>,
     pub(crate) title: String,
+    /// W244: optional model id persisted into "<dir>/session.json".
+    #[serde(default)]
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -837,7 +1078,7 @@ pub(crate) async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
     let mut sessions: Vec<Value> = Vec::new();
     for w in &data.workspaces {
         let ws_path = Path::new(&w.path);
-        scan_session_dirs(ws_path, |name, _dir, file| {
+        scan_session_dirs(ws_path, |name, dir, file| {
             let (size, modified) = std::fs::metadata(file)
                 .map(|m| {
                     (
@@ -850,11 +1091,13 @@ pub(crate) async fn get_sessions(State(st): State<Shared>) -> Json<Value> {
                     )
                 })
                 .unwrap_or((0, 0));
-            let id = format!("{}/{}", w.name, name);
+            let ws_name = workspace_basename(&w.path).unwrap_or_default();
+            let id = format!("{}/{}", ws_name, name);
             sessions.push(json!({
                 "id": id,
-                "workspace": w.name,
+                "workspace": ws_name,
                 "title": name,
+                "model": session_meta(dir),
                 "size": size,
                 "modified": modified,
                 "active": data.active_session.as_deref() == Some(id.as_str()),
@@ -887,12 +1130,25 @@ pub(crate) async fn post_session_create(
             .as_deref()
             .and_then(|id| id.split('/').next())
             .map(str::to_string)
-            .or_else(|| data.workspaces.first().map(|w| w.name.clone()))
+            .or_else(|| {
+                data.workspaces
+                    .first()
+                    .and_then(|w| workspace_basename(&w.path))
+            })
             .unwrap_or_default(),
     };
-    let Some(ws) = data.workspaces.iter().find(|w| w.name == ws_name) else {
+    let Some(ws) = data
+        .workspaces
+        .iter()
+        .find(|w| workspace_basename(&w.path).as_deref() == Some(ws_name.as_str()))
+    else {
         return err_response(StatusCode::NOT_FOUND, format!("unknown workspace '{ws_name}'"));
     };
+    if let Some(m) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        if let Err(e) = crate::api::validate_model_name(m) {
+            return err_response(StatusCode::BAD_REQUEST, format!("invalid model: {e}"));
+        }
+    }
     let base = sanitize_component(req.title.trim());
     if base.is_empty() || base == "." || base == ".." {
         return err_response(StatusCode::BAD_REQUEST, "title must not be empty".to_string());
@@ -926,7 +1182,13 @@ pub(crate) async fn post_session_create(
     if let Err(e) = std::fs::File::create(dir.join(SESSION_FILE)) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("create failed: {e}"));
     }
-    let id = format!("{}/{}", ws.name, name);
+    if let Some(m) = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        if let Err(e) = write_session_meta(&dir, m) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("meta write failed: {e}"));
+        }
+    }
+    let id = format!("{}/{}", workspace_basename(&ws.path).unwrap_or_default(), name);
     (StatusCode::OK, Json(json!({"ok": true, "id": id}))).into_response()
 }
 
@@ -1010,6 +1272,13 @@ pub(crate) fn branch_session_dir(
         let _ = std::fs::remove_dir_all(&new_dir);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("copy failed: {e}")));
     }
+    // W244: the optional meta file travels with the branch too.
+    if dir.join(SESSION_META).is_file() {
+        if let Err(e) = std::fs::copy(dir.join(SESSION_META), new_dir.join(SESSION_META)) {
+            let _ = std::fs::remove_dir_all(&new_dir);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("meta copy failed: {e}")));
+        }
+    }
     Ok((ws, name, new_dir))
 }
 
@@ -1040,11 +1309,19 @@ pub(crate) async fn post_session_activate(
     };
     // Re-compose onto the CURRENT profile (api key stays in the process env;
     // CELESTEA_SESSION_DIR is read at compose time, so the new generation
-    // replays the target session's cli-main.jsonl).
-    let pj = {
+    // replays the target session's cli-main.jsonl). W244: a session.json
+    // {"model"} rides the same post_config/prepare_gen hot-apply path — the
+    // merged profile override is validated, then composed + swapped.
+    let mut pj = {
         let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
         profile_to_json(&gen.profile)
     };
+    if let Some(m) = session_meta(&dir) {
+        if let Err(e) = crate::api::validate_model_name(&m) {
+            return err_response(StatusCode::BAD_REQUEST, format!("invalid session model: {e}"));
+        }
+        pj["model"] = json!(m);
+    }
     std::env::set_var("CELESTEA_SESSION_DIR", &dir);
     let gen = match prepare_gen(pj, None) {
         Ok(g) => g,
@@ -1391,28 +1668,29 @@ mod tests {
     #[test]
     fn resolve_session_dir_is_traversal_safe() {
         let mut data = RegistryData::default();
-        data.workspaces.push(Workspace { name: "A".into(), path: "/tmp/fake-ws".into() });
-        let (ws, name, dir) = resolve_session_dir(&data, "A/s1").unwrap();
-        assert_eq!(ws, "A");
+        data.workspaces.push(Workspace { path: "/tmp/fake-ws".into() });
+        // W244: the workspace key is the folder basename ("fake-ws")
+        let (ws, name, dir) = resolve_session_dir(&data, "fake-ws/s1").unwrap();
+        assert_eq!(ws, "fake-ws");
         assert_eq!(name, "s1");
         assert_eq!(dir, PathBuf::from("/tmp/fake-ws/s1"));
         // separators/whitespace sanitized; CJK kept
-        let (_, n, d) = resolve_session_dir(&data, "A/x y").unwrap();
+        let (_, n, d) = resolve_session_dir(&data, "fake-ws/x y").unwrap();
         assert_eq!(n, "x_y");
         assert_eq!(d, PathBuf::from("/tmp/fake-ws/x_y"));
         // invalid ids: multi-slash, empties, absolute, hidden names, dots
         for bad in [
-            "A/../evil",
-            "A//x",
-            "A/a/b",
-            "A/",
+            "fake-ws/../evil",
+            "fake-ws//x",
+            "fake-ws/a/b",
+            "fake-ws/",
             "/abs",
             "solo",
             "",
             "   ",
-            "A/.",
-            "A/..",
-            "A/.hidden",
+            "fake-ws/.",
+            "fake-ws/..",
+            "fake-ws/.hidden",
             "B/s1",
         ] {
             assert!(
@@ -1443,9 +1721,13 @@ mod tests {
         let reg = load_registry(reg_path.clone(), &root).unwrap();
         let snap = reg.snapshot();
         assert_eq!(snap.workspaces.len(), 1);
-        assert_eq!(snap.workspaces[0].name, DEFAULT_WORKSPACE);
         assert_eq!(snap.workspaces[0].path, root.display().to_string());
-        assert_eq!(snap.active_session.as_deref(), Some(DEFAULT_ACTIVE));
+        assert_eq!(
+            workspace_basename(&snap.workspaces[0].path).as_deref(),
+            Some("sessions"),
+            "v2 key = folder basename"
+        );
+        assert_eq!(snap.active_session.as_deref(), Some("sessions/cli-main"));
 
         // every legacy file became <stem>/cli-main.jsonl
         assert!(root.join("cli-main/cli-main.jsonl").is_file());
@@ -1479,43 +1761,100 @@ mod tests {
     }
 
     #[test]
+    fn v1_registry_migrates_to_basename_keys_idempotently() {
+        let dir = scratch("v1migrate");
+        let ws = dir.join("数据区");
+        std::fs::create_dir_all(ws.join("cli-main")).unwrap();
+        std::fs::write(ws.join("cli-main/cli-main.jsonl"), user_line("v1")).unwrap();
+        let reg_path = dir.join("workspaces.json");
+        // v1 on disk: free-form "name" + name-based active id
+        std::fs::write(
+            &reg_path,
+            format!(
+                "{{\"workspaces\":[{{\"name\":\"默认\",\"path\":\"{}\"}}],\"active_session\":\"默认/cli-main\"}}",
+                ws.display()
+            ),
+        )
+        .unwrap();
+
+        let reg = load_registry(reg_path.clone(), &dir.join("sessions")).unwrap();
+        let snap = reg.snapshot();
+        assert_eq!(snap.workspaces.len(), 1);
+        assert_eq!(snap.workspaces[0].path, ws.display().to_string());
+        assert_eq!(
+            workspace_basename(&snap.workspaces[0].path).as_deref(),
+            Some("数据区"),
+            "workspace key = folder basename"
+        );
+        assert_eq!(
+            snap.active_session.as_deref(),
+            Some("数据区/cli-main"),
+            "active ws segment rewritten to the basename"
+        );
+
+        // the file was rewritten to v2: no "name" fields, active re-keyed
+        let text = std::fs::read_to_string(&reg_path).unwrap();
+        assert!(!text.contains("\"name\""), "v1 name dropped: {text}");
+        assert!(text.contains("数据区/cli-main"));
+        let before = text;
+
+        // idempotent: a second load leaves the file byte-identical
+        let _reg2 = load_registry(reg_path.clone(), &dir.join("sessions")).unwrap();
+        let after = std::fs::read_to_string(&reg_path).unwrap();
+        assert_eq!(before, after, "re-load must not rewrite");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn workspace_register_deregister_only_deregisters() {
         let dir = scratch("regdereg");
         let user_folder = dir.join("user-folder");
         std::fs::create_dir_all(&user_folder).unwrap();
         let reg = load_registry(dir.join("workspaces.json"), &dir.join("sessions")).unwrap();
 
+        // sanitize helper still drives folder renames (CJK kept)
         let name = validate_workspace_name("项目 A").unwrap();
         assert_eq!(name, "项目_A");
-        reg.register(&name, &user_folder.display().to_string()).unwrap();
-        assert!(reg.snapshot().workspaces.iter().any(|w| w.name == "项目_A"));
 
-        // duplicate name -> 409
-        let err = reg
-            .register("项目_A", &dir.join("other").display().to_string())
-            .unwrap_err();
-        assert_eq!(err.0, StatusCode::CONFLICT);
+        // W244: register by path — the key is the folder basename
+        let base = reg.register(&user_folder.display().to_string()).unwrap();
+        assert_eq!(base, "user-folder");
+        assert!(reg.snapshot().workspaces.iter().any(|w| {
+            workspace_basename(&w.path).as_deref() == Some("user-folder")
+        }));
+
         // duplicate path -> 409
+        let err = reg.register(&user_folder.display().to_string()).unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        // same basename, DIFFERENT path -> 409 (hint: rename one folder)
+        let twin = dir.join("elsewhere");
+        std::fs::create_dir_all(twin.join("user-folder")).unwrap();
         let err = reg
-            .register("项目_B", &user_folder.display().to_string())
+            .register(&twin.join("user-folder").display().to_string())
             .unwrap_err();
         assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(err.1.contains("rename one folder"), "conflict hints at the fix: {err:?}");
 
         // deregister: registry entry gone, the USER FOLDER is untouched
-        reg.deregister("项目_A").unwrap();
+        reg.deregister("user-folder").unwrap();
         assert!(user_folder.is_dir());
-        assert!(!reg.snapshot().workspaces.iter().any(|w| w.name == "项目_A"));
-        // the migrated default workspace survives, and unknown names -> 404
-        assert!(reg.snapshot().workspaces.iter().any(|w| w.name == DEFAULT_WORKSPACE));
+        assert!(!reg.snapshot().workspaces.iter().any(|w| {
+            workspace_basename(&w.path).as_deref() == Some("user-folder")
+        }));
+        // the migrated default workspace survives, and unknown keys -> 404
+        assert!(reg.snapshot().workspaces.iter().any(|w| {
+            workspace_basename(&w.path).as_deref() == Some("sessions")
+        }));
         let err = reg.deregister("不存在").unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
 
         // deregistering the active session's workspace clears the dangling id
-        reg.register("X", &user_folder.display().to_string()).unwrap();
+        reg.register(&user_folder.display().to_string()).unwrap();
         std::fs::create_dir_all(user_folder.join("s1")).unwrap();
         std::fs::write(user_folder.join("s1/cli-main.jsonl"), "x\n").unwrap();
-        reg.set_active(Some("X/s1".to_string())).unwrap();
-        reg.deregister("X").unwrap();
+        reg.set_active(Some("user-folder/s1".to_string())).unwrap();
+        reg.deregister("user-folder").unwrap();
         assert_eq!(reg.snapshot().active_session, None);
         // reloaded from disk: the cleared active session persisted
         let reloaded = load_registry(dir.join("workspaces.json"), &dir.join("sessions")).unwrap();
@@ -1542,8 +1881,8 @@ mod tests {
 
         let reg_path = dir.join("workspaces.json");
         let reg = load_registry(reg_path.clone(), &dir.join("sessions")).unwrap();
-        reg.register("A", &ws_a.display().to_string()).unwrap();
-        reg.register("B", &ws_b.display().to_string()).unwrap();
+        reg.register(&ws_a.display().to_string()).unwrap();
+        reg.register(&ws_b.display().to_string()).unwrap();
 
         // A dedicated key env name: never touch DEEPSEEK_API_KEY (it may be
         // legitimately set for the real instance).
@@ -1555,28 +1894,28 @@ mod tests {
         .expect("lenient merge");
 
         // activate A (the handler tail: resolve -> env -> recompose -> persist)
-        let (_id_a, _name_a, dir_a) = session_dir_for(&reg.snapshot(), "A/alpha").unwrap();
+        let (_id_a, _name_a, dir_a) = session_dir_for(&reg.snapshot(), "ws-a/alpha").unwrap();
         assert_eq!(dir_a, a_sess);
         std::env::set_var("CELESTEA_SESSION_DIR", &dir_a);
-        reg.set_active(Some("A/alpha".to_string())).unwrap();
+        reg.set_active(Some("ws-a/alpha".to_string())).unwrap();
         let gen_a = crate::build_gen(profile.clone()).unwrap();
         assert_eq!(user_texts(&gen_a.runtime.session), vec!["from-alpha".to_string()]);
 
         // switch to B -> the compose replays B's history
-        let (_id_b, _name_b, dir_b) = session_dir_for(&reg.snapshot(), "B/beta").unwrap();
+        let (_id_b, _name_b, dir_b) = session_dir_for(&reg.snapshot(), "ws-b/beta").unwrap();
         std::env::set_var("CELESTEA_SESSION_DIR", &dir_b);
-        reg.set_active(Some("B/beta".to_string())).unwrap();
+        reg.set_active(Some("ws-b/beta".to_string())).unwrap();
         let gen_b = crate::build_gen(profile.clone()).unwrap();
         assert_eq!(user_texts(&gen_b.runtime.session), vec!["from-beta".to_string()]);
 
         // the registry persisted the switch (reload from disk)
         let reloaded = load_registry(reg_path, &dir.join("sessions")).unwrap();
-        assert_eq!(reloaded.snapshot().active_session.as_deref(), Some("B/beta"));
+        assert_eq!(reloaded.snapshot().active_session.as_deref(), Some("ws-b/beta"));
 
         // switch BACK to A -> its history is intact again
-        let (_id_a, _name_a, dir_a) = session_dir_for(&reloaded.snapshot(), "A/alpha").unwrap();
+        let (_id_a, _name_a, dir_a) = session_dir_for(&reloaded.snapshot(), "ws-a/alpha").unwrap();
         std::env::set_var("CELESTEA_SESSION_DIR", &dir_a);
-        reloaded.set_active(Some("A/alpha".to_string())).unwrap();
+        reloaded.set_active(Some("ws-a/alpha".to_string())).unwrap();
         let gen_a2 = crate::build_gen(profile).unwrap();
         assert_eq!(user_texts(&gen_a2.runtime.session), vec!["from-alpha".to_string()]);
 
@@ -1595,12 +1934,12 @@ mod tests {
         std::fs::create_dir_all(ws_path.join("beta")).unwrap();
         std::fs::write(ws_path.join("beta").join(SESSION_FILE), user_line("junk")).unwrap();
         let reg = load_registry(dir.join("workspaces.json"), &dir.join("sessions")).unwrap();
-        reg.register("A", &ws_path.display().to_string()).unwrap();
+        reg.register(&ws_path.display().to_string()).unwrap();
 
         // CJK kept, whitespace sanitized: "新 名称" -> "新_名称"; old dir gone
         let (ws, old, new, new_dir) =
-            rename_session_dir(&reg.snapshot(), "A/alpha", "新 名称").unwrap();
-        assert_eq!(ws, "A");
+            rename_session_dir(&reg.snapshot(), "ws/alpha", "新 名称").unwrap();
+        assert_eq!(ws, "ws");
         assert_eq!(old, "alpha");
         assert_eq!(new, "新_名称");
         assert!(new_dir.is_dir() && new_dir.join(SESSION_FILE).is_file());
@@ -1610,21 +1949,21 @@ mod tests {
             .contains("from-alpha"));
 
         // rename onto an existing sibling -> auto "-1" suffix, sibling untouched
-        let (_, _, n2, _) = rename_session_dir(&reg.snapshot(), "A/新_名称", "beta").unwrap();
+        let (_, _, n2, _) = rename_session_dir(&reg.snapshot(), "ws/新_名称", "beta").unwrap();
         assert_eq!(n2, "beta-1");
         assert!(std::fs::read_to_string(ws_path.join("beta/cli-main.jsonl"))
             .unwrap()
             .contains("junk"));
 
         // renaming onto the current name is a no-op
-        let (_, _, n3, d3) = rename_session_dir(&reg.snapshot(), "A/beta-1", "beta-1").unwrap();
+        let (_, _, n3, d3) = rename_session_dir(&reg.snapshot(), "ws/beta-1", "beta-1").unwrap();
         assert_eq!(n3, "beta-1");
         assert_eq!(d3, ws_path.join("beta-1"));
 
         // bad titles / unknown sessions rejected
-        assert!(rename_session_dir(&reg.snapshot(), "A/beta", "   ").is_err());
-        assert!(rename_session_dir(&reg.snapshot(), "A/beta", ".hidden").is_err());
-        assert!(rename_session_dir(&reg.snapshot(), "A/missing", "x").is_err());
+        assert!(rename_session_dir(&reg.snapshot(), "ws/beta", "   ").is_err());
+        assert!(rename_session_dir(&reg.snapshot(), "ws/beta", ".hidden").is_err());
+        assert!(rename_session_dir(&reg.snapshot(), "ws/missing", "x").is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1641,7 +1980,7 @@ mod tests {
         std::fs::write(sess.join(SESSION_FILE), user_line("from-alpha")).unwrap();
         let reg_path = dir.join("workspaces.json");
         let reg = load_registry(reg_path.clone(), &dir.join("sessions")).unwrap();
-        reg.register("A", &ws_path.display().to_string()).unwrap();
+        reg.register(&ws_path.display().to_string()).unwrap();
 
         std::env::set_var("W237_REPLAY_KEY", "test-key");
         let profile = celestea_runtime::merge_profile(&json!({
@@ -1652,15 +1991,15 @@ mod tests {
 
         // initial activation state (the activate tail: env -> recompose -> persist)
         std::env::set_var("CELESTEA_SESSION_DIR", &sess);
-        reg.set_active(Some("A/alpha".to_string())).unwrap();
+        reg.set_active(Some("ws/alpha".to_string())).unwrap();
         let gen_a = crate::build_gen(profile.clone()).unwrap();
         assert_eq!(user_texts(&gen_a.runtime.session), vec!["from-alpha".to_string()]);
 
         // rename the ACTIVE session (the handler tail: rename -> env ->
         // recompose -> persist) — CJK title kept verbatim
         let (ws, old, new, new_dir) =
-            rename_session_dir(&reg.snapshot(), "A/alpha", "重命名").unwrap();
-        assert_eq!((ws.as_str(), old.as_str(), new.as_str()), ("A", "alpha", "重命名"));
+            rename_session_dir(&reg.snapshot(), "ws/alpha", "重命名").unwrap();
+        assert_eq!((ws.as_str(), old.as_str(), new.as_str()), ("ws", "alpha", "重命名"));
         std::env::set_var("CELESTEA_SESSION_DIR", &new_dir);
         reg.set_active(Some(format!("{ws}/{new}"))).unwrap();
         let gen_b = crate::build_gen(profile).unwrap();
@@ -1674,9 +2013,64 @@ mod tests {
             new_dir.display().to_string()
         );
         let reloaded = load_registry(reg_path, &dir.join("sessions")).unwrap();
-        assert_eq!(reloaded.snapshot().active_session.as_deref(), Some("A/重命名"));
+        assert_eq!(reloaded.snapshot().active_session.as_deref(), Some("ws/重命名"));
         assert!(new_dir.join(SESSION_FILE).is_file());
         assert!(!sess.exists(), "old session dir moved away");
+
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::remove_var("W237_REPLAY_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_meta_roundtrip_and_activate_applies_model() {
+        // process-global env: serialize with the other compose tests
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("meta");
+        let ws_path = dir.join("ws");
+        let sess = ws_path.join("alpha");
+        let other = ws_path.join("beta");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(sess.join(SESSION_FILE), user_line("meta hello")).unwrap();
+        std::fs::write(other.join(SESSION_FILE), "x\n").unwrap();
+        let reg = load_registry(dir.join("workspaces.json"), &dir.join("sessions")).unwrap();
+        reg.register(&ws_path.display().to_string()).unwrap();
+
+        // write -> read roundtrip; absent file -> None; malformed -> None
+        write_session_meta(&sess, "test-model-x").unwrap();
+        assert_eq!(session_meta(&sess).as_deref(), Some("test-model-x"));
+        assert!(sess.join(SESSION_META).is_file());
+        assert_eq!(session_meta(&other), None);
+        std::fs::write(other.join(SESSION_META), "not json").unwrap();
+        assert_eq!(session_meta(&other), None, "malformed meta is tolerated");
+
+        // activate tail: the meta model rides the post_config/prepare_gen path
+        std::env::set_var("W237_REPLAY_KEY", "test-key");
+        let profile = celestea_runtime::merge_profile(&json!({
+            "model": "deepseek-v4-flash-0731",
+            "api_key_env": "W237_REPLAY_KEY",
+        }))
+        .expect("lenient merge");
+        let mut pj = crate::profile_to_json(&profile);
+        if let Some(m) = session_meta(&sess) {
+            assert!(crate::api::validate_model_name(&m).is_ok());
+            pj["model"] = json!(m);
+        }
+        std::env::set_var("CELESTEA_SESSION_DIR", &sess);
+        let gen = crate::prepare_gen(pj, None).unwrap();
+        assert_eq!(gen.model, "test-model-x", "meta model applied at activate");
+        assert_eq!(user_texts(&gen.runtime.session), vec!["meta hello".to_string()]);
+
+        // no meta -> the profile model stays (no override)
+        std::env::set_var("CELESTEA_SESSION_DIR", &other);
+        let gen2 = crate::prepare_gen(crate::profile_to_json(&profile), None).unwrap();
+        assert_eq!(gen2.model, "deepseek-v4-flash-0731");
+
+        // invalid meta model is rejected by the same validation
+        write_session_meta(&other, "bad model!").unwrap();
+        let m = session_meta(&other).unwrap();
+        assert!(crate::api::validate_model_name(&m).is_err());
 
         std::env::remove_var("CELESTEA_SESSION_DIR");
         std::env::remove_var("W237_REPLAY_KEY");
@@ -1691,11 +2085,11 @@ mod tests {
         let src_file = ws_path.join("src").join(SESSION_FILE);
         std::fs::write(&src_file, user_line("hello from source")).unwrap();
         let reg = load_registry(dir.join("workspaces.json"), &dir.join("sessions")).unwrap();
-        reg.register("A", &ws_path.display().to_string()).unwrap();
+        reg.register(&ws_path.display().to_string()).unwrap();
 
         // default title: "<源名>-分支" + timestamp suffix; content copied byte-exact
-        let (ws, name, new_dir) = branch_session_dir(&reg.snapshot(), "A/src", None).unwrap();
-        assert_eq!(ws, "A");
+        let (ws, name, new_dir) = branch_session_dir(&reg.snapshot(), "ws/src", None).unwrap();
+        assert_eq!(ws, "ws");
         assert!(name.starts_with("src-分支-"), "default title '{name}'");
         let branch_file = new_dir.join(SESSION_FILE);
         assert!(branch_file.is_file());
@@ -1719,12 +2113,18 @@ mod tests {
         assert_eq!(messages[0]["role"], "user");
         assert!(messages[0]["content"].as_str().unwrap().contains("hello from source"));
 
+        // W244: the optional meta file travels with the branch
+        std::fs::write(ws_path.join("src").join(SESSION_META), "{\"model\":\"test-model-x\"}").unwrap();
+        let (_, n3, d3) = branch_session_dir(&reg.snapshot(), "ws/src", Some("带元数据")).unwrap();
+        assert!(n3.starts_with("带元数据-"));
+        assert_eq!(session_meta(&d3).as_deref(), Some("test-model-x"), "meta copied");
+
         // explicit title (CJK kept) + branch never activates
-        let (_, n2, _) = branch_session_dir(&reg.snapshot(), "A/src", Some("副本")).unwrap();
+        let (_, n2, _) = branch_session_dir(&reg.snapshot(), "ws/src", Some("副本")).unwrap();
         assert!(n2.starts_with("副本-"));
         assert_ne!(
             reg.snapshot().active_session.as_deref(),
-            Some(format!("A/{n2}").as_str()),
+            Some(format!("ws/{n2}").as_str()),
             "branch does not activate"
         );
 
@@ -1732,45 +2132,61 @@ mod tests {
     }
 
     #[test]
-    fn workspace_rename_registry_only_and_conflicts_409() {
+    fn workspace_rename_moves_folder_and_updates_registry() {
         let dir = scratch("wsrename");
-        let folder_a = dir.join("user-a");
-        let folder_b = dir.join("user-b");
+        let folder_a = dir.join("项目A");
+        let folder_b = dir.join("项目B");
         std::fs::create_dir_all(&folder_a).unwrap();
         std::fs::create_dir_all(&folder_b).unwrap();
         std::fs::create_dir_all(folder_a.join("s1")).unwrap();
         std::fs::write(folder_a.join("s1/cli-main.jsonl"), "x\n").unwrap();
         let reg = load_registry(dir.join("workspaces.json"), &dir.join("sessions")).unwrap();
-        reg.register("项目A", &folder_a.display().to_string()).unwrap();
-        reg.register("项目B", &folder_b.display().to_string()).unwrap();
+        reg.register(&folder_a.display().to_string()).unwrap();
+        reg.register(&folder_b.display().to_string()).unwrap();
         reg.set_active(Some("项目A/s1".to_string())).unwrap();
 
-        // duplicate name -> 409, registry unchanged
+        // colliding workspace key -> 409, nothing moved
         let err = reg.rename_workspace("项目A", "项目B").unwrap_err();
         assert_eq!(err.0, StatusCode::CONFLICT);
-        assert!(reg.snapshot().workspaces.iter().any(|w| w.name == "项目A"));
+        assert!(folder_a.is_dir());
+        // target exists on disk -> 409
+        let blocker = dir.join("占位");
+        std::fs::create_dir_all(&blocker).unwrap();
+        let err = reg.rename_workspace("项目B", "占位").unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(folder_b.is_dir());
         // unknown -> 404
         let err = reg.rename_workspace("无", "X").unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
 
-        // ok: registry name changes, the user folder path + dirs stay put,
-        // and the active session id is re-pointed
+        // ok: the FOLDER itself is renamed on disk (CJK kept), the registered
+        // path + active id are re-pointed, and the sessions travel with it
         reg.rename_workspace("项目A", "新项目").unwrap();
+        assert!(!folder_a.exists(), "old folder moved away");
+        let new_folder = dir.join("新项目");
+        assert!(new_folder.is_dir());
+        assert!(new_folder.join("s1/cli-main.jsonl").is_file(), "session moved with the folder");
         let snap = reg.snapshot();
         assert!(snap
             .workspaces
             .iter()
-            .any(|w| w.name == "新项目" && w.path == folder_a.display().to_string()));
-        assert!(!snap.workspaces.iter().any(|w| w.name == "项目A"));
+            .any(|w| workspace_basename(&w.path).as_deref() == Some("新项目")));
+        assert!(!snap
+            .workspaces
+            .iter()
+            .any(|w| workspace_basename(&w.path).as_deref() == Some("项目A")));
         assert_eq!(snap.active_session.as_deref(), Some("新项目/s1"));
-        assert!(folder_a.join("s1").is_dir(), "user folder untouched");
         // renaming onto itself is a no-op success
         assert!(reg.rename_workspace("新项目", "新项目").is_ok());
 
         // persisted (reload from disk)
         let reloaded = load_registry(dir.join("workspaces.json"), &dir.join("sessions")).unwrap();
         assert_eq!(reloaded.snapshot().active_session.as_deref(), Some("新项目/s1"));
-        assert!(reloaded.snapshot().workspaces.iter().any(|w| w.name == "新项目"));
+        assert!(reloaded
+            .snapshot()
+            .workspaces
+            .iter()
+            .any(|w| workspace_basename(&w.path).as_deref() == Some("新项目")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1783,36 +2199,36 @@ mod tests {
         std::fs::create_dir_all(&sess).unwrap();
         std::fs::write(sess.join(SESSION_FILE), user_line("keep")).unwrap();
         let reg = load_registry(dir.join("workspaces.json"), &dir.join("sessions")).unwrap();
-        reg.register("W", &ws_path.display().to_string()).unwrap();
+        reg.register(&ws_path.display().to_string()).unwrap();
 
         // active session: archive + delete both refused (400)
-        reg.set_active(Some("W/s1".to_string())).unwrap();
+        reg.set_active(Some("wsx/s1".to_string())).unwrap();
         let data = reg.snapshot();
-        let e = move_session_dir(&data, "W/s1", MoveOp::Archive).unwrap_err();
+        let e = move_session_dir(&data, "wsx/s1", MoveOp::Archive).unwrap_err();
         assert_eq!(e.0, StatusCode::BAD_REQUEST);
         assert!(e.1.contains("cannot be archived"));
-        let e = move_session_dir(&data, "W/s1", MoveOp::Trash).unwrap_err();
+        let e = move_session_dir(&data, "wsx/s1", MoveOp::Trash).unwrap_err();
         assert_eq!(e.0, StatusCode::BAD_REQUEST);
         assert!(e.1.contains("cannot be deleted"));
         assert!(sess.is_dir(), "refused moves must leave the dir alone");
 
         // not active: archive -> .celestea-archived/<name>
-        reg.set_active(Some("W/other".to_string())).unwrap();
+        reg.set_active(Some("wsx/other".to_string())).unwrap();
         let data = reg.snapshot();
-        move_session_dir(&data, "W/s1", MoveOp::Archive).unwrap();
+        move_session_dir(&data, "wsx/s1", MoveOp::Archive).unwrap();
         assert!(!sess.exists());
         assert!(ws_path.join(ARCHIVED_DIR).join("s1").is_dir());
         // the moved-away dir is no longer archivable
-        let e = move_session_dir(&data, "W/s1", MoveOp::Archive).unwrap_err();
+        let e = move_session_dir(&data, "wsx/s1", MoveOp::Archive).unwrap_err();
         assert_eq!(e.0, StatusCode::NOT_FOUND);
 
         // unarchive -> back in place, history intact
-        move_session_dir(&data, "W/s1", MoveOp::Unarchive).unwrap();
+        move_session_dir(&data, "wsx/s1", MoveOp::Unarchive).unwrap();
         assert!(sess.join(SESSION_FILE).is_file());
         assert!(std::fs::read_to_string(sess.join(SESSION_FILE)).unwrap().contains("keep"));
 
         // delete -> .celestea-trash/<name>-<ts> (recoverable on disk)
-        move_session_dir(&data, "W/s1", MoveOp::Trash).unwrap();
+        move_session_dir(&data, "wsx/s1", MoveOp::Trash).unwrap();
         assert!(!sess.exists());
         let trashed: Vec<String> = std::fs::read_dir(ws_path.join(TRASH_DIR))
             .unwrap()

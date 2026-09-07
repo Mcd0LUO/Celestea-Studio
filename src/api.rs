@@ -124,7 +124,7 @@ pub(crate) fn parse_session_jsonl(text: &str) -> Vec<SessionEvent> {
 /// [A-Za-z0-9._-:/@] (no whitespace / brackets / control characters). The
 /// engine's validate_model only rejects empty names; this blocks frontend
 /// garbage values while staying open for custom OpenAI-compatible endpoints.
-fn validate_model_name(m: &str) -> Result<(), String> {
+pub(crate) fn validate_model_name(m: &str) -> Result<(), String> {
     if m.chars().count() > 128 {
         return Err(format!(
             "invalid model name: '{m}' exceeds 128 characters"
