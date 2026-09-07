@@ -17,6 +17,7 @@ import {
   finalizeAssistant,
   resetMessages,
 } from './messages';
+import { buildToolCard, setToolResult, type ToolCardRef } from './toolcards';
 
 const MAX_RESTORE = 200;
 
@@ -105,6 +106,60 @@ function appendLiveSeparator(): void {
   msgs.appendChild(sep);
 }
 
+// ---- 历史工具条目：解析并复用 live 工具卡片样式（第 8 轮） ----
+// 契约 content 形如 "name(args)"（调用）或结果 JSON / "Error: …"（结果）。
+// call 与随后的 result 配对成一张卡（折叠三行摘要：工具名/参数截断/结果截断，
+// 可点击展开全文）；解析失败回退为普通文本行。
+// 注：thinking / info 块是 SSE 专属、不落盘，恢复侧无需处理。
+
+let histToolStep = 0;
+let pendingTool: ToolCardRef | null = null;
+
+/** 解析 "name(args)" 形态的工具调用条目。 */
+function parseToolCall(content: string): { name: string; args: string } | null {
+  const t = content.trim();
+  const m = /^([A-Za-z_][A-Za-z0-9_-]*)\(([\s\S]*)\)$/.exec(t);
+  if (!m) return null;
+  return { name: m[1]!, args: m[2]! };
+}
+
+function appendFallbackToolLine(content: string): void {
+  const col = el('div', 'mcol');
+  const msg = el('div', 'msg tool');
+  const cap = el('div', 'msg-caption');
+  cap.appendChild(el('span', 'who', '工具'));
+  msg.appendChild(cap);
+  const bubble = el('div', 'bubble');
+  const body = el('div', 'content restore-tool');
+  body.textContent = content;
+  bubble.appendChild(body);
+  msg.appendChild(bubble);
+  col.appendChild(msg);
+  const msgs = document.getElementById('messages');
+  if (msgs) msgs.appendChild(col);
+}
+
+function renderToolHistory(content: string): void {
+  const call = parseToolCall(content);
+  if (call) {
+    histToolStep += 1;
+    const ref = buildToolCard({ step: histToolStep, name: call.name, argsText: call.args });
+    const msgs = document.getElementById('messages');
+    if (msgs) msgs.appendChild(ref.col);
+    pendingTool = ref; // 等待紧随其后的结果条目配对
+    autoscroll(true);
+    return;
+  }
+  if (pendingTool) {
+    const failed = content.trim().startsWith('Error');
+    setToolResult(pendingTool, content, failed);
+    pendingTool = null;
+    autoscroll(true);
+    return;
+  }
+  appendFallbackToolLine(content); // 解析失败回退：普通文本行
+}
+
 function renderOne(m: HistoryMsg): void {
   const content = String(m.content);
   if (m.role === 'user') {
@@ -120,20 +175,7 @@ function renderOne(m: HistoryMsg): void {
     S.assistant = null;
     return;
   }
-  // tool：单色等宽块
-  const col = el('div', 'mcol');
-  const msg = el('div', 'msg tool');
-  const cap = el('div', 'msg-caption');
-  cap.appendChild(el('span', 'who', '工具'));
-  msg.appendChild(cap);
-  const bubble = el('div', 'bubble');
-  const body = el('div', 'content restore-tool');
-  body.textContent = content;
-  bubble.appendChild(body);
-  msg.appendChild(bubble);
-  col.appendChild(msg);
-  const msgs = document.getElementById('messages');
-  if (msgs) msgs.appendChild(col);
+  renderToolHistory(content);
 }
 
 /**
@@ -156,6 +198,11 @@ export async function restoreSessionHistory(id: string): Promise<void> {
   const recent = all.length > MAX_RESTORE ? all.slice(all.length - MAX_RESTORE) : all;
   if (all.length > MAX_RESTORE) appendFoldNote();
   for (const m of recent) renderOne(m);
+  if (pendingTool) {
+    // 无配对结果的调用：历史视角标记为完成（无结果行）
+    setToolResult(pendingTool, '（历史记录无结果）', false);
+    pendingTool = null;
+  }
   appendLiveSeparator();
   autoscroll(true);
   tail = recent[recent.length - 1] ?? null;
@@ -201,6 +248,8 @@ export async function restoreActiveHistory(): Promise<void> {
 
 /** 激活会话后切换聊天区：清空现有视图并渲染目标会话历史（选择条同步复位）。 */
 export function switchToSession(id: string): void {
+  pendingTool = null;
+  histToolStep = 0;
   resetMessages(); // 清空消息流 + 选择条 + 流式状态
   void restoreSessionHistory(id);
 }
