@@ -41,10 +41,9 @@ const BASE_W = 7;              // 未悬停细条宽
 const MAX_W = 110;             // 正常态最长条宽上限
 const GUTTER_NORMAL = 64;      // 留白 ≥ 此值：正常态
 const GUTTER_HIDE = 24;        // 留白 < 此值：隐藏
-const RANGE = 60;              // fisheye 纵向衰减半径（px，第 20 轮：落差加大——
-                                  // 命中条最长、紧邻条明显短一截、远处快速收敛基准条）
-const HIT_BOOST = 14;           // 命中条宽度上限额外上浮（px，k=1 时）
-const BASE_OPACITY = 0.25;      // 非邻近条透明度基准（第 20 轮压暗，让选中条突出）
+const RANGE = 80;              // fisheye 纵向衰减半径（px，第 21 轮：第 19/20 轮中间值）
+const HIT_BOOST = 6;            // 命中条宽度上限额外上浮（px，k=1 时；第 21 轮回调）
+const BASE_OPACITY = 0.3;       // 非邻近条透明度基准（第 21 轮回调：0.30+0.40k，上限 0.7）
 const PREVIEW_MS = 150;        // hover 停留防抖（第 19 轮：既瞬时又不误触）
 const PREVIEW_CHARS = 40;      // 预览首行前 N 字
 const MAX_ROWS = 20;           // 轮条显示上限：只显示最近 20 轮，更早折叠为顶部「⋯」
@@ -319,7 +318,7 @@ function setGrow(it: RailItem, g: number): void {
   // 过渡 85ms 轻 ease-out（见 rail.css）
   const w = BASE_W + k * Math.max(0, railW - BASE_W) + (k >= 1 ? HIT_BOOST : 0);
   it.el.style.width = w.toFixed(1) + 'px';
-  it.el.style.opacity = (BASE_OPACITY + (0.7 - BASE_OPACITY) * k).toFixed(3);
+  it.el.style.opacity = (BASE_OPACITY + (0.7 - BASE_OPACITY) * k).toFixed(3); // 0.30+0.40k
 }
 
 function clearHover(): void {
