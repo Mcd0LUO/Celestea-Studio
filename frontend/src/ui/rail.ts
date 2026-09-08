@@ -41,8 +41,9 @@ const BASE_W = 7;              // 未悬停细条宽
 const MAX_W = 110;             // 正常态最长条宽上限
 const GUTTER_NORMAL = 64;      // 留白 ≥ 此值：正常态
 const GUTTER_HIDE = 24;        // 留白 < 此值：隐藏
-const RANGE = 160;             // fisheye 纵向衰减半径（px）
-const PREVIEW_MS = 350;        // hover 停留防抖
+const RANGE = 100;             // fisheye 纵向衰减半径（px，第 19 轮追加：调陡——
+                                  // 命中条最长、紧邻条明显短一截、远处快速收敛基准条）
+const PREVIEW_MS = 150;        // hover 停留防抖（第 19 轮：既瞬时又不误触）
 const PREVIEW_CHARS = 40;      // 预览首行前 N 字
 const MAX_ROWS = 20;           // 轮条显示上限：只显示最近 20 轮，更早折叠为顶部「⋯」
 
@@ -312,6 +313,8 @@ function syncCard(): void {
 function setGrow(it: RailItem, g: number): void {
   const k = Math.max(0, Math.min(1, g));
   const w = BASE_W + k * Math.max(0, railW - BASE_W);
+  // 第 19 轮：absolute 定位条改 inline width 不触发布局重排（只 reflow 自身，
+  // 不影响兄弟/消息列），保持 5px 高不变形；过渡 85ms 轻 ease-out（见 rail.css）
   it.el.style.width = w.toFixed(1) + 'px';
   it.el.style.opacity = (0.35 + 0.35 * k).toFixed(3);
 }
@@ -333,6 +336,7 @@ function collapse(): void {
 }
 
 function onMove(e: PointerEvent): void {
+  // 第 19 轮：mousemove 合并到 rAF（每帧至多一次重算，不逐事件全量处理）
   moveX = e.clientX;
   moveY = e.clientY;
   if (moveQueued) return;
@@ -365,9 +369,9 @@ function applyMove(): void {
   let best: RailItem | null = null;
   let bestD = Infinity;
   for (const it of allItems()) {
-    if (!it.visible) continue;
+    if (!it.visible) continue; // 第 19 轮：仅对可见条（≤21 根含折叠条）计算权重
     const d = Math.abs(y - (railTop + it.y));
-    setGrow(it, 1 - d / RANGE); // 变长 fisheye + 微亮（线性衰减，RANGE=160px）
+    setGrow(it, 1 - d / RANGE); // 变长 fisheye + 微亮（线性衰减，RANGE=100px 陡降）
     if (d < bestD) {
       bestD = d;
       best = it;

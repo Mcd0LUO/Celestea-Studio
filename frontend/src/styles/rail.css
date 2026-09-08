@@ -32,8 +32,12 @@
   border: 1px solid transparent;
   opacity: .5;           /* 微亮由 JS inline opacity 控制（0.35–0.7） */
   pointer-events: none;
-  transition: width .18s cubic-bezier(.22, 1.4, .36, 1), /* 变长吸附的过冲缓动 */
-              opacity .15s ease, background .15s ease, border-color .15s ease;
+  transition: width 85ms ease-out, /* 第 19 轮：轻 ease-out，去 overshoot 回弹（跟手不弹） */
+              opacity 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+/* 命中条几乎即时到位：宽度过渡进一步缩短 */
+.railv3-item.is-hover {
+  transition-duration: 45ms, 120ms, 120ms, 120ms;
 }
 .railv3-item.is-reply {
   background: var(--c-accent);
