@@ -25,25 +25,21 @@
 .railv3-item {
   position: absolute;
   left: 0;
-  width: 7px;            /* 未悬停 = 细条 */
-  height: var(--barh, 5px); /* 第 15 轮：细条（自然 5px），hover 加高 */
+  width: 7px;            /* 细条固定宽度：hover/吸附不变长不变粗（第 16 轮） */
+  height: var(--barh, 5px); /* 高度固定：hover 不加高 */
   border-radius: 999px;
   background: var(--c-text-3);
   border: 1px solid transparent;
-  opacity: .5;
+  opacity: .5;           /* 邻近微亮由 JS inline opacity 控制（0.35–0.7） */
   pointer-events: none;
-  transition: width .18s cubic-bezier(.22, 1.4, .36, 1), /* 吸附感的过冲缓动 */
-              height .15s ease,
-              opacity .15s ease, background .15s ease, border-color .15s ease;
+  transition: opacity .15s ease, background .15s ease, border-color .15s ease;
 }
 .railv3-item.is-reply {
   background: var(--c-accent);
-  opacity: .65;
 }
-/* 鼠标临近命中者（JS 加类）：最长 + 加高 + 高亮吸附 */
+/* 命中条：仅变色/微亮 + 高亮描边（不改变尺寸） */
 .railv3-item.is-hover {
   opacity: 1;
-  height: 12px;
   background: var(--c-accent-strong);
   border-color: var(--c-accent-ring);
 }

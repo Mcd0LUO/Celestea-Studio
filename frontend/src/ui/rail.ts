@@ -31,11 +31,11 @@
 // ============================================================================
 import { el } from '../utils/dom';
 
-// ---- 紧凑几何（第 15 轮：细条 —— 自然高 5px、间隙 2px；hover 才加宽/加高） ----
-const ITEM_H = 5;              // 自然条高
-const GAP = 2;                 // 自然间隙
-const PITCH_NATURAL = ITEM_H + GAP; // 7px
-const PITCH_MIN = 3;           // 压缩节距下限（条 2px + 间隙 1px）
+// ---- 紧凑几何（第 16 轮：细条 —— 自然高 5px、间隙 4px；hover 不变长不变粗） ----
+const ITEM_H = 5;              // 自然条高（hover 保持）
+const GAP = 4;                 // 自然间隙
+const PITCH_NATURAL = ITEM_H + GAP; // 9px
+const PITCH_MIN = 4;           // 压缩节距下限（条 2px + 间隙 2px）
 const PAD_Y = 8;               // 条组上下留白
 const BASE_W = 7;              // 未悬停细条宽
 const MAX_W = 110;             // 正常态最长条宽上限
@@ -53,7 +53,6 @@ interface RailItem {
   hasReply: boolean;     // 该轮是否已有 assistant 回复
   el: HTMLElement;
   y: number;             // 长条中心在轨道内的 Y（layout 计算）
-  w: number;             // 当前目标宽度（fisheye）
   visible: boolean;
   fold: number;          // >0 = 折叠条（表示更早 N 轮已折叠）
 }
@@ -150,7 +149,6 @@ function layout(): void {
         hasReply: false,
         el: document.createElement('div'),
         y: 0,
-        w: BASE_W,
         visible: false,
         fold: foldN,
       };
@@ -286,7 +284,8 @@ function positionCard(it: RailItem): void {
   const lo = Math.min(railTop + 4, Math.max(railTop + 4, railTop + railH - ch - 4));
   const top = Math.min(Math.max(railTop + 4, railTop + it.y - ch / 2), lo);
   card.style.top = top + 'px';
-  card.style.left = Math.min(railX + it.w + 8, m.width - 288) + 'px';
+  // 第 16 轮：预览贴近细条右侧（宽度固定 BASE_W，不再随 fisheye 位移）
+  card.style.left = Math.min(railX + BASE_W + 8, m.width - 288) + 'px';
 }
 
 /** layout 后同步预览卡（悬停条被重排/隐藏时跟随或关闭）。 */
@@ -301,11 +300,11 @@ function syncCard(): void {
 
 // ---- 交互（fisheye + hover 停留预览 + 点击定位） --------------------------------
 
-function setGrow(it: RailItem, g: number): void {
-  const w = BASE_W + Math.max(0, Math.min(1, g)) * Math.max(0, railW - BASE_W);
-  if (Math.abs(w - it.w) < 0.1 && it.el.style.width !== '') return;
-  it.w = w;
-  it.el.style.width = w.toFixed(1) + 'px';
+/** 第 16 轮取舍：取消 fisheye「邻近变长」——细条宽度固定不变，
+ *  邻近度仅作用于透明度微亮（0.35→0.7），命中条由 .is-hover 全亮+描边。 */
+function setGlow(it: RailItem, g: number): void {
+  const o = 0.35 + 0.35 * Math.max(0, Math.min(1, g));
+  it.el.style.opacity = o.toFixed(3);
 }
 
 function clearHover(): void {
@@ -321,7 +320,7 @@ function clearHover(): void {
 /** 离开条带：全部收为细条（CSS transition 平滑回缩）。 */
 function collapse(): void {
   clearHover();
-  for (const it of items) setGrow(it, 0);
+  for (const it of allItems()) setGlow(it, 0);
 }
 
 function onMove(e: PointerEvent): void {
@@ -359,7 +358,7 @@ function applyMove(): void {
   for (const it of allItems()) {
     if (!it.visible) continue;
     const d = Math.abs(y - (railTop + it.y));
-    setGrow(it, 1 - d / RANGE); // 邻近度权重线性衰减（fisheye）
+    setGlow(it, 1 - d / RANGE); // 邻近微亮（不再变长变粗）
     if (d < bestD) {
       bestD = d;
       best = it;
@@ -367,7 +366,7 @@ function applyMove(): void {
   }
   const hit = best !== null && bestD <= hitR ? best : null;
   if (hit) {
-    setGrow(hit, 1); // 吸附：最近者拉满
+    setGlow(hit, 1); // 吸附：最近者全亮
     if (hoverItem !== hit) {
       if (hoverTimer !== null) {
         window.clearTimeout(hoverTimer);
@@ -429,7 +428,7 @@ export function railAdd(col: HTMLElement, role: 'user' | 'assistant'): void {
     const bar = document.createElement('div');
     bar.className = 'railv3-item' + (role === 'assistant' ? ' is-reply' : '');
     track.appendChild(bar);
-    items.push({ startCol: col, cols: [col], hasReply: role === 'assistant', el: bar, y: 0, w: BASE_W, visible: false, fold: 0 });
+    items.push({ startCol: col, cols: [col], hasReply: role === 'assistant', el: bar, y: 0, visible: false, fold: 0 });
   } else {
     // 合并进最近一轮（一问一答一根条）
     last.cols.push(col);
