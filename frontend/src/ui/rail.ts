@@ -276,16 +276,22 @@ function showCard(it: RailItem): void {
   positionCard(it);
 }
 
-/** 预览卡锚在悬停长条右侧，纵向夹在消息视口内、横向不出主区。 */
+/** 预览锚定（第 18 轮）：必须出现在被 hover 细条的右侧、与该条同一垂直位置——
+ *  top = 条 getBoundingClientRect().top（相对 #main），x = 条右缘 + 8px；
+ *  越界（太靠下）向上收，横向不出主区。流式高度变化时条移动 → railSync →
+ *  layout → syncCard 重新调用本函数，预览跟随该条。 */
 function positionCard(it: RailItem): void {
   if (!card || !mainEl) return;
   const m = mainEl.getBoundingClientRect();
+  const r = it.el.getBoundingClientRect();
   const ch = card.offsetHeight;
-  const lo = Math.min(railTop + 4, Math.max(railTop + 4, railTop + railH - ch - 4));
-  const top = Math.min(Math.max(railTop + 4, railTop + it.y - ch / 2), lo);
+  // 同一垂直位置：按条 top 对齐；越界上下收（默认向上收）
+  let top = r.top - m.top;
+  top = Math.max(railTop + 4, Math.min(top, railTop + railH - ch - 4));
+  // x = 条右缘 + 8px；越界右收进主区
+  const left = Math.min(r.right - m.left + 8, m.width - 288);
   card.style.top = top + 'px';
-  // 第 16 轮：预览贴近细条右侧（宽度固定 BASE_W，不再随 fisheye 位移）
-  card.style.left = Math.min(railX + BASE_W + 8, m.width - 288) + 'px';
+  card.style.left = Math.max(railX + 4, left) + 'px';
 }
 
 /** layout 后同步预览卡（悬停条被重排/隐藏时跟随或关闭）。 */
@@ -300,11 +306,14 @@ function syncCard(): void {
 
 // ---- 交互（fisheye + hover 停留预览 + 点击定位） --------------------------------
 
-/** 第 16 轮取舍：取消 fisheye「邻近变长」——细条宽度固定不变，
- *  邻近度仅作用于透明度微亮（0.35→0.7），命中条由 .is-hover 全亮+描边。 */
-function setGlow(it: RailItem, g: number): void {
-  const o = 0.35 + 0.35 * Math.max(0, Math.min(1, g));
-  it.el.style.opacity = o.toFixed(3);
+/** 第 18 轮：恢复「变长」——水平长度 fisheye（Codex 式：临近者最长、
+ *  两侧按邻近度线性递减），细条高度保持 5px 不变（绝不加粗加高）；
+ *  变长为主、微亮为辅：opacity 0.35→0.7 随同一权重。 */
+function setGrow(it: RailItem, g: number): void {
+  const k = Math.max(0, Math.min(1, g));
+  const w = BASE_W + k * Math.max(0, railW - BASE_W);
+  it.el.style.width = w.toFixed(1) + 'px';
+  it.el.style.opacity = (0.35 + 0.35 * k).toFixed(3);
 }
 
 function clearHover(): void {
@@ -320,7 +329,7 @@ function clearHover(): void {
 /** 离开条带：全部收为细条（CSS transition 平滑回缩）。 */
 function collapse(): void {
   clearHover();
-  for (const it of allItems()) setGlow(it, 0);
+  for (const it of allItems()) setGrow(it, 0);
 }
 
 function onMove(e: PointerEvent): void {
@@ -358,7 +367,7 @@ function applyMove(): void {
   for (const it of allItems()) {
     if (!it.visible) continue;
     const d = Math.abs(y - (railTop + it.y));
-    setGlow(it, 1 - d / RANGE); // 邻近微亮（不再变长变粗）
+    setGrow(it, 1 - d / RANGE); // 变长 fisheye + 微亮（线性衰减，RANGE=160px）
     if (d < bestD) {
       bestD = d;
       best = it;
@@ -366,7 +375,7 @@ function applyMove(): void {
   }
   const hit = best !== null && bestD <= hitR ? best : null;
   if (hit) {
-    setGlow(hit, 1); // 吸附：最近者全亮
+    setGrow(hit, 1); // 吸附：最近者拉满（最长+全亮）
     if (hoverItem !== hit) {
       if (hoverTimer !== null) {
         window.clearTimeout(hoverTimer);

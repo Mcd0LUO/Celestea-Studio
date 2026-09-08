@@ -25,14 +25,15 @@
 .railv3-item {
   position: absolute;
   left: 0;
-  width: 7px;            /* 细条固定宽度：hover/吸附不变长不变粗（第 16 轮） */
-  height: var(--barh, 5px); /* 高度固定：hover 不加高 */
+  width: 7px;            /* 未悬停细条宽（变长由 JS fisheye 覆写） */
+  height: var(--barh, 5px); /* 细高固定 5px：hover/吸附绝不加粗加高（第 18 轮） */
   border-radius: 999px;
   background: var(--c-text-3);
   border: 1px solid transparent;
-  opacity: .5;           /* 邻近微亮由 JS inline opacity 控制（0.35–0.7） */
+  opacity: .5;           /* 微亮由 JS inline opacity 控制（0.35–0.7） */
   pointer-events: none;
-  transition: opacity .15s ease, background .15s ease, border-color .15s ease;
+  transition: width .18s cubic-bezier(.22, 1.4, .36, 1), /* 变长吸附的过冲缓动 */
+              opacity .15s ease, background .15s ease, border-color .15s ease;
 }
 .railv3-item.is-reply {
   background: var(--c-accent);
