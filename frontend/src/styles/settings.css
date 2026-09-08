@@ -16,7 +16,6 @@
 .settings-shell {
   width: min(920px, 100%);
   background: var(--c-surface-raised);
-  border: 1px solid var(--c-border-strong);
   border-radius: 12px;
   display: flex; flex-direction: column;
   box-shadow: var(--shadow-panel);
@@ -25,7 +24,7 @@
 
 .settings-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 16px; border-bottom: 1px solid var(--c-border-subtle);
+  padding: 12px 16px;
   background: var(--c-surface);
 }
 .settings-head h3 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .5px; }
@@ -71,8 +70,7 @@
 .settings-pane.active { display: flex; }
 .settings-pane-head {
   display: flex; align-items: center; gap: 10px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--c-border-subtle);
+  padding: 10px 16px 8px;
 }
 .settings-pane-head h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--c-text-2); }
 .settings-sec-note { font-size: 11.5px; color: var(--c-text-3); font-family: var(--mono); }
@@ -86,11 +84,11 @@
   font-size: 12.5px;
 }
 .tools-table th, .tools-table td {
-  border: 1px solid var(--c-border-subtle);
   padding: 6px 10px;
   text-align: left;
   vertical-align: top;
 }
+.tools-table tbody tr { border-top: 1px solid var(--c-border-subtle); }
 .tools-table th {
   background: var(--c-surface-raised);
   color: var(--c-text-2);
@@ -120,11 +118,11 @@
   font-size: 12.5px;
 }
 .prov-table th, .prov-table td {
-  border: 1px solid var(--c-border-subtle);
   padding: 7px 10px;
   text-align: left;
   vertical-align: middle;
 }
+.prov-table tbody tr { border-top: 1px solid var(--c-border-subtle); }
 .prov-table thead th {
   background: var(--c-surface-raised);
   color: var(--c-text-3);
@@ -154,16 +152,15 @@
 
 /* ---- 默认模型：独立卡片区 ---- */
 .prov-default-card {
-  border: 1px solid var(--c-border-subtle);
   border-radius: 10px;
   background: var(--c-surface-raised);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   margin-top: 16px;
   overflow: hidden;
 }
 .prov-default-head {
   display: flex; align-items: baseline; gap: 10px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--c-border-subtle);
   background: var(--c-surface);
 }
 .prov-default-title { font-size: 12.5px; font-weight: 600; color: var(--c-text-1); }
@@ -209,7 +206,6 @@
 
 .prov-model-row {
   display: flex; align-items: center; gap: 6px;
-  border: 1px solid var(--c-border-subtle);
   border-radius: 8px;
   padding: 6px 8px;
   margin-bottom: 6px;
@@ -252,8 +248,9 @@
   width: 100%; border-collapse: collapse; font-size: 12.5px;
 }
 .prompts-table th, .prompts-table td {
-  border: 1px solid var(--c-border-subtle); padding: 7px 10px; text-align: left; vertical-align: middle;
+  padding: 7px 10px; text-align: left; vertical-align: middle;
 }
+.prompts-table tbody tr { border-top: 1px solid var(--c-border-subtle); }
 .prompts-table thead th {
   background: var(--c-surface-raised); color: var(--c-text-3);
   font-family: var(--mono); font-size: 11px; letter-spacing: .8px; font-weight: 600;
@@ -278,7 +275,7 @@
 /* ---- 编辑弹窗 ---- */
 .prompt-modal { width: min(640px, calc(100vw - 40px)); max-height: 86vh; overflow-y: auto; }
 .prompt-vars {
-  border: 1px solid var(--c-border-subtle); border-radius: 8px;
+  border-radius: 8px;
   background: var(--c-code-bg); margin-bottom: 10px;
 }
 .prompt-vars summary {
@@ -289,13 +286,13 @@
 .prompt-vars summary::before { content: "▸ "; color: var(--c-text-3); }
 .prompt-vars[open] summary::before { content: "▾ "; }
 .prompt-vars-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
-.prompt-vars-table td { border-top: 1px solid var(--c-border-subtle); padding: 3px 10px; }
+.prompt-vars-table td { padding: 3px 10px; }
 .prompt-var-code { font-family: var(--mono); color: var(--c-accent); width: 40%; }
 .prompt-var-desc { color: var(--c-text-2); }
 
 .prompt-secs { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
 .prompt-sec-row {
-  border: 1px solid var(--c-border-subtle); border-radius: 8px;
+  border-radius: 8px;
   background: var(--c-surface); padding: 6px 8px;
 }
 .prompt-sec-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }

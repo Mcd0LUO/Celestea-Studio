@@ -1,6 +1,6 @@
 // ============================================================================
 // Theme / color-card switching: <html data-theme> single attribute.
-// palettes: night (夜航黑灰, default) / sakura (樱花粉亮) / klein (克莱因蓝亮)
+// palettes: night (夜航黑灰, default) / mono (黑白 ins 风)
 // ============================================================================
 
 export interface ThemeDef {
@@ -11,8 +11,7 @@ export interface ThemeDef {
 
 export const THEMES: readonly ThemeDef[] = [
   { id: 'night', label: '夜航', hint: '夜航黑灰 · 近中性暗色' },
-  { id: 'sakura', label: '樱花', hint: '樱花粉 · 亮色' },
-  { id: 'klein', label: '克莱因', hint: '克莱因蓝 · 亮色' },
+  { id: 'mono', label: '黑白', hint: '黑白 ins 风 · 纯灰阶浅色，零彩色点缀' },
 ];
 
 const STORAGE_KEY = 'celestea-studio.theme';
@@ -43,8 +42,7 @@ export function initTheme(defaultId = 'night'): string {
   return id;
 }
 
-/** Wire the topbar switcher: cycles night → sakura → klein.
- *  Also exposes a programmatic switch for future pickers. */
+/** Wire the topbar switcher: cycles night → mono（第 17 轮：仅保留两套）。 */
 export function setupThemeSwitcher(button: HTMLElement): void {
   const themeDef = (): ThemeDef => {
     const cur = currentTheme();

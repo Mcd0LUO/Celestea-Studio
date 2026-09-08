@@ -72,15 +72,14 @@
 .bubble {
   width: fit-content;
   max-width: 72%;
-  border: 1px solid var(--c-border-subtle);
   border-radius: 10px;
   padding: 10px 14px;
   background: var(--c-surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 .msg.user .bubble {
   margin-left: auto; /* 右对齐 */
   background: var(--c-accent);
-  border-color: var(--c-accent);
   color: var(--c-accent-fg);
 }
 .msg.user .bubble .content { color: inherit; }
@@ -90,8 +89,7 @@
   max-width: 86%;
 }
 .msg.tool .bubble { background: var(--c-code-bg); }
-.msg.assistant .bubble.streaming { border-color: var(--c-border-strong); }
-.msg.assistant .bubble.complete { border-color: var(--c-border-subtle); }
+.msg.assistant .bubble.streaming { box-shadow: 0 0 0 1px var(--c-accent-ring); }
 
 /* ---- 思考（默认收起 · 时长徽标；idle=无思考时整块隐藏） ---- */
 .thinking {
@@ -130,7 +128,7 @@
 /* ---- 工具调用卡（默认收起 = summary 一行，点开看参数/结果） ---- */
 .toolcards { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
 .toolcard {
-  border: 1px solid var(--c-border-subtle); border-radius: 8px;
+  border-radius: 8px;
   background: var(--c-code-bg); font-size: 12.5px;
   overflow: hidden;
 }
@@ -179,7 +177,7 @@
   padding: 6px 10px;
   display: flex; flex-direction: column; gap: 6px;
 }
-.tool-details { border: 1px solid var(--c-border-subtle); border-radius: 6px; }
+.tool-details { border-radius: 6px; }
 .tool-details summary {
   cursor: pointer; padding: 4px 10px; font-size: 11.5px;
   color: var(--c-text-3); user-select: none; list-style: none;
@@ -190,11 +188,11 @@
 .tool-details summary:hover { color: var(--c-text-2); }
 .tool-args, .tool-out {
   white-space: pre-wrap; word-break: break-all;
-  padding: 8px 12px; border-top: 1px solid var(--c-border-subtle);
+  padding: 8px 12px;
   color: var(--c-text-2); font-family: var(--mono); font-size: 12px;
   max-height: 260px; overflow-y: auto;
 }
-.tool-out { color: var(--c-text-1); background: var(--c-surface); }
+.tool-out { color: var(--c-text-1); background: var(--c-surface); margin-top: 2px; }
 .tool-out.err-c { color: var(--c-err); }
 
 /* ---- markdown 正文 ---- */
@@ -305,7 +303,6 @@
 .cfg-status.ok { color: var(--c-ok); }
 .cfg-status.err { color: var(--c-err); }
 .cfg-hintline {
-  border-top: 1px solid var(--c-border-subtle);
   margin-top: 10px; padding-top: 8px;
   font-size: 11.5px; color: var(--c-text-3); font-family: var(--mono);
 }
