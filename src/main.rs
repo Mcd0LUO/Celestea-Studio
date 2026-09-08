@@ -367,8 +367,36 @@ pub(crate) fn prepare_gen(pj: Value, api_key: Option<&str>) -> Result<Gen, Strin
 /// old-mailbox recv subscription and rebind onto the new generation's mailbox.
 pub(crate) fn swap_gen(st: &Shared, gen: Gen) -> Value {
     let response = gen.config_json.clone();
-    *st.gen.write().unwrap_or_else(|p| p.into_inner()) = gen;
+    // Replace under the write lock, then — BEFORE the old generation drops
+    // (Runtime::shutdown purges its mailbox) — migrate any pending host
+    // receipts (worker -> cli-main) from the old generation's mailbox onto
+    // the new one, so receipts survive hot swaps (model/session/prompt
+    // changes). Workers still running in the old runtime are shut down with
+    // it; their already-sent receipts must not be lost with them.
+    let old = {
+        let mut guard = st.gen.write().unwrap_or_else(|p| p.into_inner());
+        std::mem::replace(&mut *guard, gen)
+    };
+    let migrated = if let Some(wr) = old.runtime.ctx.get::<WorkerRegistryService>() {
+        let msgs = wr.mailbox().poll("cli-main");
+        let n = msgs.len();
+        if n > 0 {
+            let new_gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+            if let Some(nwr) = new_gen.runtime.ctx.get::<WorkerRegistryService>() {
+                for m in msgs {
+                    nwr.mailbox().send("cli-main", m.content, m.from_label);
+                }
+            }
+        }
+        n
+    } else {
+        0
+    };
+    if migrated > 0 {
+        eprintln!("[celestea-studio] swap_gen: migrated {migrated} pending host receipt(s) to the new generation");
+    }
     let _ = st.gen_epoch.send_modify(|e| *e += 1);
+    drop(old);
     response
 }
 
