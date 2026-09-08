@@ -41,7 +41,8 @@
   font-family: var(--mono); font-size: 10.5px;
 }
 .ws-toolbtn:hover { border-color: var(--c-accent-ring); color: var(--c-text-1); background: var(--c-accent-soft); }
-.ws-divider { height: 1px; background: var(--c-border-subtle); margin: 0 0 8px; }
+/* 第 20 轮：树与工具行之间取消分割线（间距区分） */
+.ws-divider { display: none; }
 
 /* ---- 工作区/会话树 ---- */
 .ws-tree { display: flex; flex-direction: column; gap: 6px; }
@@ -217,9 +218,8 @@
 
 /* ---- 引擎 Worker 组（W239） ---- */
 .ws-worker-group {
-  margin-top: 12px;
-  border-top: 1px solid var(--c-border-subtle);
-  padding-top: 8px;
+  margin-top: 14px; /* 第 20 轮：组间用间距区分，取消分割线 */
+  padding-top: 2px;
 }
 .ws-worker-head {
   display: flex; align-items: center; gap: 8px;
