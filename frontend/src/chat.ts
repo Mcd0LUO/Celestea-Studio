@@ -22,6 +22,7 @@ import {
   applyFinalText,
   assistantHasContent,
   autoscroll,
+  endTurn,
   ensureAssistant,
   finalizeAssistant,
   flushTextSegment,
@@ -48,6 +49,7 @@ const PHASE_LABELS: Record<string, string> = {
 // ---- turn lifecycle ----------------------------------------------------------------
 
 function finalizeTurn(phase: string): void {
+  endTurn(); // 思考段归属随轮次结束清除（跨轮不跨移）
   const wasStreaming = S.streaming;
   S.streaming = false;
   S.turn = null;
@@ -72,6 +74,7 @@ function finalizeTurn(phase: string): void {
 function onStatus(p: StatusPayload): void {
   if (p.phase === 'start') {
     // 新 turn：若上一视图已有内容则收尾；空占位气泡直接复用，避免双块
+    endTurn(); // 新轮开始：思考段归属重置（跨轮不跨移）
     if (S.streaming && S.assistant) {
       if (assistantHasContent(S.assistant)) finalizeTurn('completed');
       else removeAssistant(S.assistant); // 丢弃空占位（含 DOM），本轮重建唯一块

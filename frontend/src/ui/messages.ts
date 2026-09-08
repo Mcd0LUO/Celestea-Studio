@@ -148,7 +148,20 @@ interface ThinkSeg {
 
 let thinkSeg: ThinkSeg | null = null;
 
-/** Append a thinking delta（弱化块：左侧色条 + 浅色底 + 小字；按序独立成段）。 */
+/** 轮次结束/新轮开始：清除思考段归属（跨轮不跨移；DOM 保留在消息流中）。 */
+export function endTurn(): void {
+  thinkSeg = null;
+}
+
+/**
+ * Append a thinking delta（弱化块：左侧色条 + 浅色底 + 小字；独立成段）。
+ * 第 14 轮重排策略：同一轮内思考块永远位于其对应文本块之上——
+ *   上游 reasoning 流可能晚于文本到达：思考段先 append 到流尾，若其紧邻的
+ *   前一个可见段落是同轮文本段（S.assistant.root，含流式未收尾），立即
+ *   insertBefore 局部前移（DOM 移动不重建，无闪烁）；流式文本段继续增长
+ *   时位置不变，思考块保持在其上。紧邻前为工具卡/用户消息/其它 → 不移动
+ *   （保持「按到达顺序」语义）；工具与文本段的先后关系不做任何改动。
+ */
 export function appendThinking(delta: string): void {
   if (!thinkSeg) {
     hideEmptyHint();
@@ -163,6 +176,11 @@ export function appendThinking(delta: string): void {
     msg.appendChild(bubble);
     thinkSeg.root.appendChild(msg);
     MsgsEl.appendChild(thinkSeg.root);
+  }
+  // 重排：紧邻前一个可见段落是同轮文本段 → 移到其上方
+  const prev = thinkSeg.root.previousElementSibling;
+  if (prev && S.assistant && prev === S.assistant.root) {
+    MsgsEl.insertBefore(thinkSeg.root, prev);
   }
   thinkSeg.text += delta || '';
   thinkSeg.body.textContent = thinkSeg.text;
