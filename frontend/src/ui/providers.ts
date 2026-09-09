@@ -246,14 +246,18 @@ interface FormHooks {
 }
 
 function buildPayload(e: EditorRefs): ProviderPayload {
-  const models: ProviderModelSpec[] = e.rows.map((r) => ({
-    id: r.id.value.trim(),
-    name: r.name.value.trim() || r.id.value.trim(),
-    // W258 任务 3：档位片多选 → 数组（后端契约不变）
-    reasoning_efforts: r.efforts.values(),
-    context_window: numOrNull(r.ctx),
-    max_output_tokens: numOrNull(r.maxOut),
-  }));
+  // 未编辑的空行（点了「+ 添加模型」但没填 id/名称）直接跳过，
+  // 否则保存/获取模型会被后端 "each model needs a non-empty id" 拒绝。
+  const models: ProviderModelSpec[] = e.rows
+    .filter((r) => r.id.value.trim() !== '' || r.name.value.trim() !== '')
+    .map((r) => ({
+      id: r.id.value.trim(),
+      name: r.name.value.trim() || r.id.value.trim(),
+      // W258 任务 3：档位片多选 → 数组（后端契约不变）
+      reasoning_efforts: r.efforts.values(),
+      context_window: numOrNull(r.ctx),
+      max_output_tokens: numOrNull(r.maxOut),
+    }));
   const key = e.key.value.trim();
   return {
     id: e.name.value.trim(),
