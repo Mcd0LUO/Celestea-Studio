@@ -8,6 +8,7 @@ import type {
   BatchNamesReq,
   CancelResp,
   ClearResp,
+  CompactResp,
   ConfigInfo,
   FsBrowseResp,
   ConfigPatch,
@@ -123,6 +124,9 @@ export const api = {
   /** 激活会话（W237）：POST /api/sessions/{id}/activate；409=轮次中。 */
   activateSession: (id: string) =>
     postJson<ActivateResp>('/api/sessions/' + encodeURIComponent(id) + '/activate', {}),
+  /** 上下文压缩（W259）：POST /api/sessions/{id}/compact；409=turn 进行中。 */
+  compactSession: (id: string) =>
+    postJson<CompactResp>('/api/sessions/' + encodeURIComponent(id) + '/compact', {}),
   /** 目录浏览（W237）：GET /api/fs/browse?path=（懒加载列目录，只显示目录）。 */
   fsBrowse: (path?: string) =>
     requestJson<FsBrowseResp>('/api/fs/browse' + (path ? '?path=' + encodeURIComponent(path) : '')),

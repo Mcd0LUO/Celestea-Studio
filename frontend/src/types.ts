@@ -18,7 +18,15 @@ export interface SseEnvelope {
 }
 
 /** SSE event names (mirrored from the engine LoopEvent variants). */
-export type SseEventName = 'status' | 'text' | 'thinking' | 'tool' | 'tool_result' | 'done' | 'context';
+export type SseEventName =
+  | 'status'
+  | 'text'
+  | 'thinking'
+  | 'tool'
+  | 'tool_result'
+  | 'done'
+  | 'context'
+  | 'compact';
 
 export type ConnState = 'connecting' | 'online' | 'down';
 
@@ -85,6 +93,14 @@ export interface ContextPayload {
   turn?: number;
   text?: string;
   cls?: string;
+}
+
+/** compact 类事件（W259：/compact 压缩完成；payload 带会话 id）。 */
+export interface CompactPayload {
+  session?: string;
+  kept_turns?: number;
+  note?: string;
+  rebound?: boolean;
 }
 
 // ---- REST -------------------------------------------------------------------
@@ -179,6 +195,16 @@ export interface WorkspacesResp {
 export interface ActivateResp {
   ok?: boolean;
   active_session?: string;
+  error?: string;
+}
+
+/** POST /api/sessions/{id}/compact 响应（W259：三态——压缩/无需压缩/错误）。 */
+export interface CompactResp {
+  ok?: boolean;
+  /** true=已压缩；false=历史不足，无需压缩（note 给出说明）。 */
+  compacted?: boolean;
+  kept_turns?: number;
+  note?: string;
   error?: string;
 }
 

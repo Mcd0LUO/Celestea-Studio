@@ -7,6 +7,7 @@ import { api } from './api';
 import { SseClient } from './sse';
 import type { Statusline } from './statusline';
 import type {
+  CompactPayload,
   DonePayload,
   StatusPayload,
   TextPayload,
@@ -31,8 +32,15 @@ import {
 } from './ui/messages';
 import { applyToolResult, getToolStep, pushToolCard } from './ui/toolcards';
 import { clearInput, initInputBar, setBusy } from './ui/inputbar';
-import { feedAssistantDelta, finalAssistantDedup } from './ui/restore';
 import {
+  feedAssistantDelta,
+  finalAssistantDedup,
+  resolveActiveSession,
+  restoreSessionHistory,
+} from './ui/restore';
+import {
+  cancelStatusFlash,
+  flashStatus,
   setStatus,
   setStatusStep,
   setStatusTurn,
@@ -75,6 +83,7 @@ function onStatus(p: StatusPayload): void {
   if (p.phase === 'start') {
     // 第 23 轮：思考阶段绝不创建 assistant 气泡——只在首个 text delta
     // （onText 内 ensureAssistant）或工具卡需要时才创建；思考期间仅显示思考块。
+    cancelStatusFlash(); // W259：/compact 的短暂提示让位给 turn 状态
     endTurn(); // 新轮开始：思考段归属重置（跨轮不跨移）
     if (S.streaming && S.assistant) {
       // 异常残留（理论上 finalizeTurn 已清）：有内容才收尾，空块直接移除
@@ -232,8 +241,78 @@ export function connectSse(statusline: Statusline): SseClient {
       console.warn('SSE context', err);
     }
   });
+  sse.on('compact', (p) => {
+    try {
+      onCompact(p);
+    } catch (err) {
+      console.warn('SSE compact', err);
+    }
+  });
   sse.connect();
   return sse;
+}
+
+// ---- W259 /compact -------------------------------------------------------------
+
+/** 压缩请求进行中（防连点）。 */
+let compacting = false;
+/** 本地刚压缩过的时间戳：吞掉同一动作回环回来的 compact SSE，避免重复重载。 */
+let localCompactAt = 0;
+const LOCAL_COMPACT_DEDUP_MS = 5_000;
+
+/**
+ * 收到 compact SSE（本客户端或其它客户端触发的压缩）：
+ *   - turn 进行中不打断；
+ *   - 只对当前活跃会话重载消息区，其它会话不打扰。
+ */
+function onCompact(p: CompactPayload): void {
+  if (S.streaming) return;
+  if (Date.now() - localCompactAt < LOCAL_COMPACT_DEDUP_MS) return; // 本地已处理
+  void (async () => {
+    const id = await resolveActiveSession();
+    if (id === null) return;
+    if (p.session && p.session !== id) return;
+    await restoreSessionHistory(id);
+    flashStatus(p.note || '上下文已压缩', 'ok');
+  })();
+}
+
+/**
+ * `/compact` 命令流程（W259）：
+ *   - 仅当输入整体 trim 后精确等于 "/compact" 时触发——命令被消费（清空输入框），
+ *     但绝不写入用户气泡、绝不 POST /api/turn，因此不产生普通 turn；
+ *   - 三态提示（成功 / 无需压缩 / 错误）走状态栏短暂提示，不打断当前视图；
+ *   - 成功后重载消息区（复用 restoreSessionHistory 的离屏双缓冲替换）。
+ *   - 409（turn 进行中）/500（摘要失败）只提示错误，不改任何本地状态。
+ */
+async function runCompact(): Promise<void> {
+  if (compacting) return;
+  compacting = true;
+  clearInput(); // 命令消费：输入框清空，但不当普通消息发送
+  try {
+    const id = await resolveActiveSession();
+    if (id === null) {
+      flashStatus('压缩失败：未找到活跃会话', 'err', 8000);
+      return;
+    }
+    setStatus('压缩中…', 'busy');
+    const r = await api.compactSession(id);
+    if (r.compacted === false) {
+      flashStatus(r.note || '历史不足，无需压缩', 'ok');
+      return;
+    }
+    localCompactAt = Date.now();
+    flashStatus(r.note || '已压缩：摘要轮 + 最近4轮', 'ok');
+    await restoreSessionHistory(id); // 消息区 reload
+  } catch (err) {
+    flashStatus(
+      '压缩失败：' + (err instanceof Error ? err.message : String(err)),
+      'err',
+      8_000,
+    );
+  } finally {
+    compacting = false;
+  }
 }
 
 // ---- send / cancel -------------------------------------------------------------
@@ -242,7 +321,13 @@ export function initChat(): void {
   initInputBar({
     send(text) {
       const t = text.trim();
-      if (!t || S.streaming) return;
+      if (!t) return;
+      // W259：/compact 是命令而非消息——走压缩流程，不进普通发送路径
+      if (t === '/compact') {
+        void runCompact();
+        return;
+      }
+      if (S.streaming) return;
       addUserMessage(t);
       clearInput();
       S.streaming = true;

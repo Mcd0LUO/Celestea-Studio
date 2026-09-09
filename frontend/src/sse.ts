@@ -5,6 +5,7 @@
 // Each event: {"turn":N,"seq":M,"payload":{...}, ...}
 // ============================================================================
 import type {
+  CompactPayload,
   ConnState,
   ContextPayload,
   DonePayload,
@@ -25,6 +26,7 @@ export interface SseHandlerMap {
   tool_result: (p: ToolResultPayload) => void;
   done: (p: DonePayload) => void;
   context: (p: ContextPayload) => void;
+  compact: (p: CompactPayload) => void;
 }
 
 export type SseHandler<K extends SseEventName> = SseHandlerMap[K];
@@ -37,6 +39,7 @@ const EVENT_NAMES: readonly SseEventName[] = [
   'tool_result',
   'done',
   'context',
+  'compact',
 ];
 
 export class SseClient {

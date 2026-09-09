@@ -64,6 +64,8 @@ mod providers;
 /// W237: workspace registry (workspaces.json) + per-session directories
 /// over CELESTEA_SESSION_DIR.
 mod workspaces;
+/// W259: /compact —— 上下文压缩（摘要轮 + 最近 K 轮重写 cli-main.jsonl + 引擎重绑）。
+mod compact;
 /// W245: section-level prompt registry + compose-time assembly (plan B).
 mod prompts;
 /// W245: base default prompt = the builtin sections rendered in order
@@ -193,9 +195,9 @@ pub(crate) fn profile_to_json(profile: &Profile) -> Value {
 
 /// One turn-level event on the broadcast bus; kind is the SSE event name.
 #[derive(Clone, Debug)]
-struct BusEvent {
-    kind: &'static str,
-    data: Value,
+pub(crate) struct BusEvent {
+    pub(crate) kind: &'static str,
+    pub(crate) data: Value,
 }
 
 /// W218 statusline tracker: event-counted steps plus a sliding-window
@@ -516,7 +518,7 @@ fn estimated_context_chars(events: &[SessionEvent]) -> u64 {
 struct TurnReq {
     input: String,
 }
-fn emit(
+pub(crate) fn emit(
     bcast: &broadcast::Sender<BusEvent>,
     seq: &AtomicU64,
     turn: u64,
@@ -1225,6 +1227,8 @@ async fn main() {
         .route("/api/sessions/{id}/activate", post(workspaces::post_session_activate))
         .route("/api/sessions/{id}/rename", post(workspaces::post_session_rename))
         .route("/api/sessions/{id}/branch", post(workspaces::post_session_branch))
+        // W259: /compact —— 上下文压缩（409 = turn 进行中）
+        .route("/api/sessions/{id}/compact", post(compact::post_session_compact))
         .route("/api/sessions/{id}/archive", post(workspaces::post_session_archive))
         .route("/api/sessions/{id}/unarchive", post(workspaces::post_session_unarchive))
         .route("/api/sessions/batch-archive", post(workspaces::post_sessions_batch_archive))
