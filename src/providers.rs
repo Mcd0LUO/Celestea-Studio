@@ -30,7 +30,7 @@ use axum::extract::{Path as AxPath, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use celestea_runtime::Profile;
+use celestea_runtime::{resolve_api_key, Profile};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -387,7 +387,9 @@ fn provider_from_req(store: &ProvidersStore, req: &ProviderReq) -> Result<Provid
 
 /// GET {base_url}/models (OpenAI-style, Authorization: Bearer <key>) with an
 /// ~8s total timeout. Returns (latency_ms, model ids). Error strings never
-/// carry the key (the header value is not echoed anywhere).
+/// carry the key (the header value is not echoed anywhere). W257: an empty key
+/// sends NO Authorization header at all — the transport stays neutral; whether
+/// a keyless probe is allowed is the caller's decision, not this function's.
 pub(crate) async fn probe_models(
     base_url: &str,
     api_key: &str,
@@ -399,9 +401,12 @@ pub(crate) async fn probe_models(
         .build()
         .map_err(|e| format!("http client init failed: {e}"))?;
     let start = Instant::now();
-    let resp = client
-        .get(&url)
-        .bearer_auth(api_key)
+    let mut request = client.get(&url);
+    let key = api_key.trim();
+    if !key.is_empty() {
+        request = request.bearer_auth(key);
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| format!("GET {url} failed: {e}"))?;
@@ -505,10 +510,46 @@ fn candidate_from_test_req(
     })
 }
 
+/// W257: identity form of a base_url for the "is this the engine's own
+/// gateway?" comparison: trimmed with trailing '/'s dropped, so
+/// "http://127.0.0.1:3001/v1" == "http://127.0.0.1:3001/v1/".
+fn base_url_identity(base_url: &str) -> &str {
+    base_url.trim().trim_end_matches('/')
+}
+
+/// W257: the engine's own key, offered ONLY to a provider record whose
+/// (normalized) base_url equals the live generation's base_url — i.e. the
+/// keyless record points back at the gateway this process is already using.
+/// The key comes from the engine's own channel (env[api_key_env], then
+/// api_key_file) and is request-scoped: it is never written to providers.json,
+/// never returned, and never logged. None = not the engine's origin, or the
+/// engine has no key of its own.
+fn engine_self_key(st: &Shared, base_url: &str) -> Option<String> {
+    let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+    if base_url_identity(base_url) != base_url_identity(&gen.base_url) {
+        return None;
+    }
+    resolve_api_key(&gen.profile)
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+}
+
+/// W257: the key a probe should authenticate with: the provider's stored key
+/// when it has one, otherwise the engine's own key for a self-origin record
+/// (the keyless gateway row). None -> the contract's missing-key error.
+fn probe_key(st: &Shared, candidate: &Provider) -> Option<String> {
+    if let Some(k) = candidate.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        return Some(k.to_string());
+    }
+    engine_self_key(st, &candidate.base_url)
+}
+
 /// Shared probe for POST /api/providers/test and .../models/fetch: the
 /// contract's unsupported-format error for non-chat_completions, missing-key
 /// error otherwise, then the real GET {base_url}/models.
 async fn run_probe(
+    st: &Shared,
     candidate: &Provider,
 ) -> (StatusCode, Json<Value>) {
     if candidate.request_format != ENGINE_FORMAT {
@@ -519,13 +560,13 @@ async fn run_probe(
             Json(json!({"ok": false, "error": "该请求格式暂不支持自动测试"})),
         );
     }
-    let Some(key) = candidate.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) else {
+    let Some(key) = probe_key(st, candidate) else {
         return (
             StatusCode::OK,
             Json(json!({"ok": false, "error": "该提供商未配置 api_key"})),
         );
     };
-    match probe_models(&candidate.base_url, key).await {
+    match probe_models(&candidate.base_url, &key).await {
         Ok((latency, ids)) => (
             StatusCode::OK,
             Json(json!({"ok": true, "latency_ms": latency, "model_count": ids.len()})),
@@ -685,7 +726,7 @@ pub(crate) async fn post_provider_test(
                 .into_response()
         }
     };
-    run_probe(&candidate).await.into_response()
+    run_probe(&st, &candidate).await.into_response()
 }
 
 /// POST /api/providers/{id}/models/fetch — same probe for a stored provider,
@@ -708,14 +749,16 @@ pub(crate) async fn post_models_fetch(
         )
             .into_response();
     }
-    let Some(key) = provider.api_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) else {
+    // W257: a keyless record that points at THIS engine's own gateway probes
+    // with the engine's key (request-scoped; never persisted into the store).
+    let Some(key) = probe_key(&st, &provider) else {
         return (
             StatusCode::OK,
             Json(json!({"ok": false, "error": "该提供商未配置 api_key"})),
         )
             .into_response();
     };
-    match probe_models(&provider.base_url, key).await {
+    match probe_models(&provider.base_url, &key).await {
         Ok((_, ids)) => (
             StatusCode::OK,
             Json(json!({"ok": true, "models": ids.iter().map(|id| json!({"id": id})).collect::<Vec<Value>>()})),
@@ -1021,5 +1064,247 @@ mod tests {
         assert!(validate_base_url("https://api.example.com").is_ok());
         assert!(validate_base_url("127.0.0.1:3001").is_err());
         assert!(validate_base_url("").is_err());
+    }
+
+    // ---- W257: keyless self-origin (own gateway) probe -------------------------
+
+    /// W257: the Authorization header a mock upstream observed (std mutex so
+    /// assertions stay synchronous).
+    type SeenAuth = Arc<std::sync::Mutex<Option<String>>>;
+
+    /// W257: minimal one-shot HTTP/1.1 upstream. Records the Authorization
+    /// header it received (None when absent) and answers a fixed JSON body.
+    async fn mock_models_upstream(
+        body: &'static str,
+    ) -> (String, SeenAuth, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: SeenAuth = Arc::new(std::sync::Mutex::new(None));
+        let seen_task = seen.clone();
+        let handle = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).to_string();
+                let auth = head
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+                    .map(|l| l.splitn(2, ':').nth(1).unwrap_or("").trim().to_string());
+                *seen_task.lock().unwrap() = auth;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://{addr}/v1"), seen, handle)
+    }
+
+    /// W257: AppState whose live generation is the engine at `engine_base`,
+    /// holding its own key in env[key_env].
+    fn probe_state(dir: &Path, engine_base: &str, key_env: &str) -> Shared {
+        std::env::set_var(key_env, "sk-engine-self");
+        let sess = dir.join("sessions");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::env::set_var("CELESTEA_SESSION_DIR", &sess);
+        let profile = Profile {
+            model: "gateway-model".to_string(),
+            base_url: Some(engine_base.to_string()),
+            api_key_env: key_env.to_string(),
+            ..Profile::default()
+        };
+        let gen = build_gen(profile).unwrap();
+        Arc::new(AppState {
+            gen: RwLock::new(gen),
+            bcast: broadcast::channel(4).0,
+            busy: Arc::new(Mutex::new(None)),
+            next_turn: Arc::new(AtomicU64::new(1)),
+            seq: Arc::new(AtomicU64::new(0)),
+            status: StatusTracker::new(),
+            providers: Arc::new(ProvidersStore::open(dir.join("providers.json")).unwrap()),
+            workspaces: Arc::new(crate::workspaces::WorkspaceRegistry::new(
+                dir.join("workspaces.json"),
+            )),
+            gen_epoch: tokio::sync::watch::channel(0).0,
+        })
+    }
+
+    async fn response_parts(res: axum::response::Response) -> (StatusCode, Value) {
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+            .await
+            .expect("response body");
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[test]
+    fn base_url_identity_drops_trailing_slashes_and_whitespace() {
+        assert_eq!(base_url_identity("http://127.0.0.1:3001/v1/"), "http://127.0.0.1:3001/v1");
+        assert_eq!(
+            base_url_identity("  http://127.0.0.1:3001/v1///  "),
+            base_url_identity("http://127.0.0.1:3001/v1")
+        );
+        assert_ne!(
+            base_url_identity("http://127.0.0.1:3001/v1"),
+            base_url_identity("http://127.0.0.1:3002/v1")
+        );
+    }
+
+    /// W257 acceptance: a keyless stored record whose base_url is the engine's
+    /// own gateway really probes upstream with the engine's key (request-scoped,
+    /// never persisted, never echoed).
+    #[tokio::test]
+    async fn keyless_self_origin_record_probes_with_engine_key() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let body = r#"{"data":[{"id":"glm-5.2"},{"id":"deepseek-v4-pro"}]}"#;
+        let (base, seen, server) = mock_models_upstream(body).await;
+        let dir = scratch("self-origin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = probe_state(&dir, &base, "W257_SELF_KEY");
+
+        // stored gateway record: NO key, trailing slash on the stored URL.
+        let mut p = provider("Celestea 网关", "m1", None);
+        p.base_url = format!("{base}/");
+        st.providers.upsert(p).unwrap();
+
+        let (status, v) = response_parts(
+            post_models_fetch(State(st.clone()), AxPath("Celestea 网关".to_string()))
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["ok"], json!(true), "keyless own-gateway record must probe: {v}");
+        assert_eq!(
+            v["models"],
+            json!([{"id": "glm-5.2"}, {"id": "deepseek-v4-pro"}]),
+            "model list from upstream"
+        );
+        assert!(!v.to_string().contains("sk-engine-self"), "key leaked: {v}");
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some("Bearer sk-engine-self"),
+            "probe must authenticate with the ENGINE's own key"
+        );
+
+        // request-scoped only: providers.json still carries no key
+        let disk = std::fs::read_to_string(dir.join("providers.json")).unwrap();
+        assert!(!disk.contains("sk-engine-self"), "engine key persisted: {disk}");
+        assert_eq!(st.providers.get("Celestea 网关").unwrap().api_key, None);
+
+        server.abort();
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::remove_var("W257_SELF_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W257 acceptance: the same keyless record also works through the shared
+    /// /api/providers/test probe (run_probe).
+    #[tokio::test]
+    async fn keyless_self_origin_record_probes_through_shared_run_probe() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let (base, seen, server) = mock_models_upstream(r#"{"data":[{"id":"m1"},{"id":"m2"}]}"#).await;
+        let dir = scratch("self-origin-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = probe_state(&dir, &base, "W257_SELF_KEY2");
+        let mut p = provider("gw", "m1", None);
+        p.base_url = base.clone();
+
+        let (status, Json(v)) = run_probe(&st, &p).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["ok"], json!(true), "{v:?}");
+        assert_eq!(v["model_count"], json!(2));
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("Bearer sk-engine-self"));
+
+        server.abort();
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::remove_var("W257_SELF_KEY2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W257: a keyless record for a DIFFERENT host keeps the contract error,
+    /// and nothing is sent upstream.
+    #[tokio::test]
+    async fn keyless_foreign_record_keeps_missing_key_error() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("foreign");
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = probe_state(&dir, "http://127.0.0.1:3001/v1", "W257_FOREIGN_KEY");
+        let mut p = provider("other", "m1", None);
+        p.base_url = "http://127.0.0.1:9/v1".to_string();
+        st.providers.upsert(p).unwrap();
+
+        let (status, v) = response_parts(
+            post_models_fetch(State(st.clone()), AxPath("other".to_string()))
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(v["ok"], json!(false));
+        assert_eq!(v["error"], json!("该提供商未配置 api_key"));
+
+        // shared probe gate identical
+        let candidate = st.providers.get("other").unwrap();
+        let (_, Json(v2)) = run_probe(&st, &candidate).await;
+        assert_eq!(v2["error"], json!("该提供商未配置 api_key"));
+
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::remove_var("W257_FOREIGN_KEY");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W257: own-origin record but the ENGINE has no key either -> contract error.
+    #[tokio::test]
+    async fn self_origin_record_without_engine_key_keeps_error() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("self-nokey");
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = probe_state(&dir, "http://127.0.0.1:3001/v1", "W257_NOKEY");
+        std::env::remove_var("W257_NOKEY"); // engine key channel empty
+
+        let mut p = provider("gw", "m1", None);
+        p.base_url = "http://127.0.0.1:3001/v1/".to_string(); // normalized match
+        let (_, Json(v)) = run_probe(&st, &p).await;
+        assert_eq!(v["ok"], json!(false));
+        assert_eq!(v["error"], json!("该提供商未配置 api_key"));
+
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W257: probe_models itself is header-neutral — empty key = no
+    /// Authorization header, non-empty key = Bearer header.
+    #[tokio::test]
+    async fn probe_models_sends_authorization_only_with_a_key() {
+        let (base, seen, server) = mock_models_upstream(r#"{"data":[{"id":"m1"}]}"#).await;
+        let (_, ids) = probe_models(&base, "").await.unwrap();
+        assert_eq!(ids, vec!["m1".to_string()]);
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            None,
+            "empty key must not send an Authorization header"
+        );
+        server.abort();
+
+        let (base2, seen2, server2) = mock_models_upstream(r#"{"models":[{"id":"m2"}]}"#).await;
+        let (_, ids2) = probe_models(&base2, "sk-x").await.unwrap();
+        assert_eq!(ids2, vec!["m2".to_string()], "models[] shape also parsed");
+        assert_eq!(seen2.lock().unwrap().as_deref(), Some("Bearer sk-x"));
+        server2.abort();
     }
 }
