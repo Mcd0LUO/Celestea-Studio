@@ -9,6 +9,9 @@
 //   保存成功/取消后收起并局部刷新该行数据（不整表重建）。
 //   POST /api/providers（upsert）· /test · /{id}/models/fetch · /{id}/delete
 //   POST /api/providers/default（默认模型选择器，切换即热应用）
+//   W261：单模型「推理强度」固定片（low/high/max）右侧「+」按钮 → 行内输入框
+//   新增自定义档位（Enter/失焦确认、Esc 取消、重名去重提示）；自定义片与固定片
+//   同 class 同行为，存量非标准档位也以选中片呈现于「+」左侧。
 // ============================================================================
 import { api } from '../api';
 import { el, need } from '../utils/dom';
@@ -29,13 +32,17 @@ const FORMATS: readonly { value: string; label: string }[] = [
   { value: 'anthropic_messages', label: 'Anthropic Messages' },
 ];
 
-/** 推理强度档位（W258 任务 3）：与后端 available.efforts 一致。 */
+/**
+ * 推理强度固定档位（W258 任务 3）：与后端 available.efforts 一致。
+ * W261：「+」按钮可再追加自定义档位（如 xhigh/ultra），后端 reasoning_efforts 为自由字符串。
+ */
 const EFFORT_TIERS: readonly string[] = ['low', 'high', 'max'];
 
 /** 可点击多选档位片（toggle chips）：选中只切 class，不重建 DOM（铁律 4/8）。 */
 interface EffortChips {
   root: HTMLElement;
-  /** 回填选中态：未知档位（如历史数据里的 medium）自动补一片，保证往返不丢数据。 */
+  /** 回填选中态：非固定档位（存量 xhigh / 历史 medium）自动补一片并插在「+」左侧，
+   *  保证往返不丢数据、不被吞掉。 */
   set(values: readonly string[]): void;
   /** 当前选中档位（EFFORT_TIERS 顺序在前，非标准档位排后）。 */
   values(): string[];
@@ -204,7 +211,7 @@ export async function loadProviders(): Promise<void> {
 interface ModelRow {
   id: HTMLInputElement;
   name: HTMLInputElement;
-  /** W258 任务 3：推理强度 = 可点击档位片（low/high/max，可多选） */
+  /** W258 任务 3 / W261：推理强度 = 可点击档位片（low/high/max + 自定义，可多选） */
   efforts: EffortChips;
   ctx: HTMLInputElement;
   maxOut: HTMLInputElement;
@@ -293,43 +300,131 @@ function addModelRow(e: EditorRefs, id = '', name = ''): void {
   const adv = el('div', 'prov-model-adv-body');
   // W258 任务 3：推理强度改为可点击档位片（多选）；点击只切 class + aria-pressed，
   // 不重建 DOM（铁律 4/8），点完通知内联面板重算 max-height。
+  // W261：固定片右侧加「+」按钮 → 行内输入框新增自定义档位（如 xhigh）；
+  // 自定义片与固定片同 class、同切换行为，values() 一并返回。
   const selected = new Set<string>();
-  const chipByValue = new Map<string, HTMLButtonElement>();
+  /** 归一化 key：忽略大小写与所有空白，仅用于去重（展示值保留用户输入）。 */
+  const effortKey = (v: string): string => v.replace(/\s+/g, '').toLowerCase();
+  /** 归一化 key → 档位片（Map 插入顺序 = 展示顺序）。 */
+  const chipByKey = new Map<string, HTMLButtonElement>();
   const chipsRoot = el('div', 'prov-effort-chips');
-  const addChip = (value: string): void => {
+  // 「+」按钮与内联输入框：永远排在所有档位片之后；新增片一律插到「+」左侧
+  const plusBtn = el('button', 'btn-mini', '+') as HTMLButtonElement;
+  plusBtn.type = 'button';
+  plusBtn.title = '添加自定义推理档位（如 xhigh）';
+  const tierInput = el('input', 'cfg-input') as HTMLInputElement;
+  tierInput.placeholder = '自定义档位名（如 xhigh）';
+  tierInput.hidden = true;
+  // 尺寸用内联样式：本任务提交范围仅本文件，不改 settings.css（避免全宽输入框撑满一行）
+  tierInput.style.width = '170px';
+  tierInput.style.flex = '0 0 auto';
+  // 重复档位提示：行内小字（复用既有 cfg-hint 样式），不占用表单状态区
+  const dupHint = el('span', 'cfg-hint');
+  dupHint.hidden = true;
+  chipsRoot.appendChild(plusBtn);
+  chipsRoot.appendChild(tierInput);
+  chipsRoot.appendChild(dupHint);
+
+  /** 只切 class / aria-pressed 与选中集，不重建节点（铁律 4）。 */
+  const setChipOn = (b: HTMLButtonElement, on: boolean): void => {
+    const v = b.dataset.effort ?? '';
+    if (on) selected.add(v);
+    else selected.delete(v);
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  };
+
+  /** 建一枚档位片并插到「+」左侧；同名（忽略大小写/空白）已存在则忽略。 */
+  const addChip = (value: string, on = false): void => {
+    const key = effortKey(value);
+    if (key === '' || chipByKey.has(key)) return;
     const b = el('button', 'prov-effort-chip', value) as HTMLButtonElement;
     b.type = 'button';
     b.dataset.effort = value;
-    b.setAttribute('aria-pressed', 'false');
     b.addEventListener('click', () => {
-      const on = selected.has(value);
-      if (on) selected.delete(value);
-      else selected.add(value);
-      b.classList.toggle('on', !on);
-      b.setAttribute('aria-pressed', on ? 'false' : 'true');
+      setChipOn(b, !selected.has(b.dataset.effort ?? ''));
       e.onLayout?.();
     });
-    chipByValue.set(value, b);
-    chipsRoot.appendChild(b);
+    chipByKey.set(key, b);
+    chipsRoot.insertBefore(b, plusBtn);
+    setChipOn(b, on);
   };
+
+  const setHint = (text: string): void => {
+    dupHint.textContent = text;
+    dupHint.hidden = text === '';
+  };
+
+  /** 收起内联输入框：commit=true（Enter/失焦）按内容新增；false（Esc）不添加。 */
+  const closeTierInput = (commit: boolean): void => {
+    if (tierInput.hidden) return;
+    const raw = tierInput.value;
+    tierInput.value = '';
+    tierInput.hidden = true; // 先收起：随后的 blur 由本函数的 hidden 守卫吞掉
+    plusBtn.hidden = false;
+    if (commit) {
+      const value = raw.trim();
+      if (value !== '') {
+        if (chipByKey.has(effortKey(value))) {
+          setHint('档位已存在：' + value); // 轻微提示，不重复添加
+        } else {
+          setHint('');
+          addChip(value, true); // 新增片默认选中
+        }
+      }
+    }
+    e.onLayout?.(); // 高度变化：通知内联面板重算 max-height（铁律 5）
+  };
+
+  plusBtn.addEventListener('click', () => {
+    if (!tierInput.hidden) return;
+    setHint('');
+    tierInput.value = '';
+    tierInput.hidden = false;
+    plusBtn.hidden = true;
+    e.onLayout?.();
+    tierInput.focus();
+  });
+  tierInput.addEventListener('keydown', (ev: KeyboardEvent) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      closeTierInput(true);
+    } else if (ev.key === 'Escape') {
+      // 只收起输入框，不冒泡到全局浮层 Esc 栈（避免顺手把弹窗也关掉）
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeTierInput(false);
+    }
+  });
+  tierInput.addEventListener('blur', () => closeTierInput(true));
+
   for (const tier of EFFORT_TIERS) addChip(tier);
   const chips: EffortChips = {
     root: chipsRoot,
     set(values: readonly string[]): void {
-      const want = new Set(values.map((v) => v.trim()).filter(Boolean));
-      for (const v of want) if (!chipByValue.has(v)) addChip(v); // 非标准档位补片保留
-      selected.clear();
-      for (const [v, b] of chipByValue) {
-        const on = want.has(v);
-        if (on) selected.add(v);
-        b.classList.toggle('on', on);
-        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      // 归一化去重后回填：非标准档位（存量 xhigh / 历史 medium 等）补片保留，
+      // 补出的片同样插在「+」左侧，绝不被吞掉。
+      const want = new Map<string, string>(); // key → 展示值
+      for (const raw of values) {
+        const v = raw.trim();
+        if (v === '') continue;
+        const k = effortKey(v);
+        if (!want.has(k)) want.set(k, v);
       }
+      for (const [k, v] of want) if (!chipByKey.has(k)) addChip(v);
+      selected.clear();
+      for (const [k, b] of chipByKey) setChipOn(b, want.has(k));
     },
     values(): string[] {
       const out: string[] = [];
-      for (const t of EFFORT_TIERS) if (selected.has(t)) out.push(t);
-      for (const v of selected) if (!EFFORT_TIERS.includes(v)) out.push(v);
+      for (const t of EFFORT_TIERS) {
+        const v = chipByKey.get(effortKey(t))?.dataset.effort;
+        if (v !== undefined && selected.has(v)) out.push(v);
+      }
+      for (const b of chipByKey.values()) {
+        const v = b.dataset.effort ?? '';
+        if (v !== '' && !EFFORT_TIERS.includes(v) && selected.has(v)) out.push(v);
+      }
       return out;
     },
   };
