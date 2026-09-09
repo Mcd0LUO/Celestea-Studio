@@ -72,6 +72,7 @@ export function resetMessages(): void {
   S.assistant = null;
   S.turn = null;
   thinkSeg = null;
+  lastTextCol = null;
   resetToolCards(); // 工具卡片（消息流级条目）复位
   railReset(); // 消息 rail 复位
   renderEmptyHint();
@@ -147,20 +148,25 @@ interface ThinkSeg {
 }
 
 let thinkSeg: ThinkSeg | null = null;
+/**
+ * 同轮最近文本段（含已被工具事件截断收尾的）：thinking 重排的目标锚点。
+ * 工具截断场景下 S.assistant 已置空，但思考块仍须位于对应文本块上方。
+ */
+let lastTextCol: HTMLElement | null = null;
 
-/** 轮次结束/新轮开始：清除思考段归属（跨轮不跨移；DOM 保留在消息流中）。 */
+/** 轮次结束/新轮开始：清除思考段归属与文本段锚点（跨轮不跨移；DOM 保留）。 */
 export function endTurn(): void {
   thinkSeg = null;
+  lastTextCol = null;
 }
 
-/**
- * Append a thinking delta（弱化块：左侧色条 + 浅色底 + 小字；独立成段）。
- * 第 14 轮重排策略：同一轮内思考块永远位于其对应文本块之上——
- *   上游 reasoning 流可能晚于文本到达：思考段先 append 到流尾，若其紧邻的
- *   前一个可见段落是同轮文本段（S.assistant.root，含流式未收尾），立即
- *   insertBefore 局部前移（DOM 移动不重建，无闪烁）；流式文本段继续增长
- *   时位置不变，思考块保持在其上。紧邻前为工具卡/用户消息/其它 → 不移动
- *   （保持「按到达顺序」语义）；工具与文本段的先后关系不做任何改动。
+/** Append a thinking delta（弱化块：左侧色条 + 浅色底 + 小字；独立成段）。
+ * 第 22 轮重排规则收紧（任何到达顺序下成立）：
+ *   思考块的目标位置 = 同轮最近文本块的正上方（紧贴）。目标 = 当前流式
+ *   文本段（S.assistant.root）若存在，否则为 lastTextCol（同轮最近、含被
+ *   tool 截断收尾的文本段）。若思考块当前位于目标之后（无论中间隔着
+ *   工具卡/信息块等任何段落）→ insertBefore 局部前移到目标正上方；
+ *   已在目标之前 → 不动。跨轮：endTurn() 清 thinkSeg/lastTextCol，绝不串位。
  */
 export function appendThinking(delta: string): void {
   if (!thinkSeg) {
@@ -177,10 +183,11 @@ export function appendThinking(delta: string): void {
     thinkSeg.root.appendChild(msg);
     MsgsEl.appendChild(thinkSeg.root);
   }
-  // 重排：紧邻前一个可见段落是同轮文本段 → 移到其上方
-  const prev = thinkSeg.root.previousElementSibling;
-  if (prev && S.assistant && prev === S.assistant.root) {
-    MsgsEl.insertBefore(thinkSeg.root, prev);
+  // 重排：目标 = 当前文本段 ?? 同轮最近文本段（含 tool 截断收尾的）
+  const target = S.assistant?.root ?? lastTextCol;
+  if (target && thinkSeg.root.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING) {
+    // 思考块位于目标之后（中间可隔工具卡等）→ 紧贴目标上方
+    MsgsEl.insertBefore(thinkSeg.root, target);
   }
   thinkSeg.text += delta || '';
   thinkSeg.body.textContent = thinkSeg.text;
@@ -266,6 +273,7 @@ export function ensureAssistant(container: HTMLElement = MsgsEl): AssistantView 
     ops: new Map(),
     steps: 0,
   };
+  lastTextCol = col; // 同轮最近文本段（thinking 重排锚点）
   S.assistant = view;
   autoscroll(true);
   return view;

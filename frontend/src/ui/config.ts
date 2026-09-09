@@ -7,8 +7,8 @@
 import { api, ApiError } from '../api';
 import { el, need } from '../utils/dom';
 import type { ConfigInfo, ConfigPatch } from '../types';
-import { initToolsSection, loadToolsSection } from './tools';
-import { clearCurrentSession, loadTreeInto as loadSessionTree } from './sessions';
+import { loadToolsSection } from './tools';
+import { loadTreeInto as loadSessionTree } from './sessions';
 import { initProvidersSection, loadProviders } from './providers';
 import { initPromptsSection, loadPrompts } from './prompts';
 
@@ -301,19 +301,9 @@ export function initSettingsPage(): void {
   for (const n of PANES) {
     navEl(n).addEventListener('click', () => showPane(n));
   }
-  need<HTMLButtonElement>('#btnReloadSessionsSettings').addEventListener('click', () => {
-    void loadSessionTree(
-      need<HTMLElement>('#settingsSessions'),
-      need<HTMLElement>('#settingsSessionCount'),
-    );
-  });
-  need<HTMLButtonElement>('#btnClearSessSettings').addEventListener('click', () => {
-    clearCurrentSession();
-  });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !page.classList.contains('hidden')) closeSettings();
   });
-  initToolsSection(); // #btnReloadTools
   initProvidersSection(); // #btnAddProvider
   initPromptsSection(); // #btnNewPrompt + scope 切换
 }

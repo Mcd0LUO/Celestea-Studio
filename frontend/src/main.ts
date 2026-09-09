@@ -20,7 +20,8 @@ import { setStatus } from './ui/statusbar';
 import { initSettingsPage } from './ui/config';
 import { initSessionsPanel } from './ui/sessions';
 import { restoreActiveHistory } from './ui/restore';
-import { initRail } from './ui/rail'; // 灵动选择条 v3（W238 重做）
+import { initRail } from './ui/rail';
+import { APP_VERSION, BUILD_TIME } from './version'; // 灵动选择条 v3（W238 重做）
 import { initSidebar } from './ui/sidebar';
 import { Statusline } from './statusline';
 import { S } from './state';
@@ -60,7 +61,14 @@ function init(): void {
   // 5) 「通用设置」页（取代原 #modal 弹层；热调 + 工具列表；保存成功后刷新健康信息）
   initSettingsPage();
 
-  // 6) 灵动选择条 v3（锚定左侧留白带、不贴消息列）+ 聊天主循环 + 启动恢复 + SSE
+  // 6) 版本标识（原「v2 · TS」位置，第 22 轮改为构建版本）
+  const verEl = document.getElementById('brandVersion');
+  if (verEl) {
+    verEl.textContent = 'Studio v' + APP_VERSION;
+    verEl.title = 'Celestea Studio 前端 · 构建于 ' + BUILD_TIME;
+  }
+
+  // 7) 消息 rail（左侧灵动长条）+ 聊天主循环 + 启动恢复（按活跃会话） + SSE
   initRail();
   initChat();
   refreshHealthChip(statusline);

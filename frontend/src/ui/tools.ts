@@ -59,8 +59,3 @@ export function loadToolsSection(): Promise<void> {
     });
 }
 
-export function initToolsSection(): void {
-  need<HTMLButtonElement>('#btnReloadTools').addEventListener('click', () => {
-    void loadToolsSection();
-  });
-}

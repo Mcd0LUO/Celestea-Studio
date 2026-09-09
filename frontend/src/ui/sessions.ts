@@ -14,7 +14,6 @@ import { api, ApiError } from '../api';
 import { el, need } from '../utils/dom';
 import type { SessionInfo, WorkspaceInfo } from '../types';
 import { S } from '../state';
-import { resetMessages } from './messages';
 import { switchToSession } from './restore';
 import { confirmDialog } from './confirm';
 
@@ -278,32 +277,6 @@ async function renameWorkspace(container: HTMLElement, name: string): Promise<vo
   }
 }
 
-/** 清空活跃会话（POST /api/clear；二次确认，默认焦点在取消）。 */
-function clearActive(): void {
-  void confirmDialog({
-    title: '清空当前会话',
-    message: '将清空当前会话全部消息，且不可恢复。确认清空？',
-    okLabel: '清空',
-    danger: true,
-  }).then((ok) => {
-    if (!ok) return;
-    void api
-      .clear()
-      .then((d) => {
-        if (d.ok) {
-          note('当前会话已清空');
-          resetMessages();
-          S.assistant = null;
-          S.turn = null;
-        } else {
-          note('清空失败（返回异常）');
-        }
-      })
-      .catch((err: unknown) => {
-        note('清空失败：' + (err instanceof Error ? err.message : String(err)));
-      });
-  });
-}
 
 // ---- 渲染：工具行 + 树 ------------------------------------------------------------------
 
@@ -980,18 +953,9 @@ export function loadSessions(): Promise<void> {
   return loadTreeInto(need<HTMLElement>('#sessionTree'), need<HTMLElement>('#sessionCount'));
 }
 
-/** 清空当前活跃会话（侧栏与设置页「会话」页复用）。 */
-export function clearCurrentSession(): void {
-  clearActive();
-}
 
 export function initSessionsPanel(): void {
-  need<HTMLButtonElement>('#btnReloadSessions').addEventListener('click', () => {
-    void loadSessions();
-  });
-  need<HTMLButtonElement>('#btnClearSess').addEventListener('click', () => {
-    clearActive();
-  });
+  // 第 22 轮：清空/刷新入口已移除（后端端点保留）
   document.addEventListener('click', (e) => {
     if (!(e.target instanceof Element) || !e.target.closest('.sess-menu')) closeCtxMenu();
   });
