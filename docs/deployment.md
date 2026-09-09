@@ -176,7 +176,7 @@ tail -n 50 /tmp/celestea-studio.log
 ```bash
 cd /src/celestea_studio
 export RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
-cargo test --release                 # 68 passed 再往下
+cargo test --release                 # 全绿再往下（校对时 69 passed）
 cargo build --release
 sudo systemctl restart celestea-studio
 systemctl is-active celestea-studio
