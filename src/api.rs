@@ -72,7 +72,10 @@ pub async fn get_config(State(st): State<Shared>) -> Json<Value> {
 // ---- GET /api/status --------------------------------------------------------
 
 /// W218 statusline snapshot — the fallback channel for the SSE status
-/// payloads: {model, reasoning_effort, steps, tokens_per_sec, context_usage}.
+/// payloads: {model, reasoning_effort, steps, tokens_per_sec, context_usage,
+/// usage}. W263: `usage` carries the engine's latest LLM-stream counters
+/// (+ cumulative `total`), `cache_hit_ratio` = cache_read / prompt_tokens, and
+/// `context_usage` is the real prompt size when a usage frame exists.
 /// W237: plus "session" = the active session id ("<ws>/<session>"|null) from
 /// the workspace registry, so the frontend can always tell which session the
 /// engine is currently bound to.

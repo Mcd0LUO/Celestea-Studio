@@ -269,6 +269,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "celestea-agent-loop",
  "celestea-core",
  "celestea-runtime",
  "celestea-session",

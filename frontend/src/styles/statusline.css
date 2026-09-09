@@ -44,6 +44,7 @@
 .sl-effort:empty { display: none; }
 .sl-tps { font-variant-numeric: tabular-nums; }
 .sl-steps { font-variant-numeric: tabular-nums; }
+.sl-cache { font-variant-numeric: tabular-nums; }
 .sl-hint { color: var(--c-warn); font-size: 10.5px; }
 
 .sl-ring {
@@ -67,7 +68,8 @@
 #statusline.sl-stale .sl-ctx,
 #statusline.sl-stale .sl-effort,
 #statusline.sl-stale .sl-tps,
-#statusline.sl-stale .sl-steps { opacity: .55; }
+#statusline.sl-stale .sl-steps,
+#statusline.sl-stale .sl-cache { opacity: .55; }
 
 /* ============================================================================
  * W227：模型 / 推理档位快速切换（按钮 + 紧凑下拉面板）

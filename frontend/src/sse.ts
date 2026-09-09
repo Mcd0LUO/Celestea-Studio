@@ -31,6 +31,23 @@ export interface SseHandlerMap {
 
 export type SseHandler<K extends SseEventName> = SseHandlerMap[K];
 
+/**
+ * W263: the envelope carries the turn/seq framing while the payload carries the
+ * event body ({"turn":N,"seq":M,"payload":{...}}). Handlers read fields off ONE
+ * flat object (chat.ts reads p.turn / p.phase / p.delta), so merge the envelope
+ * fields into the payload WITHOUT dropping any payload field. Non-object
+ * payloads (defensive) are passed through untouched.
+ */
+function withEnvelope(payload: unknown, env: SseEnvelope): unknown {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return payload;
+  }
+  const out = { ...(payload as Record<string, unknown>) };
+  if (env.turn !== undefined && out.turn === undefined) out.turn = env.turn;
+  if (env.seq !== undefined) out.seq = env.seq;
+  return out;
+}
+
 const EVENT_NAMES: readonly SseEventName[] = [
   'status',
   'text',
@@ -73,7 +90,7 @@ export class SseClient {
         try {
           const env = JSON.parse(e.data) as SseEnvelope;
           const payload = env.payload !== undefined ? env.payload : env;
-          this.emit(name, payload);
+          this.emit(name, withEnvelope(payload, env));
         } catch (err) {
           console.warn('[sse] failed to parse', name, err);
         }

@@ -56,7 +56,7 @@
         </div>
 
         <!-- ---------- statusline（模型 / 上下文环 / 吞吐，发送栏正上方） ---------- -->
-        <div id="statusline" class="statusline" title="上下文化用 · 模型 · 思考强度 · 吞吐（GET /api/status + SSE 增量）">
+        <div id="statusline" class="statusline" title="上下文占用 · 模型 · 思考强度 · 吞吐 · 缓存命中（GET /api/status + SSE 增量）">
           <div class="sl-row sl-row-main">
             <span class="sl-ring" id="slRing" title="上下文占用">
               <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true">
@@ -74,6 +74,8 @@
           </div>
           <div class="sl-row sl-row-sub">
             <span class="sl-tps" id="slTps">— tok/s</span>
+            <span class="sl-sep">·</span>
+            <span class="sl-cache" id="slCache" title="缓存命中：最近一次请求">缓存 —</span>
             <span class="sl-sep">·</span>
             <span class="sl-steps" id="slSteps">step —</span>
           </div>

@@ -45,6 +45,26 @@ export interface StatusSnapshot {
   steps?: number;
   tokens_per_sec?: number;
   context_usage?: ContextUsage;
+  /** W263: engine token usage (latest LLM stream + cumulative `total`). */
+  usage?: UsageSnapshot;
+}
+
+/**
+ * W263: one usage block — provider-reported counters of one LLM stream.
+ * `cache_hit_ratio` = cache_read / prompt_tokens (0 when prompt_tokens == 0).
+ */
+export interface UsageCounters {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  cache_read: number;
+  cache_hit_ratio: number;
+  reasoning_tokens: number;
+}
+
+/** W263: latest stream + cumulative (`total`) usage counters. */
+export interface UsageSnapshot extends UsageCounters {
+  total?: UsageCounters;
 }
 
 /** status SSE payload: turn lifecycle + optional statusline fields. */
@@ -53,6 +73,11 @@ export interface StatusPayload extends StatusSnapshot {
   turn?: number;
   error?: string;
   hint?: string;
+  /**
+   * W263: the backend nests the statusline snapshot under `statusline`
+   * ({"phase":"progress","statusline":{...}}); flat fields stay supported.
+   */
+  statusline?: StatusSnapshot;
 }
 
 export interface TextPayload {

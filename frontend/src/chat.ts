@@ -30,7 +30,7 @@ import {
   removeAssistant,
   renderInfoBlock,
 } from './ui/messages';
-import { applyToolResult, getToolStep, pushToolCard } from './ui/toolcards';
+import { applyToolResult, getToolStep, pushToolCard, resetTurnStep } from './ui/toolcards';
 import { clearInput, initInputBar, setBusy } from './ui/inputbar';
 import {
   feedAssistantDelta,
@@ -40,6 +40,7 @@ import {
 } from './ui/restore';
 import {
   cancelStatusFlash,
+  finishElapsedTimer,
   flashStatus,
   setStatus,
   setStatusStep,
@@ -62,7 +63,7 @@ function finalizeTurn(phase: string): void {
   S.streaming = false;
   S.turn = null;
   setBusy(false);
-  stopElapsedTimer();
+  finishElapsedTimer(); // W263：保留本轮最终耗时（下一轮 start 时重置）
   setStatus(
     PHASE_LABELS[phase] || phase,
     phase === 'error' || phase === 'cancelled' ? 'err' : 'ok',
@@ -95,6 +96,7 @@ function onStatus(p: StatusPayload): void {
     setBusy(true);
     setStatus('运行中…', 'busy');
     setStatusTurn(p.turn ?? null);
+    resetTurnStep(); // W263：新一轮工具步数清零（每个 tool 事件 +1）
     setStatusStep(null);
     startElapsedTimer();
     return;
@@ -334,6 +336,7 @@ export function initChat(): void {
       S.turn = null;
       setBusy(true);
       setStatus('启动中…', 'busy');
+      resetTurnStep(); // W263：发送即清零当前轮步数（SSE start 到达前也正确）
       setStatusStep(null);
       void api
         .turn(t)

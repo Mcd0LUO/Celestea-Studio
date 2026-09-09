@@ -1,15 +1,23 @@
 // ============================================================================
 // Statusline — 两行紧凑状态条，位于发送栏正上方（借鉴 DSH SessionStatusBar）：
 //   第 1 行  上下文占用环(≥90% 警告色) + 「xxxK/1M」 + 当前模型 + 思考强度
-//   第 2 行  tokens/s + step 数
-// 数据源：GET /api/status 轮询（兜底）+ SSE status 事件增量字段。
+//   第 2 行  tokens/s + 缓存命中率(W263) + step 数
+// 数据源：GET /api/status 轮询（兜底）+ SSE status 事件增量字段
+//   （SSE status 的 statusline 快照是嵌套对象，fromSse 里拍平后合并）。
 // W227：模型/推理档位改为可点击按钮 → 紧凑下拉面板快速切换（POST /api/config），
 //   409（轮次进行中）→ 提示并挂起，SSE done 后自动重试一次；400/500 → 内联报错。
 // ============================================================================
 import { api, ApiError } from './api';
 import { el, fmtCompact, need } from './utils/dom';
 import { popOverlay, pushOverlay, type OverlayHandle } from './utils/overlays';
-import type { ConfigInfo, ConfigPatch, ModelInfo, StatusPayload, StatusSnapshot } from './types';
+import type {
+  ConfigInfo,
+  ConfigPatch,
+  ModelInfo,
+  StatusPayload,
+  StatusSnapshot,
+  UsageSnapshot,
+} from './types';
 
 const POLL_MS = 2000;
 const RING_R = 5.2;
@@ -39,6 +47,8 @@ export class Statusline {
   private modelEl: HTMLElement;
   private effortEl: HTMLElement;
   private tpsEl: HTMLElement;
+  /** W263: cache-hit-ratio cell (last stream + cumulative in the title). */
+  private cacheEl: HTMLElement;
   private stepsEl: HTMLElement;
   private hintEl: HTMLElement;
 
@@ -60,10 +70,11 @@ export class Statusline {
     this.modelEl = need<HTMLElement>('#slModel', this.el);
     this.effortEl = need<HTMLElement>('#slEffort', this.el);
     this.tpsEl = need<HTMLElement>('#slTps', this.el);
+    this.cacheEl = need<HTMLElement>('#slCache', this.el);
     this.stepsEl = need<HTMLElement>('#slSteps', this.el);
     this.hintEl = need<HTMLElement>('#slHint', this.el);
     this.ringProg.style.strokeDasharray = String(RING_C);
-    this.el.title = '上下文占用 · 模型 · 思考强度 · 吞吐（GET /api/status + SSE 增量）';
+    this.el.title = '上下文占用 · 模型 · 思考强度 · 吞吐 · 缓存命中（GET /api/status + SSE 增量）';
 
     // W227：模型/档位点击快速切换
     this.modelEl.addEventListener('click', () => this.togglePopup('model'));
@@ -91,10 +102,16 @@ export class Statusline {
     }
   }
 
-  /** Merge incremental fields from an SSE status payload. */
+  /**
+   * Merge incremental fields from an SSE status payload.
+   * W263: the backend nests the snapshot ({"phase":..,"statusline":{..}}), so
+   * the nested snapshot is flattened first; flat fields (older/newer shapes)
+   * still win when present.
+   */
   fromSse(p: StatusPayload): void {
-    if (this.hasStatusFields(p)) {
-      this.snapshot = { ...this.snapshot, ...pickStatusFields(p) };
+    const flat = pickStatusFields({ ...(p.statusline ?? {}), ...p });
+    if (Object.keys(flat).length > 0) {
+      this.snapshot = { ...this.snapshot, ...flat };
       this.render();
     }
   }
@@ -315,16 +332,6 @@ export class Statusline {
     this.hintEl.textContent = this.staleMsg;
   }
 
-  private hasStatusFields(p: StatusPayload): boolean {
-    return (
-      p.model !== undefined ||
-      p.reasoning_effort !== undefined ||
-      p.steps !== undefined ||
-      p.tokens_per_sec !== undefined ||
-      p.context_usage !== undefined
-    );
-  }
-
   private async poll(): Promise<void> {
     try {
       const s = await api.status();
@@ -369,8 +376,36 @@ export class Statusline {
     const tps = s.tokens_per_sec;
     this.tpsEl.textContent = tps !== undefined && tps !== null ? fixed1(tps) + ' tok/s' : '— tok/s';
 
+    // W263 缓存命中率：只改文本（铁律 1/2/5——不重建 DOM，不重渲染背景）
+    this.renderCache(s.usage);
+
     const steps = s.steps;
     this.stepsEl.textContent = typeof steps === 'number' && steps >= 1 ? 'step ' + steps : 'step —';
+  }
+
+  /**
+   * W263: `缓存 78%` = the LATEST LLM stream's cache_read / prompt_tokens.
+   * `缓存 —` when the engine has reported no usage yet. The title spells out
+   * the exact numbers and the cumulative ratio (tracker.total()).
+   */
+  private renderCache(u: UsageSnapshot | undefined): void {
+    if (!u || !(u.prompt_tokens > 0)) {
+      this.cacheEl.textContent = '缓存 —';
+      this.cacheEl.title = '缓存命中：暂无引擎用量数据（GET /api/status 的 usage）';
+      return;
+    }
+    const pct = Math.round(clamp01(u.cache_hit_ratio) * 100);
+    this.cacheEl.textContent = '缓存 ' + pct + '%';
+    const t = u.total;
+    this.cacheEl.title =
+      '最近一次请求：命中 ' +
+      u.cache_read +
+      ' / 提示 ' +
+      u.prompt_tokens +
+      ' tokens' +
+      (t
+        ? '（累计 ' + (clamp01(t.cache_hit_ratio) * 100).toFixed(1) + '%，命中 ' + t.cache_read + ' / 提示 ' + t.prompt_tokens + ' tokens）'
+        : '');
   }
 }
 
@@ -383,12 +418,13 @@ function fixed1(v: number): string {
   return Number.isFinite(v) ? v.toFixed(1) : '—';
 }
 
-function pickStatusFields(p: StatusPayload): StatusSnapshot {
+function pickStatusFields(p: StatusSnapshot): StatusSnapshot {
   const out: StatusSnapshot = {};
   if (p.model !== undefined) out.model = p.model;
   if (p.reasoning_effort !== undefined) out.reasoning_effort = p.reasoning_effort;
   if (p.steps !== undefined) out.steps = p.steps;
   if (p.tokens_per_sec !== undefined) out.tokens_per_sec = p.tokens_per_sec;
   if (p.context_usage !== undefined) out.context_usage = p.context_usage;
+  if (p.usage !== undefined) out.usage = p.usage; // W263 缓存命中率
   return out;
 }

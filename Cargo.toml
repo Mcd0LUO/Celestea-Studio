@@ -10,6 +10,10 @@ license = "MIT"
 celestea-runtime = { path = "/src/celestea_harness/crates/runtime" }
 # Core types not re-exported by runtime (Content / ToolDecision) used by the LoopEvent -> SSE mapper.
 celestea-core = { path = "/src/celestea_harness/crates/core" }
+# W263: UsageTracker (the concrete type of Runtime.usage) lives in the
+# agent-loop crate; the statusline reads latest()/total() for the usage +
+# cache-hit-ratio surface.
+celestea-agent-loop = { path = "/src/celestea_harness/crates/agent-loop" }
 
 axum = "0.8"
 tokio = { version = "1.53", features = ["full"] }

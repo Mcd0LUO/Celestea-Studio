@@ -44,6 +44,16 @@ export function stopElapsedTimer(): void {
   }
 }
 
+/**
+ * W263：结束一轮计时 —— 停表并**保留最终耗时**（不再归零成 00:00）；
+ * 下一轮 startElapsedTimer() 才重置。tickTimer 依赖 S.streaming，
+ * 所以这里直接写最后一帧。
+ */
+export function finishElapsedTimer(): void {
+  stopElapsedTimer();
+  if (S.t0 > 0) StatusTime.textContent = fmtTime((Date.now() - S.t0) / 1000);
+}
+
 // ---- 一次性操作提示（W259 /compact） --------------------------------------------
 
 let flashTimer: number | null = null;

@@ -29,6 +29,15 @@ export function resetToolCards(): void {
   toolStep = 0;
 }
 
+/**
+ * W263：新一轮开始时把当前轮工具步数清零（每个 tool 事件 +1）。
+ * 与 resetToolCards 的区别：只清计数器，保留 opIndex —— 迟到/跨轮到达的
+ * tool_result 仍能按 id 回填到已渲染的卡片上。
+ */
+export function resetTurnStep(): void {
+  toolStep = 0;
+}
+
 function toJsonText(v: unknown): string {
   if (typeof v === 'string') return v;
   try {

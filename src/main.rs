@@ -10,8 +10,8 @@
 //! served when dist/ is absent). The engine's 16-step default cap is raised
 //! to 4096 at compose time (the agent loop runs steps in `0..max_steps`, so a
 //! "no limit" is only expressible as a high cap). A live statusline
-//! ({model, reasoning_effort, steps, tokens_per_sec, context_usage}) is
-//! computed by the backend and delivered both via SSE status events
+//! ({model, reasoning_effort, steps, tokens_per_sec, context_usage, usage})
+//! is computed by the backend and delivered both via SSE status events
 //! (start / progress / completed / cancelled / error / lagged carry it) and
 //! through GET /api/status as the fallback channel.
 //!
@@ -53,9 +53,10 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
 use celestea_core::{Content, ToolDecision};
+use celestea_agent_loop::UsageTracker;
 use celestea_runtime::{
     load_dotenv, merge_profile, resolve_base_url, resolve_profile, EventSink, LoopEvent,
-    Profile, Runtime, SessionEvent, SessionLog, TurnOutcome, WorkerRegistryService,
+    Profile, Runtime, SessionEvent, SessionLog, TurnOutcome, Usage, WorkerRegistryService,
 };
 mod api;
 /// W236: model-provider management (providers.json + probe + default-model
@@ -247,8 +248,9 @@ pub(crate) struct BusEvent {
     pub(crate) data: Value,
 }
 
-/// W218 statusline tracker: event-counted steps plus a sliding-window
-/// char-rate over text/thinking deltas (the tokens_per_sec estimate).
+/// W218 statusline tracker: event-counted steps (W263: one per tool call)
+/// plus a sliding-window char-rate over text/thinking deltas (the
+/// tokens_per_sec estimate).
 pub(crate) struct StatusTracker {
     steps: AtomicU64,
     rate: StdMutex<RateWindow>,
@@ -279,7 +281,7 @@ impl StatusTracker {
             .push(chars, Instant::now());
     }
 
-    /// Record one step (a tool / tool_result event).
+    /// Record one step (one tool call; W263: tool_result no longer doubles it).
     pub(crate) fn add_step(&self) {
         self.steps.fetch_add(1, Ordering::Relaxed);
     }
@@ -342,6 +344,10 @@ pub(crate) struct StatusView {
     pub(crate) session: Arc<dyn SessionLog>,
     /// W225: live profile context window (0 = trimming off -> display default).
     pub(crate) context_window: u64,
+    /// W263: engine usage tracker (Runtime.usage) — provider-reported token
+    /// usage per LLM stream (latest + cumulative). The statusline reads it for
+    /// the cache-hit-ratio surface and for the real context-usage ratio.
+    pub(crate) usage: Arc<UsageTracker>,
 }
 
 /// W225: one engine generation — the hot-swappable unit behind /api/config.
@@ -499,6 +505,7 @@ impl AppState {
             status: self.status.clone(),
             session: gen.runtime.session.clone(),
             context_window: gen.profile.context_window_tokens,
+            usage: gen.runtime.usage.clone(),
         }
     }
 
@@ -510,32 +517,95 @@ impl AppState {
 
 pub(crate) type Shared = Arc<AppState>;
 
-/// W218: build the statusline JSON: {model, reasoning_effort, steps,
-/// tokens_per_sec, context_usage}. `steps` is counted from tool/tool_result
-/// events; `tokens_per_sec` from text/thinking delta rate; `context_usage` is
-/// an estimate from the session log (event character volume vs the fixed 1M
-/// window) because the engine's streaming path does not surface LLM usage
-/// frames — the response marks the estimate (`estimated:true`).
+/// W218/W263: build the statusline JSON: {model, reasoning_effort, steps,
+/// tokens_per_sec, context_usage, usage}. `steps` is counted from tool-call
+/// events (W263: one per call); `tokens_per_sec` from text/thinking delta rate.
+///
+/// W263 `context_usage`: the engine's agent loop records every provider
+/// usage frame into Runtime.usage, so the ratio is the REAL prompt size of the
+/// most recent request (`prompt_tokens / window`, estimated:false,
+/// method:"usage_prompt_tokens"). Only when no usage frame has been observed
+/// yet does it fall back to the session-log character estimate
+/// (estimated:true, method:"session_event_chars") — the contract field names
+/// are unchanged either way.
+///
+/// W263 `usage`: {prompt_tokens, completion_tokens, total_tokens, cache_read,
+/// cache_hit_ratio, reasoning_tokens} for the LATEST LLM stream plus the same
+/// shape under `total` for the cumulative tracker values (hover/tooltip).
+/// `cache_hit_ratio` = cache_read / prompt_tokens, clamped to [0,1] and
+/// rounded to 4 decimals; 0 when prompt_tokens == 0.
 pub(crate) fn statusline_of(view: &StatusView) -> Value {
-    let used = estimated_context_chars(&view.session.events());
+    let latest = view.usage.latest();
+    let total = view.usage.total();
     // W225: live profile window (0 = trimming off -> contract display default).
     let window = if view.context_window > 0 {
         view.context_window
     } else {
         CONTEXT_WINDOW
     };
-    let ratio = (used as f64 / window as f64 * 10_000.0).round() / 10_000.0;
+    let context_usage = if latest.prompt_tokens > 0 {
+        json!({
+            "used": latest.prompt_tokens,
+            "window": window,
+            "ratio": ratio4(latest.prompt_tokens, window),
+            "estimated": false,
+            "method": "usage_prompt_tokens",
+        })
+    } else {
+        let used = estimated_context_chars(&view.session.events());
+        json!({
+            "used": used,
+            "window": window,
+            "ratio": ratio4(used, window),
+            "estimated": true,
+            "method": "session_event_chars",
+        })
+    };
     json!({
         "model": view.model,
         "reasoning_effort": view.reasoning_effort,
         "steps": view.status.steps.load(Ordering::Relaxed),
         "tokens_per_sec": (view.status.rate() * 100.0).round() / 100.0,
-        "context_usage": {
-            "used": used,
-            "window": window,
-            "ratio": ratio.min(1.0),
-            "estimated": true,
-            "method": "session_event_chars",
+        "context_usage": context_usage,
+        "usage": usage_json(&latest, &total),
+    })
+}
+
+/// W263: `cache_read / prompt_tokens`, clamped to [0,1], 4 decimals, 0 when
+/// the denominator is 0 (no usage recorded yet).
+fn cache_hit_ratio(u: &Usage) -> f64 {
+    if u.prompt_tokens == 0 {
+        return 0.0;
+    }
+    let r = u.cache_read as f64 / u.prompt_tokens as f64;
+    (r.clamp(0.0, 1.0) * 10_000.0).round() / 10_000.0
+}
+
+/// W263: used/window ratio, clamped to [0,1], rounded to 4 decimals.
+fn ratio4(used: u64, window: u64) -> f64 {
+    if window == 0 {
+        return 0.0;
+    }
+    let r = used as f64 / window as f64;
+    (r.clamp(0.0, 1.0) * 10_000.0).round() / 10_000.0
+}
+
+/// W263: one usage block (latest) + the cumulative block (`total`).
+fn usage_json(latest: &Usage, total: &Usage) -> Value {
+    json!({
+        "prompt_tokens": latest.prompt_tokens,
+        "completion_tokens": latest.completion_tokens,
+        "total_tokens": latest.total_tokens,
+        "cache_read": latest.cache_read,
+        "cache_hit_ratio": cache_hit_ratio(latest),
+        "reasoning_tokens": latest.reasoning_tokens,
+        "total": {
+            "prompt_tokens": total.prompt_tokens,
+            "completion_tokens": total.completion_tokens,
+            "total_tokens": total.total_tokens,
+            "cache_read": total.cache_read,
+            "cache_hit_ratio": cache_hit_ratio(total),
+            "reasoning_tokens": total.reasoning_tokens,
         },
     })
 }
@@ -853,8 +923,10 @@ async fn execute_turn(
             match &ev {
                 LoopEvent::Text(t) => tracker.add_chars(t.chars().count() as u64),
                 LoopEvent::Thinking(t) => tracker.add_chars(t.chars().count() as u64),
-                LoopEvent::ToolCall { .. } | LoopEvent::ToolResult(_) => tracker.add_step(),
-                LoopEvent::Done(_) | LoopEvent::TurnEnd(_) => {}
+                // W263: one step per tool CALL (its tool_result closes that
+                // step) — same口径 as the frontend's per-turn tool counter.
+                LoopEvent::ToolCall { .. } => tracker.add_step(),
+                LoopEvent::ToolResult(_) | LoopEvent::Done(_) | LoopEvent::TurnEnd(_) => {}
             }
             let (kind, payload) = loop_event_to_json(ev);
             let _ = sink_bcast.send(BusEvent {
@@ -1361,14 +1433,14 @@ mod w240_tests {
     /// Minimal Runtime assembly: engine compose (real tool/session wiring,
     /// cli-main registered in the WorkerRegistry) with the LLM adapter swapped
     /// for the scripted fake afterwards (Context::provide replaces by type).
-    fn test_runtime(profile: Profile, replies: Vec<Message>) -> Arc<Runtime> {
+    pub(crate) fn test_runtime(profile: Profile, replies: Vec<Message>) -> Arc<Runtime> {
         let mut rt = Runtime::compose(&profile).expect("compose");
         rt.ctx.provide(LlmService(Arc::new(FakeLlm::new(replies))));
         Arc::new(rt)
     }
 
     /// AppState for the wake loop: one generation over the given runtime.
-    fn build_state(dir: &Path, profile: Profile, runtime: Arc<Runtime>) -> Shared {
+    pub(crate) fn build_state(dir: &Path, profile: Profile, runtime: Arc<Runtime>) -> Shared {
         let gen = Gen {
             model: profile.model.clone(),
             base_url: resolve_base_url(profile.base_url.as_deref(), None),
@@ -1394,7 +1466,7 @@ mod w240_tests {
         })
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    pub(crate) fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "celestea-studio-w240-{}-{}-{}",
             std::process::id(),
@@ -1428,7 +1500,7 @@ mod w240_tests {
         }
     }
 
-    fn test_profile() -> Profile {
+    pub(crate) fn test_profile() -> Profile {
         merge_profile(&json!({
             "model": "deepseek-v4-flash-0731",
             "api_key_env": "W240_TEST_KEY",
@@ -1663,6 +1735,197 @@ mod w240_tests {
 /// W262: the model catalog of the config contract is built from the provider
 /// store (with the static AVAILABLE_MODELS as fallback) — these tests pin the
 /// grouping/dedup/fallback rules the statusline tree renders.
+/// W263: statusline usage / cache-hit-ratio / real-context-usage surface.
+/// Reuses the W240 test harness (scripted FakeLlm + composed Runtime) so the
+/// engine's own UsageTracker is the only moving part.
+#[cfg(test)]
+mod w263_statusline_tests {
+    use super::w240_tests::{build_state, scratch, test_profile, test_runtime};
+    use super::*;
+
+    use celestea_core::{Message, ToolCall};
+
+    /// One usage frame as a provider reports it (deepseek-style cache hit).
+    fn frame(prompt: u64, cache_read: u64) -> Usage {
+        Usage {
+            prompt_tokens: prompt,
+            completion_tokens: 400,
+            total_tokens: prompt + 400,
+            cache_read,
+            reasoning_tokens: 60,
+        }
+    }
+
+    fn view_of(rt: &Runtime, window: u64) -> StatusView {
+        StatusView {
+            model: "test-model".to_string(),
+            reasoning_effort: Value::Null,
+            status: StatusTracker::new(),
+            session: rt.session.clone(),
+            context_window: window,
+            usage: rt.usage.clone(),
+        }
+    }
+
+    /// 无用量：cache_hit_ratio 为 0，context_usage 回退字符估算（契约字段名不变）。
+    #[tokio::test]
+    async fn no_usage_yields_zero_ratio_and_estimated_fallback() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W240_TEST_KEY", "sk-test");
+
+        let rt = test_runtime(test_profile(), vec![Message::assistant_text("reply text")]);
+        let view = view_of(&rt, 1_000_000);
+
+        // empty session + no usage → 0 estimate, still the documented shape
+        let v = statusline_of(&view);
+        assert_eq!(v["usage"]["prompt_tokens"], json!(0));
+        assert_eq!(v["usage"]["cache_read"], json!(0));
+        assert_eq!(v["usage"]["cache_hit_ratio"], json!(0.0));
+        assert_eq!(v["usage"]["total"]["cache_hit_ratio"], json!(0.0));
+        assert_eq!(v["context_usage"]["used"], json!(0));
+        assert_eq!(v["context_usage"]["estimated"], json!(true));
+        assert_eq!(v["context_usage"]["method"], json!("session_event_chars"));
+
+        // a real turn fills the session log (FakeLlm reports NO usage frame)
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        drop(cancel_tx);
+        rt.run_turn("hello there", Some(cancel_rx), None)
+            .await
+            .expect("turn runs");
+        let v = statusline_of(&view);
+        assert_eq!(v["usage"]["prompt_tokens"], json!(0), "engine reported no usage");
+        assert_eq!(v["usage"]["cache_hit_ratio"], json!(0.0));
+        let used = v["context_usage"]["used"].as_u64().unwrap();
+        assert!(used > 0, "char estimate must be non-zero after a turn, got {used}");
+        assert_eq!(v["context_usage"]["estimated"], json!(true));
+        assert_eq!(v["context_usage"]["method"], json!("session_event_chars"));
+    }
+
+    /// 有用量：cache_hit_ratio = cache_read/prompt_tokens（最近一次），
+    /// total 为累计值；context_usage 走真实分支（estimated:false）。
+    #[tokio::test]
+    async fn usage_drives_cache_ratio_and_real_context_usage() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W240_TEST_KEY", "sk-test");
+
+        let rt = test_runtime(test_profile(), vec![]);
+        let view = view_of(&rt, 1_000_000);
+
+        rt.usage.record(frame(10_000, 7_800));
+        let v = statusline_of(&view);
+        assert_eq!(v["usage"]["prompt_tokens"], json!(10_000));
+        assert_eq!(v["usage"]["completion_tokens"], json!(400));
+        assert_eq!(v["usage"]["cache_read"], json!(7_800));
+        assert_eq!(v["usage"]["cache_hit_ratio"], json!(0.78), "7800/10000");
+        assert_eq!(v["usage"]["reasoning_tokens"], json!(60));
+        assert_eq!(v["usage"]["total"]["cache_hit_ratio"], json!(0.78));
+        // real branch: prompt_tokens / window, 4 decimals, not estimated
+        assert_eq!(v["context_usage"]["used"], json!(10_000));
+        assert_eq!(v["context_usage"]["ratio"], json!(0.01));
+        assert_eq!(v["context_usage"]["estimated"], json!(false));
+        assert_eq!(v["context_usage"]["method"], json!("usage_prompt_tokens"));
+
+        // second stream: latest replaces, total accumulates (cumulative ratio
+        // is computed from the summed counters, not averaged ratios)
+        rt.usage.record(frame(2_000, 0));
+        let v = statusline_of(&view);
+        assert_eq!(v["usage"]["prompt_tokens"], json!(2_000));
+        assert_eq!(v["usage"]["cache_hit_ratio"], json!(0.0));
+        assert_eq!(v["usage"]["total"]["prompt_tokens"], json!(12_000));
+        assert_eq!(v["usage"]["total"]["cache_read"], json!(7_800));
+        assert_eq!(v["usage"]["total"]["cache_hit_ratio"], json!(0.65), "7800/12000");
+        assert_eq!(v["context_usage"]["used"], json!(2_000));
+
+        // window 0 (trimming off) falls back to the contract display window
+        let v0 = statusline_of(&view_of(&rt, 0));
+        assert_eq!(v0["context_usage"]["window"], json!(CONTEXT_WINDOW));
+        assert_eq!(v0["context_usage"]["ratio"], json!(0.002));
+    }
+
+    /// W263：顶部 #slSteps（/api/status steps）与底部状态栏口径一致 ——
+    /// 每个 tool_call 记 1 步，tool_result 不再重复计数。
+    #[tokio::test]
+    async fn status_steps_count_one_per_tool_call() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("steps");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("readme.txt");
+        std::fs::write(&file, "hello").unwrap();
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W240_TEST_KEY", "sk-test");
+
+        let profile = test_profile();
+        let rt = test_runtime(
+            profile.clone(),
+            vec![
+                Message::assistant_tool_call(ToolCall {
+                    id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    args: json!({"path": file.to_string_lossy()}),
+                }),
+                Message::assistant_text("done"),
+            ],
+        );
+        let st = build_state(&dir, profile, rt.clone());
+        assert_eq!(st.statusline()["steps"], json!(0));
+        let (_tx, cancel_rx) = watch::channel(false);
+        execute_turn(st.clone(), rt.clone(), 1, "read it".to_string(), cancel_rx)
+            .await
+            .expect("turn completes");
+        assert_eq!(st.statusline()["steps"], json!(1), "one call = one step");
+    }
+
+    /// SSE status 事件与 GET /api/status 都带 usage：execute_turn 的终态
+    /// status 事件里 statusline.usage 与信封 turn 同时到位。
+    #[tokio::test]
+    async fn sse_status_event_and_api_status_carry_usage() {
+        let _lock = crate::COMPOSE_ENV_LOCK.lock().unwrap();
+        let dir = scratch("usage-status");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::remove_var("CELESTEA_SESSION_DIR");
+        std::env::set_var("W240_TEST_KEY", "sk-test");
+
+        let profile = test_profile();
+        let rt = test_runtime(profile.clone(), vec![Message::assistant_text("hi back")]);
+        let st = build_state(&dir, profile, rt.clone());
+        rt.usage.record(frame(10_000, 7_800));
+
+        let mut rx = st.bcast.subscribe();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        execute_turn(st.clone(), rt.clone(), 7, "hello".to_string(), cancel_rx)
+            .await
+            .expect("turn completes");
+
+        // GET /api/status shape (AppState::statusline + the session field)
+        let status = st.statusline();
+        assert_eq!(status["usage"]["cache_hit_ratio"], json!(0.78));
+        assert_eq!(status["usage"]["total"]["prompt_tokens"], json!(10_000));
+        assert_eq!(status["context_usage"]["estimated"], json!(false));
+        assert_eq!(status["context_usage"]["method"], json!("usage_prompt_tokens"));
+
+        // SSE status event: envelope turn + nested statusline usage
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        let done = events
+            .iter()
+            .find(|e| e.kind == "status" && e.data["payload"]["phase"] == "completed")
+            .expect("completed status event on the bus");
+        assert_eq!(done.data["turn"], json!(7), "envelope carries the turn");
+        assert_eq!(
+            done.data["payload"]["statusline"]["usage"]["cache_hit_ratio"],
+            json!(0.78)
+        );
+        assert_eq!(
+            done.data["payload"]["statusline"]["context_usage"]["estimated"],
+            json!(false)
+        );
+    }
+}
+
 #[cfg(test)]
 mod w262_tests {
     use super::*;
