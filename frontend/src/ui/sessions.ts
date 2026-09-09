@@ -12,6 +12,7 @@
 // ============================================================================
 import { api, ApiError } from '../api';
 import { el, need } from '../utils/dom';
+import { popOverlay, pushOverlay, type OverlayHandle } from '../utils/overlays';
 import type { SessionInfo, WorkspaceInfo } from '../types';
 import { S } from '../state';
 import { switchToSession } from './restore';
@@ -617,7 +618,16 @@ export function newSession(presetWs?: string): void {
   cancel.type = 'button';
   const create = el('button', 'btn btn-accent', '创建') as HTMLButtonElement;
   create.type = 'button';
-  const close = () => scrim.remove();
+  // 任务 3：挂到 body 的弹窗打开时 push 自身 close，Esc 只关栈顶一层
+  let overlay: OverlayHandle | null = null;
+  const close = () => {
+    if (overlay) {
+      popOverlay(overlay);
+      overlay = null;
+    }
+    scrim.remove();
+  };
+  overlay = pushOverlay(close);
   cancel.addEventListener('click', close);
   create.addEventListener('click', () => {
     const t = titleInput.value.trim();
@@ -730,18 +740,17 @@ export function newWorkspace(): void {
   card.appendChild(addrRow);
   card.appendChild(status);
 
-  function renderCrumbs(roots: string[], path: string): void {
-    crumbs.innerHTML = '';
-    if (roots.length) {
-      for (const r of roots) {
-        const b = el('button', 'ws-fs-crumb root', r) as HTMLButtonElement;
-        b.type = 'button';
-        b.addEventListener('click', () => void loadDirs(r));
-        crumbs.appendChild(b);
-      }
-      crumbs.appendChild(el('span', 'ws-fs-crumb-sep', '·'));
-    }
+  function renderCrumbs(path: string): void {
+    // 第 26 轮（W256）：根目录快捷 chips 已删除；面包屑始终以可点击的 '/' 开头
+    //（路径为空时也渲染 '/' crumb，点击 loadDirs('/')）。
+    // 离屏构建 + 单次替换（铁律 1：不先清空可见容器）。
+    const off = document.createElement('div');
     const parts = path.split('/').filter(Boolean);
+    const rootBtn = el('button', 'ws-fs-crumb' + (parts.length ? '' : ' cur'), '/') as HTMLButtonElement;
+    rootBtn.type = 'button';
+    rootBtn.title = '根目录 /';
+    rootBtn.addEventListener('click', () => void loadDirs('/'));
+    off.appendChild(rootBtn);
     let acc = '';
     for (let i = 0; i < parts.length; i++) {
       const seg = parts[i]!;
@@ -750,9 +759,9 @@ export function newWorkspace(): void {
       b.type = 'button';
       const target = acc;
       b.addEventListener('click', () => void loadDirs(target));
-      crumbs.appendChild(b);
+      off.appendChild(b);
     }
-    if (!parts.length) crumbs.appendChild(el('span', 'ws-fs-crumb cur', '/'));
+    crumbs.replaceChildren(...off.childNodes);
   }
 
   async function loadDirs(path: string): Promise<void> {
@@ -781,13 +790,15 @@ export function newWorkspace(): void {
     }
     curPath = r.path ?? path;
     addrInput.value = r.path ?? path;
-    renderCrumbs(r.roots ?? [], r.path ?? path);
+    renderCrumbs(r.path ?? path);
     const off = document.createElement('div');
     const dirs = r.dirs ?? [];
     if (!dirs.length) off.appendChild(el('div', 'side-note', '（该目录下没有子目录）'));
     for (const d of dirs) {
       const row = el('div', 'ws-fs-dir');
-      row.appendChild(el('span', 'ws-fs-dir-icon', '▸'));
+      const icon = el('span', 'ws-fs-dir-icon');
+      icon.appendChild(svgIcon('folder')); // 第 26 轮：'▸' 文本图标 → 文件夹 SVG
+      row.appendChild(icon);
       row.appendChild(el('span', 'ws-fs-dir-name', d));
       row.addEventListener('click', () => {
         const next = (curPath ? curPath.replace(/\/+$/, '') : '') + '/' + d;
@@ -811,7 +822,16 @@ export function newWorkspace(): void {
   cancel.type = 'button';
   const create = el('button', 'btn btn-accent', '创建') as HTMLButtonElement;
   create.type = 'button';
-  const close = () => scrim.remove();
+  // 任务 3：挂到 body 的弹窗打开时 push 自身 close，Esc 只关栈顶一层
+  let overlay: OverlayHandle | null = null;
+  const close = () => {
+    if (overlay) {
+      popOverlay(overlay);
+      overlay = null;
+    }
+    scrim.remove();
+  };
+  overlay = pushOverlay(close);
   cancel.addEventListener('click', close);
   create.addEventListener('click', () => {
     const path = curPath || addrInput.value.trim();

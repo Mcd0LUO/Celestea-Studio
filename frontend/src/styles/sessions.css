@@ -2,7 +2,7 @@
  * 左侧工作区/会话面板（W237）
  *   顶部工作区胶囊横向条（可横向滚动）→ 下方当前工作区会话列表；
  *   「⋯」菜单就地锚定按钮右下；批量复选模式；新建工作区文件管理器弹窗。
- *   全部走 tokens.css 的 DSH night 变量。
+ *   全部走 tokens.css 的 mono（黑白）令牌变量。
  * ============================================================================ */
 
 /* ---- 顶部：新会话按钮 + 工具行 ---- */
@@ -177,7 +177,6 @@
 .ws-fs-crumb:hover { background: var(--c-accent-soft); }
 .ws-fs-crumb.cur { color: var(--c-text-1); font-weight: 600; cursor: default; }
 .ws-fs-crumb.cur:hover { background: transparent; }
-.ws-fs-crumb-sep { color: var(--c-text-3); font-size: 11px; }
 .ws-fs-tree {
   border-radius: 8px;
   background: var(--c-surface);
@@ -191,7 +190,8 @@
   font-size: 12.5px; color: var(--c-text-1);
 }
 .ws-fs-dir:hover { background: var(--c-accent-soft); }
-.ws-fs-dir-icon { color: var(--c-accent); font-size: 10px; }
+.ws-fs-dir-icon { display: inline-flex; align-items: center; flex: 0 0 auto; color: var(--c-accent); }
+.ws-fs-dir-icon svg { display: block; }
 .ws-fs-dir-name { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-fs-addr { display: flex; gap: 6px; }
 .ws-fs-addr input { flex: 1; min-width: 0; }

@@ -6,6 +6,7 @@
 // ============================================================================
 import { api, ApiError } from '../api';
 import { el, need } from '../utils/dom';
+import { closeOverlaysAbove, popOverlay, pushOverlay, type OverlayHandle } from '../utils/overlays';
 import type { ConfigInfo, ConfigPatch } from '../types';
 import { loadToolsSection } from './tools';
 import { loadTreeInto as loadSessionTree } from './sessions';
@@ -283,14 +284,26 @@ function reloadCurrentPane(): void {
 
 // ---- 页面开关 ----------------------------------------------------------------
 
+/** 设置页在层级栈中的句柄（打开时 push 底层 closeSettings）。 */
+let settingsOverlay: OverlayHandle | null = null;
+
 export function openSettings(): void {
   page.classList.remove('hidden');
+  // 任务 3：设置页作为最底层压栈——其上的二级弹窗/内联面板先于它被 Esc 关闭
+  if (!settingsOverlay) settingsOverlay = pushOverlay(closeSettings);
   // 打开时配置页强制刷新（热调可能被 statusline 快速切换等改变）
   forceLoadPane('config');
   showPane('config');
 }
 
 export function closeSettings(): void {
+  // 任务 3：关闭设置页时连带收起它派生的仍在栈上的层（不留孤儿弹窗）
+  if (settingsOverlay) {
+    const h = settingsOverlay;
+    settingsOverlay = null;
+    closeOverlaysAbove(h);
+    popOverlay(h);
+  }
   page.classList.add('hidden');
 }
 
@@ -301,9 +314,7 @@ export function initSettingsPage(): void {
   for (const n of PANES) {
     navEl(n).addEventListener('click', () => showPane(n));
   }
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !page.classList.contains('hidden')) closeSettings();
-  });
+  // Esc 关闭统一由 utils/overlays 层级栈处理（任务 3：唯一 document Esc 监听）
   initProvidersSection(); // #btnAddProvider
   initPromptsSection(); // #btnNewPrompt + scope 切换
 }

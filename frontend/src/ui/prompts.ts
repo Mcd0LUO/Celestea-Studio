@@ -11,6 +11,7 @@ import { api } from '../api';
 import { el, need } from '../utils/dom';
 import type { PromptInfo, PromptSection } from '../types';
 import { confirmDialog } from './confirm';
+import { popOverlay, pushOverlay, type OverlayHandle } from '../utils/overlays';
 
 const boxEl = need<HTMLElement>('#settingsPrompts');
 const wrapEl = need<HTMLElement>('#promptsWrap');
@@ -209,7 +210,16 @@ function openEditor(existing: PromptInfo | null): void {
   cancel.type = 'button';
   const save = el('button', 'btn btn-accent', '保存') as HTMLButtonElement;
   save.type = 'button';
-  const close = () => scrim.remove();
+  // 任务 3：挂到 body 的弹窗打开时 push 自身 close，Esc 只关栈顶一层
+  let overlay: OverlayHandle | null = null;
+  const close = () => {
+    if (overlay) {
+      popOverlay(overlay);
+      overlay = null;
+    }
+    scrim.remove();
+  };
+  overlay = pushOverlay(close);
   cancel.addEventListener('click', close);
   save.addEventListener('click', () => {
     const name = nameInput.value.trim();

@@ -1,6 +1,6 @@
 // ============================================================================
 // Theme / color-card switching: <html data-theme> single attribute.
-// palettes: night (夜航黑灰, default) / mono (黑白 ins 风)
+// 第 26 轮（W256）：仅保留单主题 mono（黑白 ins 风）；夜航（night）主题已删除。
 // ============================================================================
 
 export interface ThemeDef {
@@ -10,14 +10,13 @@ export interface ThemeDef {
 }
 
 export const THEMES: readonly ThemeDef[] = [
-  { id: 'night', label: '夜航', hint: '夜航黑灰 · 近中性暗色' },
   { id: 'mono', label: '黑白', hint: '黑白 ins 风 · 纯灰阶浅色，零彩色点缀' },
 ];
 
 const STORAGE_KEY = 'celestea-studio.theme';
 
 export function currentTheme(): string {
-  return document.documentElement.dataset.theme || 'night';
+  return document.documentElement.dataset.theme || 'mono';
 }
 
 export function applyTheme(id: string): void {
@@ -29,8 +28,9 @@ export function applyTheme(id: string): void {
   }
 }
 
-/** Apply the persisted (or default) theme; returns the applied id. */
-export function initTheme(defaultId = 'night'): string {
+/** Apply the persisted (or default) theme; returns the applied id.
+ *  旧版 localStorage 里存过已删除主题 id 时（THEMES.some 不命中）自动回落到 mono。 */
+export function initTheme(defaultId = 'mono'): string {
   let id = defaultId;
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
@@ -42,18 +42,21 @@ export function initTheme(defaultId = 'night'): string {
   return id;
 }
 
-/** Wire the topbar switcher: cycles night → mono（第 17 轮：仅保留两套）。 */
+/** Wire the topbar switcher：单主题下点击 = no-op（不循环、不闪动），
+ *  按钮保留显示当前主题「黑白」。 */
 export function setupThemeSwitcher(button: HTMLElement): void {
-  const themeDef = (): ThemeDef => {
+  const render = (): void => {
     const cur = currentTheme();
-    return THEMES.find((t) => t.id === cur) ?? THEMES[0]!;
-  };
-  const render = () => {
-    const t = themeDef();
+    const t = THEMES.find((x) => x.id === cur) ?? THEMES[0]!;
     button.textContent = t.label;
-    button.title = '主题 · ' + t.hint + '（点击切换）';
+    button.title = '主题 · ' + t.hint + (THEMES.length > 1 ? '（点击切换）' : '（当前唯一主题）');
   };
   render();
+  if (THEMES.length < 2) {
+    // 仅剩单主题：不注册点击行为，避免无意义的重绘/闪动
+    button.setAttribute('aria-disabled', 'true');
+    return;
+  }
   button.addEventListener('click', () => {
     const idx = THEMES.findIndex((t) => t.id === currentTheme());
     const next = THEMES[(idx + 1) % THEMES.length]!;

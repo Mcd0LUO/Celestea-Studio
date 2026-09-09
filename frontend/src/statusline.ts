@@ -8,6 +8,7 @@
 // ============================================================================
 import { api, ApiError } from './api';
 import { el, fmtCompact, need } from './utils/dom';
+import { popOverlay, pushOverlay, type OverlayHandle } from './utils/overlays';
 import type { ConfigInfo, ConfigPatch, StatusPayload, StatusSnapshot } from './types';
 
 const POLL_MS = 2000;
@@ -41,6 +42,8 @@ export class Statusline {
   // ---- 快速切换（W227） ----
   private popup: HTMLElement | null = null;
   private popupKind: SwitchKind | null = null;
+  /** 任务 3：弹层在全局层级栈中的句柄（Esc 只关栈顶一层）。 */
+  private popupOverlay: OverlayHandle | null = null;
   private pendingPatch: ConfigPatch | null = null;
   private staleMsg = '';
   private note = '';
@@ -62,9 +65,7 @@ export class Statusline {
     // W227：模型/档位点击快速切换
     this.modelEl.addEventListener('click', () => this.togglePopup('model'));
     this.effortEl.addEventListener('click', () => this.togglePopup('effort'));
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') this.closePopup();
-    });
+    // Esc 关闭统一由 utils/overlays 层级栈处理（任务 3：唯一 document Esc 监听）
     document.addEventListener('click', (e) => {
       if (!this.popup) return;
       const t = e.target as Node;
@@ -130,6 +131,10 @@ export class Statusline {
   }
 
   private closePopup(): void {
+    if (this.popupOverlay) {
+      popOverlay(this.popupOverlay);
+      this.popupOverlay = null;
+    }
     if (this.popup) {
       this.popup.remove();
       this.popup = null;
@@ -144,6 +149,7 @@ export class Statusline {
     popup.setAttribute('role', 'menu');
     this.popup = popup;
     this.el.appendChild(popup);
+    this.popupOverlay = pushOverlay(() => this.closePopup());
 
     popup.appendChild(el('div', 'sl-popup-title', kind === 'model' ? '切换模型' : '切换推理档位'));
     const body = el('div', 'sl-popup-body');

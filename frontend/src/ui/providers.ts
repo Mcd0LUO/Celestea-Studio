@@ -1,13 +1,18 @@
 // ============================================================================
 // ui/providers.ts — 设置页「模型提供商」（W236 契约，端点缺失优雅降级）：
 //   GET /api/providers 列表（名称/备注/请求格式/模型数/默认/has_key）
-//   「添加提供商」/「编辑」→ 弹窗表单（名称/备注/API KEY/地址+请求测试/
+//   「添加提供商」→ 弹窗表单（名称/备注/API KEY/地址+请求测试/
 //   请求格式/模型列表「获取模型」/单模型高级编辑）
+//   第 26 轮（W256）：删除行内「编辑」按钮 —— 点击提供商行本体，在该行正下方
+//   原地展开内联编辑面板（非弹窗）。面板 DOM 每个提供商行只构建一次，
+//   展开/收起只切 class + max-height 过渡（铁律 4），禁止删除重建；
+//   保存成功/取消后收起并局部刷新该行数据（不整表重建）。
 //   POST /api/providers（upsert）· /test · /{id}/models/fetch · /{id}/delete
 //   POST /api/providers/default（默认模型选择器，切换即热应用）
 // ============================================================================
 import { api } from '../api';
 import { el, need } from '../utils/dom';
+import { popOverlay, pushOverlay, type OverlayHandle } from '../utils/overlays';
 import type { ProviderInfo, ProviderModelSpec } from '../types';
 import { confirmDialog } from './confirm';
 
@@ -15,6 +20,8 @@ const boxEl = need<HTMLElement>('#settingsProviders');
 
 let providers: ProviderInfo[] = [];
 let defaultModel: string | null = null;
+/** 已展开的内联面板（provider id）：列表刷新后恢复展开态（铁律 2）。 */
+const openPanels = new Set<string>();
 
 const FORMATS: readonly { value: string; label: string }[] = [
   { value: 'chat_completions', label: 'Chat Completions' },
@@ -32,8 +39,53 @@ function modelCount(p: ProviderInfo): number {
   return p.models?.length ?? 0;
 }
 
+/** 状态单元格内容（默认 / 已配 Key 徽章）：离屏构建后单次替换。 */
+function renderStateCell(td: HTMLElement, p: ProviderInfo): void {
+  const off = document.createElement('div');
+  if (p.is_default) off.appendChild(el('span', 'prov-badge', '默认'));
+  if (p.has_key) off.appendChild(el('span', 'prov-badge key', '已配 Key'));
+  if (!p.is_default && !p.has_key) off.textContent = '—';
+  td.replaceChildren(...off.childNodes);
+}
+
+/** 用最新数据就地刷新一行（不重建表格，不丢内联面板 DOM）。 */
+function applyRowCells(tr: HTMLTableRowElement, p: ProviderInfo): void {
+  const oldId = tr.dataset.id ?? '';
+  tr.dataset.id = p.id;
+  if (oldId !== p.id && openPanels.delete(oldId)) openPanels.add(p.id);
+  tr.classList.toggle('is-default', p.is_default === true);
+  const nameEl = tr.querySelector<HTMLElement>('.prov-name');
+  if (nameEl) nameEl.textContent = p.name || p.id;
+  const noteEl = tr.querySelector<HTMLElement>('.prov-td-note');
+  if (noteEl) noteEl.textContent = p.note ?? '—';
+  const fmtEl = tr.querySelector<HTMLElement>('.prov-td-fmt');
+  if (fmtEl) fmtEl.textContent = p.request_format ?? '—';
+  const modelsEl = tr.querySelector<HTMLElement>('.prov-td-models');
+  if (modelsEl) modelsEl.textContent = String(modelCount(p));
+  const stateEl = tr.querySelector<HTMLElement>('.prov-td-state');
+  if (stateEl) renderStateCell(stateEl, p);
+}
+
+/** 保存成功后局部刷新该行数据（仅这一行，其余行与面板 DOM 不动）。 */
+async function refreshRow(tr: HTMLTableRowElement, id: string): Promise<void> {
+  try {
+    const d = await api.providers();
+    providers = d.providers ?? [];
+    defaultModel = d.default_model ?? null;
+    const p = providers.find((x) => x.id === id);
+    if (!p) {
+      void loadProviders(); // 改名/被删：整体双缓冲刷新兜底
+      return;
+    }
+    applyRowCells(tr, p);
+  } catch {
+    void loadProviders(); // 局部刷新失败：双缓冲整体刷新兜底
+  }
+}
+
 function renderProviders(container: HTMLElement): void {
-  container.innerHTML = '';
+  releasePanels(); // 旧行 DOM 即将被替换：先摘掉它们留在层级栈上的句柄
+  container.replaceChildren();
   if (!providers.length) {
     container.appendChild(el('div', 'side-note', '暂无提供商 · 点击上方「添加提供商」创建'));
     return;
@@ -48,46 +100,9 @@ function renderProviders(container: HTMLElement): void {
   table.appendChild(thead);
   const tbody = el('tbody');
   for (const p of providers) {
-    const tr = el('tr');
-    if (p.is_default) tr.classList.add('is-default');
-    const tdName = el('td', 'prov-td-name');
-    tdName.appendChild(el('span', 'prov-name', p.name || p.id));
-    tr.appendChild(tdName);
-    const tdNote = el('td', 'prov-td-note', p.note ?? '—');
-    tr.appendChild(tdNote);
-    const tdFmt = el('td', 'prov-td-fmt', p.request_format ?? '—');
-    tr.appendChild(tdFmt);
-    const tdModels = el('td', 'prov-td-models', String(modelCount(p)));
-    tr.appendChild(tdModels);
-    const tdState = el('td', 'prov-td-state');
-    if (p.is_default) tdState.appendChild(el('span', 'prov-badge', '默认'));
-    if (p.has_key) tdState.appendChild(el('span', 'prov-badge key', '已配 Key'));
-    if (!p.is_default && !p.has_key) tdState.textContent = '—';
-    tr.appendChild(tdState);
-    const tdOps = el('td', 'prov-td-ops');
-    const edit = el('button', 'btn-mini', '编辑') as HTMLButtonElement;
-    edit.type = 'button';
-    edit.addEventListener('click', () => openEditor(p.id));
-    const del = el('button', 'btn-mini danger', '删除') as HTMLButtonElement;
-    del.type = 'button';
-    del.addEventListener('click', () => {
-      void confirmDialog({
-        title: '删除提供商',
-        message: '确认删除提供商「' + (p.name || p.id) + '」？',
-        okLabel: '删除',
-        danger: true,
-      }).then((ok) => {
-        if (!ok) return;
-        void api
-          .deleteProvider(p.id)
-          .then(() => void loadProviders())
-          .catch((err: unknown) => setMsg('删除失败：' + fmtErr(err)));
-      });
-    });
-    tdOps.appendChild(edit);
-    tdOps.appendChild(del);
-    tr.appendChild(tdOps);
-    tbody.appendChild(tr);
+    const row = renderProviderRow(p);
+    tbody.appendChild(row.tr);
+    tbody.appendChild(row.panelTr);
   }
   table.appendChild(tbody);
   container.appendChild(table);
@@ -172,7 +187,7 @@ export async function loadProviders(): Promise<void> {
   boxEl.replaceChildren(...off.childNodes);
 }
 
-// ---- 编辑弹窗 ---------------------------------------------------------------------
+// ---- 表单（弹窗「添加」与行内联「编辑」共用同一套构建逻辑） ------------------------
 
 interface ModelRow {
   id: HTMLInputElement;
@@ -183,9 +198,19 @@ interface ModelRow {
   li: HTMLElement;
 }
 
+interface ProviderPayload {
+  id: string;
+  name: string;
+  note: string;
+  base_url: string;
+  request_format: string;
+  api_key?: string;
+  models: ProviderModelSpec[];
+}
+
 interface EditorRefs {
-  scrim: HTMLElement;
-  card: HTMLElement;
+  /** 表单根 DOM（字段 + 模型列表 + 操作行） */
+  root: HTMLElement;
   name: HTMLInputElement;
   note: HTMLInputElement;
   key: HTMLInputElement;
@@ -194,24 +219,20 @@ interface EditorRefs {
   modelsBox: HTMLElement;
   status: HTMLElement;
   rows: ModelRow[];
+  /** 内容高度变化回调（内联面板用于重算 max-height） */
+  onLayout?: (() => void) | undefined;
 }
 
-let editor: EditorRefs | null = null;
-
-function closeEditor(): void {
-  editor?.scrim.remove();
-  editor = null;
+interface FormHooks {
+  /** 保存成功（后端接受）→ 收起面板/关弹窗 + 刷新数据 */
+  onSaved: (payload: ProviderPayload) => void;
+  /** 取消 */
+  onCancel: () => void;
+  /** 内容高度变化（内联面板重算 max-height；弹窗忽略） */
+  onLayout?: (() => void) | undefined;
 }
 
-function buildPayload(e: EditorRefs): {
-  id: string;
-  name: string;
-  note: string;
-  base_url: string;
-  request_format: string;
-  api_key?: string;
-  models: ProviderModelSpec[];
-} {
+function buildPayload(e: EditorRefs): ProviderPayload {
   const models: ProviderModelSpec[] = e.rows.map((r) => ({
     id: r.id.value.trim(),
     name: r.name.value.trim() || r.id.value.trim(),
@@ -272,11 +293,14 @@ function addModelRow(e: EditorRefs, id = '', name = ''): void {
   adv.appendChild(el('label', 'prov-adv-label', '最大输出 tokens'));
   adv.appendChild(maxOut);
   det.appendChild(adv);
+  // 高级区展开/收起会改变内容高度：通知内联面板重算 max-height
+  det.addEventListener('toggle', () => e.onLayout?.());
   const del = el('button', 'btn-mini danger', '移除') as HTMLButtonElement;
   del.type = 'button';
   del.addEventListener('click', () => {
     li.remove();
     e.rows = e.rows.filter((r) => r.li !== li);
+    e.onLayout?.();
   });
   li.appendChild(rid);
   li.appendChild(rname);
@@ -284,20 +308,17 @@ function addModelRow(e: EditorRefs, id = '', name = ''): void {
   li.appendChild(del);
   e.modelsBox.appendChild(li);
   e.rows.push({ id: rid, name: rname, efforts, ctx, maxOut, li });
+  e.onLayout?.();
 }
 
-function openEditor(providerId: string | null): void {
-  closeEditor();
-  const p = providerId !== null ? providers.find((x) => x.id === providerId) ?? null : null;
-
-  const scrim = el('div', 'modal-scrim');
-  const card = el('div', 'modal-card prov-modal');
-  card.appendChild(el('div', 'modal-card-title', p ? '编辑提供商：' + p.name : '添加提供商'));
+/** 构建提供商表单 DOM（弹窗「添加」与行内联「编辑」复用；返回控件引用）。 */
+function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs {
+  const root = el('div', 'prov-form');
 
   const status = el('div', 'prov-editor-status');
-  card.appendChild(status);
+  root.appendChild(status);
 
-  const field = (label: string, ctrl: HTMLElement) => {
+  const field = (label: string, ctrl: HTMLElement): HTMLElement => {
     const row = el('label', 'prov-field');
     row.appendChild(el('span', 'prov-field-label', label));
     row.appendChild(ctrl);
@@ -307,18 +328,18 @@ function openEditor(providerId: string | null): void {
   const name = el('input', 'cfg-input') as HTMLInputElement;
   name.placeholder = '提供商 id（字母/数字/下划线）';
   name.value = p?.name ?? '';
-  card.appendChild(field('名称', name));
+  root.appendChild(field('名称', name));
 
   const note = el('input', 'cfg-input') as HTMLInputElement;
   note.placeholder = '备注（可选）';
   note.value = p?.note ?? '';
-  card.appendChild(field('备注', note));
+  root.appendChild(field('备注', note));
 
   const key = el('input', 'cfg-input') as HTMLInputElement;
   key.type = 'password';
   key.placeholder = p ? '留空 = 保持现有 Key' : 'API Key';
   key.value = '';
-  card.appendChild(field('API Key', key));
+  root.appendChild(field('API Key', key));
 
   const url = el('input', 'cfg-input') as HTMLInputElement;
   url.placeholder = 'https://…/v1';
@@ -328,7 +349,7 @@ function openEditor(providerId: string | null): void {
   const urlRow = el('div', 'prov-urlrow');
   urlRow.appendChild(url);
   urlRow.appendChild(testBtn);
-  card.appendChild(field('API 请求地址', urlRow));
+  root.appendChild(field('API 请求地址', urlRow));
 
   const format = document.createElement('select');
   format.className = 'cfg-input';
@@ -348,7 +369,7 @@ function openEditor(providerId: string | null): void {
     }
     format.value = p.request_format;
   }
-  card.appendChild(field('请求格式', format));
+  root.appendChild(field('请求格式', format));
 
   // ---- 模型列表 ----
   const modelsHead = el('div', 'prov-models-head');
@@ -357,14 +378,13 @@ function openEditor(providerId: string | null): void {
   fetchBtn.type = 'button';
   fetchBtn.title = '据请求地址+Key 调用 models/fetch 快速填入（将先保存该提供商）';
   modelsHead.appendChild(fetchBtn);
-  card.appendChild(modelsHead);
+  root.appendChild(modelsHead);
   const modelsBox = el('div', 'prov-models');
-  card.appendChild(modelsBox);
+  root.appendChild(modelsBox);
 
   const e: EditorRefs = {
-    scrim, card, name, note, key, url, format, modelsBox, status, rows: [],
+    root, name, note, key, url, format, modelsBox, status, rows: [], onLayout: hooks.onLayout,
   };
-  editor = e;
 
   for (const m of p?.models ?? []) {
     addModelRow(e, m.id, m.name);
@@ -377,7 +397,7 @@ function openEditor(providerId: string | null): void {
   const addM = el('button', 'btn-mini', '+ 添加模型') as HTMLButtonElement;
   addM.type = 'button';
   addM.addEventListener('click', () => addModelRow(e));
-  card.appendChild(addM);
+  root.appendChild(addM);
 
   // ---- 操作 ----
   const actions = el('div', 'modal-card-actions');
@@ -462,8 +482,10 @@ function openEditor(providerId: string | null): void {
           save.disabled = false;
           return;
         }
-        closeEditor();
-        void loadProviders();
+        save.disabled = false;
+        status.className = 'prov-editor-status ok';
+        status.textContent = '已保存';
+        hooks.onSaved(payload);
       })
       .catch((err: unknown) => {
         status.className = 'prov-editor-status err';
@@ -472,15 +494,208 @@ function openEditor(providerId: string | null): void {
       });
   });
 
-  cancel.addEventListener('click', closeEditor);
+  cancel.addEventListener('click', () => hooks.onCancel());
   actions.appendChild(cancel);
   actions.appendChild(save);
-  card.appendChild(actions);
+  root.appendChild(actions);
+
+  return e;
+}
+
+// ---- 行内联编辑面板（任务 2） ------------------------------------------------------
+
+interface PanelState {
+  tr: HTMLTableRowElement;
+  panelTr: HTMLTableRowElement;
+  inner: HTMLElement;
+  open: boolean;
+  overlay: OverlayHandle | null;
+}
+
+/** 当前列表里存活的面板状态（列表整体刷新时用于释放其层级栈句柄）。 */
+const livePanels = new Set<PanelState>();
+
+/** 列表重建前调用：摘掉旧面板的层级栈句柄，避免 Esc 需要多按几次。 */
+function releasePanels(): void {
+  for (const st of livePanels) {
+    if (st.overlay) {
+      popOverlay(st.overlay);
+      st.overlay = null;
+    }
+  }
+  livePanels.clear();
+}
+
+/** 内容增高后重算 max-height（展开态若为 none 则无需处理）。 */
+function syncPanelHeight(state: PanelState): void {
+  if (!state.open) return;
+  const h = state.inner.style.maxHeight;
+  if (h === 'none' || h === '') return;
+  state.inner.style.maxHeight = state.inner.scrollHeight + 'px';
+}
+
+function expandPanel(state: PanelState): void {
+  if (state.open) return;
+  state.open = true;
+  const id = state.tr.dataset.id ?? '';
+  if (id) openPanels.add(id);
+  state.tr.classList.add('expanded');
+  state.tr.setAttribute('aria-expanded', 'true');
+  state.panelTr.classList.add('open');
+  // 先量出内容高度再过渡（max-height 过渡，铁律 4：只切 class，不重建 DOM）
+  state.inner.style.maxHeight = state.inner.scrollHeight + 'px';
+  state.overlay = pushOverlay(() => collapsePanel(state));
+}
+
+function collapsePanel(state: PanelState): void {
+  if (!state.open) return;
+  state.open = false;
+  const id = state.tr.dataset.id ?? '';
+  if (id) openPanels.delete(id);
+  if (state.overlay) {
+    popOverlay(state.overlay);
+    state.overlay = null;
+  }
+  // 展开完成时 maxHeight 已置 'none'：先固定当前高度并强制回流，再归零 → 收起动画生效
+  if (state.inner.style.maxHeight === 'none') {
+    state.inner.style.maxHeight = state.inner.scrollHeight + 'px';
+    void state.inner.offsetHeight;
+  }
+  state.panelTr.classList.remove('open');
+  state.tr.classList.remove('expanded');
+  state.tr.setAttribute('aria-expanded', 'false');
+  state.inner.style.maxHeight = '0px';
+}
+
+function togglePanel(state: PanelState): void {
+  if (state.open) collapsePanel(state);
+  else expandPanel(state);
+}
+
+/** 构建一行提供商（数据行 + 正下方内联面板行）；面板 DOM 只构建一次。 */
+function renderProviderRow(p: ProviderInfo): { tr: HTMLTableRowElement; panelTr: HTMLTableRowElement } {
+  const tr = el('tr', 'prov-row') as HTMLTableRowElement;
+  tr.dataset.id = p.id;
+  tr.title = '点击展开/收起内联编辑';
+  tr.setAttribute('aria-expanded', 'false');
+  if (p.is_default) tr.classList.add('is-default');
+
+  const tdName = el('td', 'prov-td-name');
+  tdName.appendChild(el('span', 'prov-name', p.name || p.id));
+  tr.appendChild(tdName);
+  tr.appendChild(el('td', 'prov-td-note', p.note ?? '—'));
+  tr.appendChild(el('td', 'prov-td-fmt', p.request_format ?? '—'));
+  tr.appendChild(el('td', 'prov-td-models', String(modelCount(p))));
+  const tdState = el('td', 'prov-td-state');
+  renderStateCell(tdState, p);
+  tr.appendChild(tdState);
+
+  const tdOps = el('td', 'prov-td-ops');
+  const del = el('button', 'btn-mini danger', '删除') as HTMLButtonElement;
+  del.type = 'button';
+  del.addEventListener('click', (e) => {
+    e.stopPropagation(); // 删除不触发展开/收起
+    const id = tr.dataset.id ?? '';
+    const cur = providers.find((x) => x.id === id);
+    void confirmDialog({
+      title: '删除提供商',
+      message: '确认删除提供商「' + (cur?.name || id) + '」？',
+      okLabel: '删除',
+      danger: true,
+    }).then((ok) => {
+      if (!ok) return;
+      void api
+        .deleteProvider(id)
+        .then(() => void loadProviders())
+        .catch((err: unknown) => setMsg('删除失败：' + fmtErr(err)));
+    });
+  });
+  tdOps.appendChild(del);
+  tr.appendChild(tdOps);
+
+  // ---- 内联面板行（该行正下方） ----
+  const panelTr = el('tr', 'prov-panel-row') as HTMLTableRowElement;
+  const td = el('td', 'prov-panel-td') as HTMLTableCellElement;
+  td.colSpan = 6;
+  const inner = el('div', 'prov-inline');
+  td.appendChild(inner);
+  panelTr.appendChild(td);
+
+  const state: PanelState = { tr, panelTr, inner, open: false, overlay: null };
+  livePanels.add(state);
+  const refs = buildProviderForm(p, {
+    onSaved: (payload) => {
+      collapsePanel(state);
+      void refreshRow(tr, payload.id);
+    },
+    onCancel: () => collapsePanel(state),
+    onLayout: () => syncPanelHeight(state),
+  });
+  inner.appendChild(refs.root);
+
+  // 展开完成 → 解除高度约束（内容随后增高不再被裁切）
+  inner.addEventListener('transitionend', (e) => {
+    if (e.target !== inner || e.propertyName !== 'max-height') return;
+    if (state.open) inner.style.maxHeight = 'none';
+  });
+
+  // 点击行本体（非交互控件）→ 原地展开/收起
+  tr.addEventListener('click', (e) => {
+    const t = e.target;
+    if (t instanceof Element && t.closest('button, a, input, select, textarea, label')) return;
+    togglePanel(state);
+  });
+
+  // 刷新后恢复展开态（无动画：直接落到位）
+  if (openPanels.has(p.id)) {
+    state.open = true;
+    tr.classList.add('expanded');
+    tr.setAttribute('aria-expanded', 'true');
+    panelTr.classList.add('open');
+    inner.style.maxHeight = 'none';
+    state.overlay = pushOverlay(() => collapsePanel(state));
+  }
+
+  return { tr, panelTr };
+}
+
+// ---- 「添加提供商」弹窗（编辑走行内联面板） -----------------------------------------
+
+let closeAddModal: (() => void) | null = null;
+
+function openEditor(): void {
+  closeAddModal?.(); // 同一时刻只保留一个「添加提供商」弹窗
+
+  const scrim = el('div', 'modal-scrim');
+  const card = el('div', 'modal-card prov-modal');
+  card.appendChild(el('div', 'modal-card-title', '添加提供商'));
+
+  let overlay: OverlayHandle | null = null;
+  const close = (): void => {
+    if (closeAddModal === close) closeAddModal = null;
+    if (overlay) {
+      popOverlay(overlay);
+      overlay = null;
+    }
+    scrim.remove();
+  };
+  closeAddModal = close;
+
+  const form = buildProviderForm(null, {
+    onSaved: () => {
+      close();
+      void loadProviders();
+    },
+    onCancel: close,
+  });
+  card.appendChild(form.root);
   scrim.appendChild(card);
   document.body.appendChild(scrim);
-  name.focus();
+  // 任务 3：挂到 body 的弹窗打开时 push 自身 close，Esc 只关栈顶一层
+  overlay = pushOverlay(close);
+  form.name.focus();
 }
 
 export function initProvidersSection(): void {
-  need<HTMLButtonElement>('#btnAddProvider').addEventListener('click', () => openEditor(null));
+  need<HTMLButtonElement>('#btnAddProvider').addEventListener('click', () => openEditor());
 }

@@ -3,7 +3,7 @@
   "private": true,
   "version": "2.0.0",
   "type": "module",
-  "description": "Celestea Studio UI — TypeScript + Vite, DSH night theme + color cards",
+  "description": "Celestea Studio UI — TypeScript + Vite, mono (black/white) theme",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

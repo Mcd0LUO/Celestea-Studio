@@ -44,8 +44,8 @@ function refreshHealthChip(statusline: Statusline): void {
 }
 
 function init(): void {
-  // 1) 主题（夜航黑灰默认；localStorage 持久化；顶栏按钮循环切换色卡）
-  initTheme('night');
+  // 1) 主题（第 26 轮：仅 mono 黑白；localStorage 持久化；单主题下顶栏按钮为 no-op）
+  initTheme('mono');
   setupThemeSwitcher(need<HTMLButtonElement>('#btnTheme'));
 
   // 2) 侧栏：收起/展开 + 拖宽（状态持久）

@@ -1,7 +1,7 @@
 /* ============================================================================
  * 通用设置页（W227 续：左导航 + 右内容，取代原 #modal 配置弹层）
  *   导航：「通用配置」「工具」「会话」三页
- *   主题：全部走 tokens.css 的 DSH night（及 sakura/klein 色卡）变量，
+ *   主题：全部走 tokens.css 的 mono（黑白）令牌变量，
  *   本文件不写死任何颜色。
  * ============================================================================ */
 
@@ -149,6 +149,31 @@
 .prov-badge.key { color: var(--c-ok); border-color: var(--c-ok); }
 .btn-mini.danger { color: var(--c-err); }
 .btn-mini.danger:hover { background: var(--c-err-dim); color: var(--c-err); }
+
+/* ---- 行内联编辑面板（第 26 轮 W256：点行本体原地展开；max-height 过渡，不重建 DOM） ---- */
+.prov-table tbody tr.prov-row { cursor: pointer; }
+.prov-table tbody tr.prov-row.expanded { background: var(--c-accent-soft); }
+.prov-table tbody tr.prov-panel-row { background: transparent; }
+.prov-table tbody tr.prov-panel-row:hover { background: transparent; }
+.prov-table tbody tr.prov-panel-row > td { padding: 0; border-top: none; }
+.prov-inline {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  visibility: hidden;
+  /* 铁律 4：折叠/展开只切 class + transition，不删建子节点 */
+  transition: max-height .24s ease, opacity .2s ease, visibility 0s linear .24s;
+}
+.prov-panel-row.open .prov-inline {
+  opacity: 1;
+  visibility: visible;
+  transition: max-height .24s ease, opacity .2s ease, visibility 0s linear 0s;
+}
+.prov-inline .prov-form {
+  padding: 10px 12px 12px;
+  border-top: 1px dashed var(--c-border-subtle);
+  background: var(--c-surface);
+}
 
 /* ---- 默认模型：独立卡片区 ---- */
 .prov-default-card {
