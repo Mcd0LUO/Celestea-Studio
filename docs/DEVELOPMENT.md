@@ -4,7 +4,8 @@
 > 契约字段名 / 代码标识符保留英文原文，其余以中文叙述。
 > 拿不准的地方一律标 `TODO` / `UNCLEAR`，不臆测。
 >
-> 代码基线：`main` @ `1559479`（另含工作区未提交的 W263 statusline 改动，见 §8.4）。
+> 代码基线：`main` @ `937fe63`（W263「状态栏真实化 + 引擎用量/缓存命中率」已落地）。
+> 校对期间工作区仍在推进，行号/测试数可能随后续提交漂移——每个结论都给了**符号名**，以符号名为准。
 > 校对范围：`src/*.rs`（8726 行）、`frontend/src/**`、`scripts/run-studio.sh`、systemd 单元、nginx 站点配置。
 
 ---
@@ -466,7 +467,7 @@ cargo test --release
 11. **`activate` compose 失败时 `CELESTEA_SESSION_DIR` 已被改写且不回滚**（`src/workspaces.rs:1353-1359`）。
 12. **`providers.json` / `workspaces.json` 都没有 `version` 字段**：所谓 v2 只是命名约定，靠字段形态与 `normalize_registry` 判定，不是显式版本号。
 13. **`session.json` 只在 `POST /api/sessions` 时写入**：`POST /api/config` 改模型**不会**回写会话级 model，会话级模型只在创建时决定（`src/workspaces.rs:1206-1218`）。
-14. **工作区当前有未提交改动**（W263 statusline：`src/main.rs`、`Cargo.toml`、`frontend/src/{sse,statusline,types,chat}.ts` 等）。本文按**工作区当前状态**描述；提交前请确认这部分是否已落地。
+14. **本文校对期间代码在动**：W263（statusline 真实化 / 引擎 usage / 缓存命中率）在本文撰写过程中从"未提交"变为已提交（`937fe63`），测试数也从 65 变到 69。凡"数量/行号"类结论都可能随后续提交漂移；**契约与机制结论不受影响**，且都标了符号名。
 
 ---
 
