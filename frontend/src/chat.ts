@@ -73,11 +73,13 @@ function finalizeTurn(phase: string): void {
 
 function onStatus(p: StatusPayload): void {
   if (p.phase === 'start') {
-    // 新 turn：若上一视图已有内容则收尾；空占位气泡直接复用，避免双块
+    // 第 23 轮：思考阶段绝不创建 assistant 气泡——只在首个 text delta
+    // （onText 内 ensureAssistant）或工具卡需要时才创建；思考期间仅显示思考块。
     endTurn(); // 新轮开始：思考段归属重置（跨轮不跨移）
     if (S.streaming && S.assistant) {
+      // 异常残留（理论上 finalizeTurn 已清）：有内容才收尾，空块直接移除
       if (assistantHasContent(S.assistant)) finalizeTurn('completed');
-      else removeAssistant(S.assistant); // 丢弃空占位（含 DOM），本轮重建唯一块
+      else removeAssistant(S.assistant);
     }
     S.turn = p.turn ?? null;
     S.streaming = true;
@@ -86,7 +88,6 @@ function onStatus(p: StatusPayload): void {
     setStatusTurn(p.turn ?? null);
     setStatusStep(null);
     startElapsedTimer();
-    ensureAssistant();
     return;
   }
   if (
@@ -255,7 +256,7 @@ export function initChat(): void {
           if (S.turn === null && r.turn !== undefined) S.turn = r.turn;
           setStatusTurn(S.turn !== null ? S.turn : r.turn ?? 0);
           if (S.turn === null) startElapsedTimer();
-          ensureAssistant();
+          // 第 23 轮：不在此创建占位气泡——首个 text delta / 工具卡才创建
           setStatus('运行中…', 'busy');
         })
         .catch((err: unknown) => {

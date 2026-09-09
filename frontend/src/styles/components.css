@@ -391,3 +391,14 @@
   0%   { background-position: -40% 0; }
   100% { background-position: 140% 0; }
 }
+/* 第 23 轮：思考块可折叠（标题行可点；流式思考中不折叠） */
+.msg.think-seg .think-head { cursor: pointer; user-select: none; }
+.msg.think-seg .think-head:hover { color: var(--c-text-1); }
+.think-fold-mark {
+  font-size: 10px; color: var(--c-text-3);
+  transition: transform .12s ease;
+}
+.think-time { margin-left: auto; font-size: 10px; color: var(--c-text-3); font-family: var(--mono); }
+.think-seg-folded { display: none; font-size: 11px; color: var(--c-text-3); padding: 2px 0; }
+.msg.think-seg.collapsed .think-seg-body { display: none; }
+.msg.think-seg.collapsed .think-seg-folded { display: block; }

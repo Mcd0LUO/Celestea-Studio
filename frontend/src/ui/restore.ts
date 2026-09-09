@@ -92,14 +92,18 @@ export function finalAssistantDedup(text?: string): boolean {
 let histToolStep = 0;
 let pendingTool: ToolCardRef | null = null;
 
-/** 解析 "name(args)" 形态的工具调用条目。 */
+/** 解析 "name(args)" 形态的工具调用条目（第 23 轮加固）：
+ *  名字字符放宽到 [A-Za-z0-9_.-]（工具名可含点/连字符）；args 用 [\s\S]*
+ *  贪婪匹配到最后一个右括号——含引号/换行/嵌套括号均不误判；
+ *  "name()" 空参合法；前后空白容忍。解析失败由调用方以可见文本行展示。 */
 function parseToolCall(content: string): { name: string; args: string } | null {
   const t = content.trim();
-  const m = /^([A-Za-z_][A-Za-z0-9_-]*)\(([\s\S]*)\)$/.exec(t);
+  const m = /^([A-Za-z_][A-Za-z0-9_.-]*)\(([\s\S]*)\)$/.exec(t);
   if (!m) return null;
   return { name: m[1]!, args: m[2]! };
 }
 
+/** 解析失败回退：以可见文本行展示**完整原文**（含工具名），绝不静默丢失。 */
 function appendFallbackToolLine(content: string, container: HTMLElement): void {
   const col = el('div', 'mcol');
   const msg = el('div', 'msg tool');
@@ -157,7 +161,38 @@ function renderOne(m: HistoryMsg, container: HTMLElement): void {
     S.assistant = null;
     return;
   }
+  if (m.role === 'thinking') {
+    // W252：后端将持久化思考（role=thinking）；未就绪时不出现该条目。
+    // 渲染为与 live 相同的弱化思考块样式（静态内容，标题行可折叠）。
+    renderThinkingHistory(content, container);
+    return;
+  }
   renderToolHistory(content, container);
+}
+
+/** 历史思考条目：弱化块（.think-seg 样式，与 live 同款；折叠交互复用）。 */
+function renderThinkingHistory(content: string, container: HTMLElement): void {
+  const col = el('div', 'mcol');
+  const msg = el('div', 'msg think-seg');
+  const cap = el('div', 'msg-caption think-head');
+  cap.appendChild(el('span', 'who', '思考'));
+  const foldMark = el('span', 'think-fold-mark', '▾');
+  cap.appendChild(foldMark);
+  cap.appendChild(el('span', 'think-time', ''));
+  msg.appendChild(cap);
+  const bubble = el('div', 'bubble think-seg-bubble');
+  const body = el('div', 'think-seg-body');
+  body.textContent = content;
+  bubble.appendChild(body);
+  const folded = el('div', 'think-seg-folded', '思考已折叠，点击展开');
+  bubble.appendChild(folded);
+  msg.appendChild(bubble);
+  col.appendChild(msg);
+  container.appendChild(col);
+  cap.addEventListener('click', () => {
+    col.classList.toggle('collapsed');
+    foldMark.textContent = col.classList.contains('collapsed') ? '▸' : '▾';
+  });
 }
 
 /**

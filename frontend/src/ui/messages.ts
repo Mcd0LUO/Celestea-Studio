@@ -142,8 +142,9 @@ export function flushTextSegment(): void {
 // ---- thinking（弱化独立段，按事件顺序出现，不再聚合进气泡） ----------------------
 
 interface ThinkSeg {
-  root: HTMLElement;
-  body: HTMLElement;
+  root: HTMLElement;   // .mcol 根（含折叠状态 class）
+  head: HTMLElement;   // 标题行（可点折叠/展开）
+  body: HTMLElement;   // 内容
   text: string;
 }
 
@@ -171,17 +172,30 @@ export function endTurn(): void {
 export function appendThinking(delta: string): void {
   if (!thinkSeg) {
     hideEmptyHint();
-    thinkSeg = { root: el('div', 'mcol'), body: el('div', 'think-seg-body'), text: '' };
+    const root = el('div', 'mcol');
     const msg = el('div', 'msg think-seg');
-    const cap = el('div', 'msg-caption');
+    const cap = el('div', 'msg-caption think-head') as HTMLElement;
     cap.appendChild(el('span', 'who', '思考'));
-    cap.appendChild(el('span', null, fmtNow()));
+    const foldMark = el('span', 'think-fold-mark', '▾');
+    cap.appendChild(foldMark);
+    cap.appendChild(el('span', 'think-time', fmtNow()));
     msg.appendChild(cap);
     const bubble = el('div', 'bubble think-seg-bubble');
-    bubble.appendChild(thinkSeg.body);
+    const body = el('div', 'think-seg-body');
+    bubble.appendChild(body);
+    const folded = el('div', 'think-seg-folded', '思考已折叠，点击展开');
+    bubble.appendChild(folded);
     msg.appendChild(bubble);
-    thinkSeg.root.appendChild(msg);
-    MsgsEl.appendChild(thinkSeg.root);
+    root.appendChild(msg);
+    MsgsEl.appendChild(root);
+    thinkSeg = { root, head: cap, body, text: '' };
+    body.textContent = '思考中…'; // 流式思考占位态（弱化）
+    // 点击标题行折叠/展开（第 23 轮：流式思考中不折叠）
+    cap.addEventListener('click', () => {
+      if (thinkSeg !== null && S.streaming) return; // 流式思考中不折叠
+      root.classList.toggle('collapsed');
+      foldMark.textContent = root.classList.contains('collapsed') ? '▸' : '▾';
+    });
   }
   // 重排：目标 = 当前文本段 ?? 同轮最近文本段（含 tool 截断收尾的）
   const target = S.assistant?.root ?? lastTextCol;
@@ -190,7 +204,7 @@ export function appendThinking(delta: string): void {
     MsgsEl.insertBefore(thinkSeg.root, target);
   }
   thinkSeg.text += delta || '';
-  thinkSeg.body.textContent = thinkSeg.text;
+  thinkSeg.body.textContent = thinkSeg.text === '' ? '思考中…' : thinkSeg.text;
   autoscroll();
   railSync();
 }

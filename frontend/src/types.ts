@@ -132,7 +132,7 @@ export interface SessionsResp {
 
 // ---- 会话历史（GET /api/sessions/{id}/messages，回放/恢复用） --------------------
 
-export type HistoryRole = 'user' | 'assistant' | 'tool';
+export type HistoryRole = 'user' | 'assistant' | 'tool' | 'thinking';
 
 export interface HistoryMsg {
   role: HistoryRole;
