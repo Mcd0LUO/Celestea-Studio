@@ -155,7 +155,7 @@ pub(crate) fn sanitized_config(profile: &Profile, base_url: &str) -> Value {
         "base_url": base_url,
         "max_steps": profile.max_steps,
         "max_parallel_tool_calls": profile.max_parallel_tool_calls,
-        "reasoning_effort": serde_json::to_value(profile.reasoning_effort).unwrap_or(Value::Null),
+        "reasoning_effort": serde_json::to_value(profile.reasoning_effort.clone()).unwrap_or(Value::Null),
         "max_output_tokens": profile.max_output_tokens,
         "context_window": profile.context_window_tokens,
         "system_prompt": profile.system_prompt.clone(),
@@ -179,8 +179,8 @@ pub(crate) fn profile_to_json(profile: &Profile) -> Value {
     if let Some(b) = &profile.base_url {
         m.insert("base_url".to_string(), Value::String(b.clone()));
     }
-    if let Some(e) = profile.reasoning_effort {
-        // engine-level serialization: "low" | "medium" | "high"
+    if let Some(e) = &profile.reasoning_effort {
+        // W260: free-form passthrough - any user-defined tier label verbatim.
         m.insert("reasoning_effort".to_string(), serde_json::to_value(e).unwrap_or(Value::Null));
     }
     if let Some(t) = profile.max_output_tokens {
@@ -344,7 +344,7 @@ pub(crate) fn build_gen(profile: Profile) -> Result<Gen, String> {
         runtime: Arc::new(runtime),
         model: profile.model.clone(),
         base_url: base_url.clone(),
-        reasoning_effort: serde_json::to_value(profile.reasoning_effort).unwrap_or(Value::Null),
+        reasoning_effort: serde_json::to_value(profile.reasoning_effort.clone()).unwrap_or(Value::Null),
         config_json: sanitized_config(&profile, &base_url),
         profile,
     })

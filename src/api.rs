@@ -193,15 +193,14 @@ pub struct ConfigReq {
 
 /// Public effort tier -> engine-level effort name. max == engine High (the
 /// ceiling the engine exposes). "" / "off" clears the effort.
-fn parse_effort(s: &str) -> Result<Option<&'static str>, String> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "" | "off" => Ok(None),
-        "low" => Ok(Some("low")),
-        "medium" => Ok(Some("medium")),
-        "high" | "max" => Ok(Some("high")),
-        other => Err(format!(
-            "invalid reasoning_effort '{other}': expected low|high|max (off clears)"
-        )),
+fn parse_effort(s: &str) -> Option<String> {
+    // W260: free-form passthrough - user-defined tiers (low/high/max/custom)
+    // reach the upstream verbatim; empty/off clears the override.
+    let t = s.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("off") {
+        None
+    } else {
+        Some(t.to_string())
     }
 }
 
@@ -255,21 +254,10 @@ pub async fn post_config(State(st): State<Shared>, Json(req): Json<ConfigReq>) -
         pj["model"] = json!(m);
     }
 
-    let effort: Option<Result<Option<&'static str>, String>> =
-        req.reasoning_effort.as_ref().map(|v| match v {
-            None => Ok(None), // JSON null -> clear
-            Some(s) => parse_effort(s),
-        });
-    let effort = match effort {
-        Some(Err(e)) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"ok": false, "error": e})),
-            )
-        }
-        Some(Ok(v)) => Some(v),
-        None => None,
-    };
+    let effort: Option<Option<String>> = req.reasoning_effort.as_ref().map(|v| match v {
+        None => None, // JSON null -> clear
+        Some(s) => parse_effort(s),
+    });
     if let Some(Some(eng)) = effort {
         // efforts are meaningful only on reasoning models: reject the pairing
         // for a KNOWN non-reasoning model (unknown ids on custom endpoints
