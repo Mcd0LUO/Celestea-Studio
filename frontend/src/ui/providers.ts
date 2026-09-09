@@ -241,6 +241,10 @@ interface EditorRefs {
   rows: ModelRow[];
   /** 内容高度变化回调（内联面板用于重算 max-height） */
   onLayout?: (() => void) | undefined;
+  /** W262: 编辑既有提供商时的原始 id（身份）；新建为 undefined。
+   *  名称字段只是显示名，绝不能拿它当 id —— 否则热编辑会把同一条记录
+   *  存成第二个 id（同名两条网关的根因）。 */
+  originalId?: string | undefined;
 }
 
 interface FormHooks {
@@ -267,7 +271,8 @@ function buildPayload(e: EditorRefs): ProviderPayload {
     }));
   const key = e.key.value.trim();
   return {
-    id: e.name.value.trim(),
+    // W262: 编辑既有记录时沿用原始 id；仅新建时由名称派生。
+    id: e.originalId ?? e.name.value.trim(),
     name: e.name.value.trim(),
     note: e.note.value.trim(),
     base_url: e.url.value.trim(),
@@ -278,9 +283,15 @@ function buildPayload(e: EditorRefs): ProviderPayload {
 }
 
 function numOrNull(i: HTMLInputElement): number | null {
-  const t = i.value.trim();
+  // W262: 支持 k / m 后缀（1k=1000，1m=1000000，1.5m=1500000，大小写与空格容错）
+  const t = i.value.trim().toLowerCase().replace(/\s+/g, '');
   if (t === '') return null;
-  const n = Number(t);
+  const m = /^(\d+(?:\.\d+)?)([km])?$/.exec(t);
+  if (!m) return null;
+  const base = Number(m[1]);
+  if (!Number.isFinite(base) || base < 0) return null;
+  const mult = m[2] === 'k' ? 1_000 : m[2] === 'm' ? 1_000_000 : 1;
+  const n = Math.round(base * mult);
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
@@ -429,13 +440,13 @@ function addModelRow(e: EditorRefs, id = '', name = ''): void {
     },
   };
   const ctx = el('input', 'cfg-input') as HTMLInputElement;
-  ctx.type = 'number';
+  ctx.type = 'text';
   ctx.min = '0';
-  ctx.placeholder = '上下文窗口（如 1000000）';
+  ctx.placeholder = '上下文窗口（如 1000000 / 1m / 128k）';
   const maxOut = el('input', 'cfg-input') as HTMLInputElement;
-  maxOut.type = 'number';
+  maxOut.type = 'text';
   maxOut.min = '0';
-  maxOut.placeholder = '最大输出 tokens';
+  maxOut.placeholder = '最大输出 tokens（如 8192 / 8k）';
   adv.appendChild(el('label', 'prov-adv-label', '推理强度'));
   adv.appendChild(chipsRoot);
   adv.appendChild(el('label', 'prov-adv-label', '模型上下文'));
@@ -534,6 +545,7 @@ function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs
 
   const e: EditorRefs = {
     root, name, note, key, url, format, modelsBox, status, rows: [], onLayout: hooks.onLayout,
+    originalId: p?.id,
   };
 
   for (const m of p?.models ?? []) {
