@@ -5,7 +5,7 @@
 // ============================================================================
 
 /** 版本号（与 package.json version 同步）。 */
-export const APP_VERSION = '2.0.0';
+export const APP_VERSION = '2.1.0';
 
 /** 构建时间（发布时更新）。 */
-export const BUILD_TIME = '2026-09-08';
+export const BUILD_TIME = '2026-09-09';
