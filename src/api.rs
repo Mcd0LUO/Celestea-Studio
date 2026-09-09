@@ -89,15 +89,34 @@ pub(crate) fn session_event_to_message(ev: &SessionEvent) -> Option<Value> {
         SessionEvent::AssistantMessage { text } => {
             Some(json!({"role": "assistant", "content": text}))
         }
-        SessionEvent::ToolCall { name, args, .. } => {
-            Some(json!({"role": "tool", "content": format!("{name}({args})")}))
+        SessionEvent::ThinkingDelta { text } => {
+            Some(json!({"role": "thinking", "content": text}))
         }
-        SessionEvent::ToolResult { value, error, .. } => {
+        SessionEvent::ToolCall { id, name, args } => {
+            // Structured fields for the frontend (no regex parsing needed);
+            // content stays as the flattened display string for back-compat.
+            Some(json!({
+                "role": "tool",
+                "kind": "call",
+                "content": format!("{name}({args})"),
+                "tool_call_id": id,
+                "tool_name": name,
+                "tool_args": args,
+            }))
+        }
+        SessionEvent::ToolResult { id, value, error } => {
             let content = match error {
                 Some(e) if !e.is_empty() => format!("Error: {e}"),
                 _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
             };
-            Some(json!({"role": "tool", "content": content}))
+            Some(json!({
+                "role": "tool",
+                "kind": "result",
+                "content": content,
+                "tool_call_id": id,
+                "tool_value": value,
+                "tool_error": error,
+            }))
         }
     }
 }
@@ -551,9 +570,25 @@ mod w228_tests {
         assert_eq!(msgs[1], json!({"role": "assistant", "content": "hello"}));
         assert_eq!(
             msgs[2],
-            json!({"role": "tool", "content": r#"read_file({"path":"/tmp/x"})"#})
+            json!({
+                "role": "tool",
+                "kind": "call",
+                "content": r#"read_file({"path":"/tmp/x"})"#,
+                "tool_call_id": "c1",
+                "tool_name": "read_file",
+                "tool_args": {"path": "/tmp/x"},
+            })
         );
-        assert_eq!(msgs[3], json!({"role": "tool", "content": r#"{"ok":true}"#}));
-        assert_eq!(msgs[4], json!({"role": "tool", "content": "Error: boom"}));
+        assert_eq!(
+            msgs[3],
+            json!({"role": "tool", "kind": "result", "content": r#"{"ok":true}"#, "tool_call_id": "c1", "tool_value": {"ok": true}, "tool_error": null})
+        );
+        assert_eq!(
+            msgs[4],
+            json!({"role": "tool", "kind": "result", "content": "Error: boom", "tool_call_id": "c2", "tool_value": null, "tool_error": "boom"})
+        );
+        // Thinking deltas map to role=thinking.
+        let th = session_event_to_message(&SessionEvent::ThinkingDelta { text: "think".into() }).unwrap();
+        assert_eq!(th, json!({"role": "thinking", "content": "think"}));
     }
 }

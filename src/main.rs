@@ -490,7 +490,7 @@ fn estimated_context_chars(events: &[SessionEvent]) -> u64 {
     let mut total = 0u64;
     for ev in events {
         match ev {
-            SessionEvent::TurnStart { .. } | SessionEvent::TurnEnd { .. } => {}
+            SessionEvent::TurnStart { .. } | SessionEvent::TurnEnd { .. } | SessionEvent::ThinkingDelta { .. } => {}
             SessionEvent::UserMessage { text } => total += text.chars().count() as u64,
             SessionEvent::AssistantMessage { text } => total += text.chars().count() as u64,
             SessionEvent::ToolCall { id, name, args } => {
