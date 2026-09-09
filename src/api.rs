@@ -92,25 +92,33 @@ pub(crate) fn session_event_to_message(ev: &SessionEvent) -> Option<Value> {
         SessionEvent::ThinkingDelta { text } => {
             Some(json!({"role": "thinking", "content": text}))
         }
-        SessionEvent::ToolCall { id, name, args } => {
+        SessionEvent::ToolCall { id, name, args, parent_id } => {
             // Structured fields for the frontend (no regex parsing needed);
             // content stays as the flattened display string for back-compat.
-            Some(json!({
+            let mut v = json!({
                 "role": "tool",
                 "kind": "call",
                 "tool_call_id": id,
                 "tool_name": name,
                 "tool_args": args,
-            }))
+            });
+            if let Some(p) = parent_id {
+                v["tool_parent_id"] = json!(p);
+            }
+            Some(v)
         }
-        SessionEvent::ToolResult { id, value, error } => {
-            Some(json!({
+        SessionEvent::ToolResult { id, value, error, parent_id } => {
+            let mut v = json!({
                 "role": "tool",
                 "kind": "result",
                 "tool_call_id": id,
                 "tool_value": value,
                 "tool_error": error,
-            }))
+            });
+            if let Some(p) = parent_id {
+                v["tool_parent_id"] = json!(p);
+            }
+            Some(v)
         }
     }
 }
@@ -553,9 +561,9 @@ mod w228_tests {
             SessionEvent::TurnStart { id: "t1".into() },
             SessionEvent::UserMessage { text: "hi".into() },
             SessionEvent::AssistantMessage { text: "hello".into() },
-            SessionEvent::ToolCall { id: "c1".into(), name: "read_file".into(), args: json!({"path": "/tmp/x"}) },
-            SessionEvent::ToolResult { id: "c1".into(), value: Some(json!({"ok": true})), error: None },
-            SessionEvent::ToolResult { id: "c2".into(), value: None, error: Some("boom".into()) },
+            SessionEvent::ToolCall { id: "c1".into(), name: "read_file".into(), args: json!({"path": "/tmp/x"}), parent_id: None },
+            SessionEvent::ToolResult { id: "c1".into(), value: Some(json!({"ok": true})), error: None, parent_id: None },
+            SessionEvent::ToolResult { id: "c2".into(), value: None, error: Some("boom".into()), parent_id: None },
             SessionEvent::TurnEnd { id: "t1".into(), outcome: celestea_core::TurnOutcome::Completed },
         ];
         let msgs: Vec<Value> = evs.iter().filter_map(session_event_to_message).collect();

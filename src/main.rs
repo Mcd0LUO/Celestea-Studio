@@ -493,12 +493,12 @@ fn estimated_context_chars(events: &[SessionEvent]) -> u64 {
             SessionEvent::TurnStart { .. } | SessionEvent::TurnEnd { .. } | SessionEvent::ThinkingDelta { .. } => {}
             SessionEvent::UserMessage { text } => total += text.chars().count() as u64,
             SessionEvent::AssistantMessage { text } => total += text.chars().count() as u64,
-            SessionEvent::ToolCall { id, name, args } => {
+            SessionEvent::ToolCall { id, name, args, .. } => {
                 total += id.chars().count() as u64;
                 total += name.chars().count() as u64;
                 total += args.to_string().chars().count() as u64;
             }
-            SessionEvent::ToolResult { id, value, error } => {
+            SessionEvent::ToolResult { id, value, error, .. } => {
                 total += id.chars().count() as u64;
                 if let Some(v) = value {
                     total += v.to_string().chars().count() as u64;
