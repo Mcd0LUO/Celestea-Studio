@@ -134,9 +134,23 @@ export interface SessionsResp {
 
 export type HistoryRole = 'user' | 'assistant' | 'tool' | 'thinking';
 
+/**
+ * 消息契约（W252 结构化，无兼容层）：
+ *   user/assistant/thinking → content 文本；
+ *   tool → kind='call'（tool_call_id/tool_name/tool_args）
+ *          或 kind='result'（tool_call_id/tool_value/tool_error）。
+ */
 export interface HistoryMsg {
   role: HistoryRole;
-  content: string;
+  /** 普通消息文本（tool 消息无此字段）。 */
+  content?: string;
+  /** tool 消息类型：调用 / 结果 */
+  kind?: 'call' | 'result';
+  tool_call_id?: string;
+  tool_name?: string;
+  tool_args?: unknown;
+  tool_value?: unknown;
+  tool_error?: string | null;
 }
 
 export interface MessagesResp {

@@ -20,7 +20,7 @@ marked.setOptions({ breaks: true, gfm: true });
 const MsgsEl = need<HTMLElement>('#messages');
 
 // ---- markdown ---------------------------------------------------------------
-/** Render markdown to safe-enough HTML (same policy as the legacy UI). */
+/** Render markdown to safe-enough HTML. */
 export function md(text: string): string {
   try {
     return marked.parse(text, { async: false }) as string;

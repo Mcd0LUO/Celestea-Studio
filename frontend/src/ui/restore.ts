@@ -54,8 +54,9 @@ export function feedAssistantDelta(delta: string): string | null {
     guardAll = false;
   }
   guardBuf += delta;
-  if (tail.content.startsWith(guardBuf)) {
-    if (guardBuf === tail.content) guardAll = true;
+  const tc = tail.content ?? '';
+  if (tc.startsWith(guardBuf)) {
+    if (guardBuf === tc) guardAll = true;
     return null;
   }
   // 发散：吐出累积内容，退出守卫
@@ -75,7 +76,7 @@ export function finalAssistantDedup(text?: string): boolean {
   guardActive = false;
   const drop =
     guardAll ||
-    (typeof text === 'string' && text !== '' && tail?.role === 'assistant' && text === tail.content);
+    (typeof text === 'string' && text !== '' && tail?.role === 'assistant' && text === (tail.content ?? ''));
   guardAll = false;
   tail = null;
   return drop;
@@ -83,28 +84,26 @@ export function finalAssistantDedup(text?: string): boolean {
 
 // ---- 渲染 ---------------------------------------------------------------------
 
-// ---- 历史工具条目：解析并复用 live 工具卡片样式（第 8 轮） ----
-// 契约 content 形如 "name(args)"（调用）或结果 JSON / "Error: …"（结果）。
-// call 与随后的 result 配对成一张卡（折叠三行摘要：工具名/参数截断/结果截断，
-// 可点击展开全文）；解析失败回退为普通文本行。
-// 注：thinking / info 块是 SSE 专属、不落盘，恢复侧无需处理。
+// ---- 历史工具条目：结构化字段渲染（W252 契约，第 24 轮去兼容层） ----
+// call: {role:"tool", kind:"call", tool_call_id, tool_name, tool_args}
+// result: {role:"tool", kind:"result", tool_call_id, tool_value, tool_error}
+// 按 tool_call_id 配对 call→result（顺序无关）；缺配对显示「（无结果记录）」；
+// 孤立 result 以可见文本行展示，绝不静默丢失。
+// 注：thinking / info 块为 SSE 专属，不落盘；恢复侧 thinking 条目按 W252 渲染。
 
 let histToolStep = 0;
-let pendingTool: ToolCardRef | null = null;
+const toolCardsById = new Map<string, ToolCardRef>(); // 本会话渲染中的 call 卡
 
-/** 解析 "name(args)" 形态的工具调用条目（第 23 轮加固）：
- *  名字字符放宽到 [A-Za-z0-9_.-]（工具名可含点/连字符）；args 用 [\s\S]*
- *  贪婪匹配到最后一个右括号——含引号/换行/嵌套括号均不误判；
- *  "name()" 空参合法；前后空白容忍。解析失败由调用方以可见文本行展示。 */
-function parseToolCall(content: string): { name: string; args: string } | null {
-  const t = content.trim();
-  const m = /^([A-Za-z_][A-Za-z0-9_.-]*)\(([\s\S]*)\)$/.exec(t);
-  if (!m) return null;
-  return { name: m[1]!, args: m[2]! };
+function toJsonText(v: unknown): string {
+  if (typeof v === 'string') return v;
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
 }
 
-/** 解析失败回退：以可见文本行展示**完整原文**（含工具名），绝不静默丢失。 */
-function appendFallbackToolLine(content: string, container: HTMLElement): void {
+function appendToolLine(text: string, container: HTMLElement): void {
   const col = el('div', 'mcol');
   const msg = el('div', 'msg tool');
   const cap = el('div', 'msg-caption');
@@ -112,42 +111,47 @@ function appendFallbackToolLine(content: string, container: HTMLElement): void {
   msg.appendChild(cap);
   const bubble = el('div', 'bubble');
   const body = el('div', 'content restore-tool');
-  body.textContent = content;
+  body.textContent = text;
   bubble.appendChild(body);
   msg.appendChild(bubble);
   col.appendChild(msg);
   container.appendChild(col);
 }
 
-function renderToolHistory(content: string, container: HTMLElement): void {
-  const call = parseToolCall(content);
-  if (call) {
+/** 渲染一条结构化 tool 消息（call 建卡 / result 按 id 配对回填）。 */
+function renderToolMessage(m: HistoryMsg, container: HTMLElement): void {
+  if (m.kind === 'call') {
     histToolStep += 1;
-    const ref = buildToolCard({ step: histToolStep, name: call.name, argsText: call.args });
+    const id = m.tool_call_id ?? 'call_' + histToolStep;
+    const ref = buildToolCard({
+      step: histToolStep,
+      name: m.tool_name ?? 'tool',
+      argsText: toJsonText(m.tool_args),
+    });
     container.appendChild(ref.col);
-    pendingTool = ref; // 等待紧随其后的结果条目配对
+    toolCardsById.set(id, ref);
     autoscroll(true);
     return;
   }
-  if (pendingTool) {
-    const failed = content.trim().startsWith('Error');
-    setToolResult(pendingTool, content, failed);
-    pendingTool = null;
+  // result：按 tool_call_id 配对（与到达顺序无关）
+  const id = m.tool_call_id ?? '';
+  const ref = toolCardsById.get(id);
+  if (ref) {
+    const failed = !!m.tool_error && m.tool_error !== '';
+    setToolResult(ref, failed ? String(m.tool_error) : toJsonText(m.tool_value), failed);
+    toolCardsById.delete(id);
     autoscroll(true);
     return;
   }
-  appendFallbackToolLine(content, container); // 解析失败回退：普通文本行
-}
-
-function appendNote(text: string): void {
-  const msgs = document.getElementById('messages');
-  if (msgs && !msgs.querySelector('.restore-note')) {
-    msgs.appendChild(el('div', 'restore-note', text));
-  }
+  // 孤立 result（无对应 call）：可见文本行，不静默丢失
+  appendToolLine(
+    '工具结果（无对应调用记录）：' + (m.tool_error ? String(m.tool_error) : toJsonText(m.tool_value)),
+    container,
+  );
 }
 
 function renderOne(m: HistoryMsg, container: HTMLElement): void {
-  const content = String(m.content);
+  const content = String(m.content ?? '');
   if (m.role === 'user') {
     addUserMessage(content, container);
     return;
@@ -167,7 +171,7 @@ function renderOne(m: HistoryMsg, container: HTMLElement): void {
     renderThinkingHistory(content, container);
     return;
   }
-  renderToolHistory(content, container);
+  renderToolMessage(m, container);
 }
 
 /** 历史思考条目：弱化块（.think-seg 样式，与 live 同款；折叠交互复用）。 */
@@ -205,6 +209,13 @@ function renderThinkingHistory(content: string, container: HTMLElement): void {
  * 不出现「清空→空白→重建」帧；guard() 返回 false 时丢弃（竞态：旧请求
  * 结果晚到不得覆盖新会话）。404/超时/端点缺失 → 轻提示，不崩溃。
  */
+function appendNote(text: string): void {
+  const msgs = document.getElementById('messages');
+  if (msgs && !msgs.querySelector('.restore-note')) {
+    msgs.appendChild(el('div', 'restore-note', text));
+  }
+}
+
 export async function restoreSessionHistory(id: string, guard?: () => boolean): Promise<void> {
   let resp;
   try {
@@ -229,10 +240,12 @@ export async function restoreSessionHistory(id: string, guard?: () => boolean): 
   }
   const recent = all.length > MAX_RESTORE ? all.slice(all.length - MAX_RESTORE) : all;
   for (const m of recent) renderOne(m, off);
-  if (pendingTool) {
-    // 无配对结果的调用：历史视角标记为完成（无结果行）
-    setToolResult(pendingTool, '（历史记录无结果）', false);
-    pendingTool = null;
+  if (toolCardsById.size) {
+    // 无配对结果的调用：标记「（无结果记录）」（第 24 轮文案）
+    for (const ref of toolCardsById.values()) {
+      setToolResult(ref, '（无结果记录）', false);
+    }
+    toolCardsById.clear();
   }
   if (recent.length) {
     const sep = el('div', 'live-sep');
@@ -323,7 +336,7 @@ function hideSwitchProgress(): void {
  */
 export function switchToSession(id: string): void {
   const seq = ++switchSeq;
-  pendingTool = null;
+  toolCardsById.clear();
   histToolStep = 0;
   S.assistant = null; // 旧流式视图随替换移除；新 turn 从新段开始
   S.turn = null;
