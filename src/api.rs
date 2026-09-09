@@ -98,21 +98,15 @@ pub(crate) fn session_event_to_message(ev: &SessionEvent) -> Option<Value> {
             Some(json!({
                 "role": "tool",
                 "kind": "call",
-                "content": format!("{name}({args})"),
                 "tool_call_id": id,
                 "tool_name": name,
                 "tool_args": args,
             }))
         }
         SessionEvent::ToolResult { id, value, error } => {
-            let content = match error {
-                Some(e) if !e.is_empty() => format!("Error: {e}"),
-                _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
-            };
             Some(json!({
                 "role": "tool",
                 "kind": "result",
-                "content": content,
                 "tool_call_id": id,
                 "tool_value": value,
                 "tool_error": error,
@@ -573,7 +567,6 @@ mod w228_tests {
             json!({
                 "role": "tool",
                 "kind": "call",
-                "content": r#"read_file({"path":"/tmp/x"})"#,
                 "tool_call_id": "c1",
                 "tool_name": "read_file",
                 "tool_args": {"path": "/tmp/x"},
@@ -581,11 +574,11 @@ mod w228_tests {
         );
         assert_eq!(
             msgs[3],
-            json!({"role": "tool", "kind": "result", "content": r#"{"ok":true}"#, "tool_call_id": "c1", "tool_value": {"ok": true}, "tool_error": null})
+            json!({"role": "tool", "kind": "result", "tool_call_id": "c1", "tool_value": {"ok": true}, "tool_error": null})
         );
         assert_eq!(
             msgs[4],
-            json!({"role": "tool", "kind": "result", "content": "Error: boom", "tool_call_id": "c2", "tool_value": null, "tool_error": "boom"})
+            json!({"role": "tool", "kind": "result", "tool_call_id": "c2", "tool_value": null, "tool_error": "boom"})
         );
         // Thinking deltas map to role=thinking.
         let th = session_event_to_message(&SessionEvent::ThinkingDelta { text: "think".into() }).unwrap();
