@@ -177,6 +177,9 @@ export class Statusline {
       for (const o of options) {
         body.appendChild(this.optButton(o.label, o.value ?? '', cur, () => this.apply({ reasoning_effort: o.value })));
       }
+      // W258 核查：max 与 high 在后端同映射到引擎 high（src/api.rs parse_effort），
+      // 因此选 max 后 /api/config 回读仍是 "high"，此处加一行说明避免误判为「没生效」。
+      body.appendChild(el('div', 'sl-popup-note', 'max = 引擎上限（后端映射为 high）；非推理模型会拒绝'));
       return;
     }
 

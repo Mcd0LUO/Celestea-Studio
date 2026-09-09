@@ -249,6 +249,47 @@
 }
 .prov-adv-label { font-size: 11px; color: var(--c-text-3); text-align: right; line-height: 30px; }
 
+/* ---- 推理强度档位片（W258 任务 3：low/high/max 可点击多选） ---- */
+.prov-effort-chips {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  min-height: 30px;
+}
+.prov-effort-chip {
+  background: transparent; border: 1px solid var(--c-border-strong);
+  border-radius: 999px; color: var(--c-text-2);
+  font-family: var(--mono); font-size: 11.5px;
+  padding: 4px 14px; cursor: pointer;
+}
+.prov-effort-chip:hover { border-color: var(--c-accent-ring); color: var(--c-text-1); }
+.prov-effort-chip.on {
+  background: var(--c-accent-soft); border-color: var(--c-accent-ring);
+  color: var(--c-text-1); font-weight: 600;
+}
+
+/* ---- 「获取模型」二级选择窗（W258 任务 4） ---- */
+.prov-picker { width: min(520px, calc(100vw - 40px)); }
+.prov-picker-list {
+  max-height: 320px; overflow-y: auto;
+  border-radius: 8px; background: var(--c-surface); padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.prov-picker-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 8px; border-radius: 6px; cursor: pointer;
+  font-size: 12.5px; color: var(--c-text-1);
+}
+.prov-picker-row:hover { background: var(--c-accent-soft); }
+.prov-picker-row.existing { opacity: .55; cursor: default; }
+.prov-picker-row.existing:hover { background: transparent; }
+.prov-picker-cb { accent-color: var(--c-accent); flex: 0 0 auto; }
+.prov-picker-id { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prov-picker-tag {
+  margin-left: auto; flex: 0 0 auto;
+  font-size: 10px; font-family: var(--mono); color: var(--c-text-3);
+  border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 5px;
+}
+.prov-picker-count { font-size: 11.5px; color: var(--c-text-3); font-family: var(--mono); }
+
 /* ---- 通用配置表单：对齐微调（label 等宽右对齐、提示统一缩进） ---- */
 .cfg-field { grid-template-columns: 148px minmax(0, 1fr); }
 .cfg-hint { padding-left: 2px; }

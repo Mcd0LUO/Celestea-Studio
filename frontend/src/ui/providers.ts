@@ -29,6 +29,18 @@ const FORMATS: readonly { value: string; label: string }[] = [
   { value: 'anthropic_messages', label: 'Anthropic Messages' },
 ];
 
+/** 推理强度档位（W258 任务 3）：与后端 available.efforts 一致。 */
+const EFFORT_TIERS: readonly string[] = ['low', 'high', 'max'];
+
+/** 可点击多选档位片（toggle chips）：选中只切 class，不重建 DOM（铁律 4/8）。 */
+interface EffortChips {
+  root: HTMLElement;
+  /** 回填选中态：未知档位（如历史数据里的 medium）自动补一片，保证往返不丢数据。 */
+  set(values: readonly string[]): void;
+  /** 当前选中档位（EFFORT_TIERS 顺序在前，非标准档位排后）。 */
+  values(): string[];
+}
+
 function fmtErr(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -192,7 +204,8 @@ export async function loadProviders(): Promise<void> {
 interface ModelRow {
   id: HTMLInputElement;
   name: HTMLInputElement;
-  efforts: HTMLInputElement;
+  /** W258 任务 3：推理强度 = 可点击档位片（low/high/max，可多选） */
+  efforts: EffortChips;
   ctx: HTMLInputElement;
   maxOut: HTMLInputElement;
   li: HTMLElement;
@@ -236,10 +249,8 @@ function buildPayload(e: EditorRefs): ProviderPayload {
   const models: ProviderModelSpec[] = e.rows.map((r) => ({
     id: r.id.value.trim(),
     name: r.name.value.trim() || r.id.value.trim(),
-    reasoning_efforts: r.efforts.value
-      .split(',')
-      .map((x) => x.trim())
-      .filter(Boolean),
+    // W258 任务 3：档位片多选 → 数组（后端契约不变）
+    reasoning_efforts: r.efforts.values(),
     context_window: numOrNull(r.ctx),
     max_output_tokens: numOrNull(r.maxOut),
   }));
@@ -276,8 +287,48 @@ function addModelRow(e: EditorRefs, id = '', name = ''): void {
   sum.textContent = '高级（推理强度 / 上下文 / 最大输出）';
   det.appendChild(sum);
   const adv = el('div', 'prov-model-adv-body');
-  const efforts = el('input', 'cfg-input') as HTMLInputElement;
-  efforts.placeholder = '推理强度，逗号分隔（如 low,high,max）';
+  // W258 任务 3：推理强度改为可点击档位片（多选）；点击只切 class + aria-pressed，
+  // 不重建 DOM（铁律 4/8），点完通知内联面板重算 max-height。
+  const selected = new Set<string>();
+  const chipByValue = new Map<string, HTMLButtonElement>();
+  const chipsRoot = el('div', 'prov-effort-chips');
+  const addChip = (value: string): void => {
+    const b = el('button', 'prov-effort-chip', value) as HTMLButtonElement;
+    b.type = 'button';
+    b.dataset.effort = value;
+    b.setAttribute('aria-pressed', 'false');
+    b.addEventListener('click', () => {
+      const on = selected.has(value);
+      if (on) selected.delete(value);
+      else selected.add(value);
+      b.classList.toggle('on', !on);
+      b.setAttribute('aria-pressed', on ? 'false' : 'true');
+      e.onLayout?.();
+    });
+    chipByValue.set(value, b);
+    chipsRoot.appendChild(b);
+  };
+  for (const tier of EFFORT_TIERS) addChip(tier);
+  const chips: EffortChips = {
+    root: chipsRoot,
+    set(values: readonly string[]): void {
+      const want = new Set(values.map((v) => v.trim()).filter(Boolean));
+      for (const v of want) if (!chipByValue.has(v)) addChip(v); // 非标准档位补片保留
+      selected.clear();
+      for (const [v, b] of chipByValue) {
+        const on = want.has(v);
+        if (on) selected.add(v);
+        b.classList.toggle('on', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
+    },
+    values(): string[] {
+      const out: string[] = [];
+      for (const t of EFFORT_TIERS) if (selected.has(t)) out.push(t);
+      for (const v of selected) if (!EFFORT_TIERS.includes(v)) out.push(v);
+      return out;
+    },
+  };
   const ctx = el('input', 'cfg-input') as HTMLInputElement;
   ctx.type = 'number';
   ctx.min = '0';
@@ -287,7 +338,7 @@ function addModelRow(e: EditorRefs, id = '', name = ''): void {
   maxOut.min = '0';
   maxOut.placeholder = '最大输出 tokens';
   adv.appendChild(el('label', 'prov-adv-label', '推理强度'));
-  adv.appendChild(efforts);
+  adv.appendChild(chipsRoot);
   adv.appendChild(el('label', 'prov-adv-label', '模型上下文'));
   adv.appendChild(ctx);
   adv.appendChild(el('label', 'prov-adv-label', '最大输出 tokens'));
@@ -307,7 +358,7 @@ function addModelRow(e: EditorRefs, id = '', name = ''): void {
   li.appendChild(det);
   li.appendChild(del);
   e.modelsBox.appendChild(li);
-  e.rows.push({ id: rid, name: rname, efforts, ctx, maxOut, li });
+  e.rows.push({ id: rid, name: rname, efforts: chips, ctx, maxOut, li });
   e.onLayout?.();
 }
 
@@ -389,9 +440,11 @@ function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs
   for (const m of p?.models ?? []) {
     addModelRow(e, m.id, m.name);
     const r = e.rows[e.rows.length - 1]!;
-    r.efforts.value = (m.reasoning_efforts ?? []).join(',');
+    // W258 任务 3：已有模型的 reasoning_efforts 映射到对应档位片选中
+    r.efforts.set(m.reasoning_efforts ?? []);
     if (m.context_window != null) r.ctx.value = String(m.context_window);
-    if (m.max_output_tokens != null) r.maxOut.value = String(m.max_output_tokens);
+    // W258 任务 2：max_output_tokens（最大输出 tokens）不回填 —— 留空即可，
+    // 留空保存即写 null（后端 numOrNull），这是期望行为。
   }
 
   const addM = el('button', 'btn-mini', '+ 添加模型') as HTMLButtonElement;
@@ -427,7 +480,10 @@ function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs
       });
   });
 
+  // 铁律 3：fetch 竞态守卫 —— 连点「获取模型」时，晚到的旧响应直接丢弃
+  let fetchSeq = 0;
   fetchBtn.addEventListener('click', () => {
+    const seq = ++fetchSeq;
     const id = name.value.trim();
     if (!id) {
       status.className = 'prov-editor-status err';
@@ -440,24 +496,37 @@ function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs
       .saveProvider(buildPayload(e))
       .then(() => api.fetchProviderModels(id))
       .then((r) => {
+        if (seq !== fetchSeq) return; // 旧响应：丢弃，不覆盖新状态
         if (r.ok === false || (r.ok === undefined && r.error)) {
           status.className = 'prov-editor-status err';
           status.textContent = '获取失败：' + (r.error || '—');
           return;
         }
+        // W258 任务 4：fetch 结果只缓存在局部变量（got），不自动写入表单
         const got = r.models ?? [];
-        let added = 0;
-        for (const m of got) {
-          const dup = e.rows.some((x) => x.id.value.trim() === m.id);
-          if (!dup) {
-            addModelRow(e, m.id, m.id);
-            added++;
-          }
+        if (!got.length) {
+          status.className = 'prov-editor-status';
+          status.textContent = '上游未返回任何模型';
+          return;
         }
+        const existing = new Set(e.rows.map((x) => x.id.value.trim()).filter(Boolean));
         status.className = 'prov-editor-status ok';
-        status.textContent = '已获取 ' + got.length + ' 个模型（新增 ' + added + '）· 请保存以生效';
+        status.textContent = '已获取 ' + got.length + ' 个模型 · 请勾选要添加的模型';
+        // 二级选择窗：确认后才 addModelRow（已存在的跳过不重复加）
+        openModelPicker(
+          got.map((m) => ({ id: m.id, existing: existing.has(m.id) })),
+          (picked) => {
+            const fresh = picked.filter((mid) => !e.rows.some((x) => x.id.value.trim() === mid));
+            for (const mid of fresh) addModelRow(e, mid, mid);
+            status.className = 'prov-editor-status ok';
+            status.textContent = fresh.length
+              ? '已添加 ' + fresh.length + ' 个模型（共获取 ' + got.length + ' 个）· 请保存以生效'
+              : '未选择模型（共获取 ' + got.length + ' 个）· 请保存以生效';
+          },
+        );
       })
       .catch((err: unknown) => {
+        if (seq !== fetchSeq) return; // 旧响应：丢弃
         status.className = 'prov-editor-status err';
         status.textContent = '获取模型失败：' + fmtErr(err);
       });
@@ -500,6 +569,95 @@ function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs
   root.appendChild(actions);
 
   return e;
+}
+
+// ---- 「获取模型」二级选择窗（W258 任务 4） -------------------------------------------
+
+interface PickerItem {
+  id: string;
+  /** 表单里已存在该模型：列出但不可勾选（避免重复添加） */
+  existing: boolean;
+}
+
+/** 同一时刻只保留一个选择窗（重复点「获取模型」不叠窗）。 */
+let closeModelPicker: (() => void) | null = null;
+
+/** 二级选择窗：列出上游模型清单，勾选后点「确认」才写入表单。
+ *  - 独立挂 body 的 modal（scrim/card），打开与关闭都不碰下方表单（铁律 5）；
+ *  - 清单离屏构建 + 单次替换，一次挂载（铁律 1：无空白帧 / 无闪烁）；
+ *  - pushOverlay(close)：Esc 先关本窗（层级栈栈顶），再关下层内联面板/弹窗。 */
+function openModelPicker(items: readonly PickerItem[], onConfirm: (picked: string[]) => void): void {
+  closeModelPicker?.(); // 单例：旧的（若有）先关
+  const scrim = el('div', 'modal-scrim');
+  const card = el('div', 'modal-card prov-picker');
+  card.appendChild(el('div', 'modal-card-title', '选择要添加的模型'));
+  card.appendChild(
+    el('div', 'side-note', '请勾选要添加的模型（默认不勾选；已存在的模型不可重复添加）'),
+  );
+
+  const list = el('div', 'prov-picker-list');
+  const boxes: HTMLInputElement[] = [];
+  const count = el('div', 'prov-picker-count');
+  const syncCount = (): void => {
+    const n = boxes.filter((b) => b.checked).length;
+    count.textContent = '已选 ' + n + ' / ' + boxes.length + ' 个可选模型';
+  };
+  const off = document.createElement('div'); // 离屏构建：整份清单一次替换
+  for (const it of items) {
+    const row = el('label', 'prov-picker-row' + (it.existing ? ' existing' : ''));
+    const cb = el('input', 'prov-picker-cb') as HTMLInputElement;
+    cb.type = 'checkbox';
+    cb.checked = false; // 默认全部不勾选
+    cb.disabled = it.existing;
+    cb.dataset.modelId = it.id;
+    cb.addEventListener('change', syncCount);
+    row.appendChild(cb);
+    row.appendChild(el('span', 'prov-picker-id', it.id));
+    if (it.existing) row.appendChild(el('span', 'prov-picker-tag', '已存在'));
+    off.appendChild(row);
+    if (!it.existing) boxes.push(cb);
+  }
+  list.replaceChildren(...off.childNodes);
+  syncCount();
+  card.appendChild(list);
+  card.appendChild(count);
+
+  const actions = el('div', 'modal-card-actions');
+  const cancel = el('button', 'btn btn-soft', '取消') as HTMLButtonElement;
+  cancel.type = 'button';
+  const ok = el('button', 'btn btn-accent', '确认') as HTMLButtonElement;
+  ok.type = 'button';
+
+  let overlay: OverlayHandle | null = null;
+  const close = (): void => {
+    if (closeModelPicker === close) closeModelPicker = null;
+    if (overlay) {
+      popOverlay(overlay);
+      overlay = null;
+    }
+    scrim.remove();
+  };
+  closeModelPicker = close;
+  cancel.addEventListener('click', close);
+  ok.addEventListener('click', () => {
+    const picked = boxes
+      .filter((b) => b.checked)
+      .map((b) => b.dataset.modelId ?? '')
+      .filter(Boolean);
+    close();
+    onConfirm(picked); // 先关窗再写表单：开关本身不触发背景重渲染
+  });
+  scrim.addEventListener('click', (e) => {
+    if (e.target === scrim) close();
+  });
+
+  actions.appendChild(cancel);
+  actions.appendChild(ok);
+  card.appendChild(actions);
+  scrim.appendChild(card);
+  document.body.appendChild(scrim);
+  overlay = pushOverlay(close); // Esc：先关本选择窗（栈顶）
+  cancel.focus();
 }
 
 // ---- 行内联编辑面板（任务 2） ------------------------------------------------------

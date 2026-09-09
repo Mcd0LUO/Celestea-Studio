@@ -161,9 +161,16 @@
 .modal-card-title { font-size: 14px; font-weight: 600; }
 .modal-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 
-.ws-fs { width: min(560px, calc(100vw - 40px)); }
+.ws-fs {
+  width: min(560px, calc(100vw - 40px));
+  /* W258 任务 1：固定高度树 + 卡片上限 88vh —— 小窗口下卡片自身滚动，不被裁切 */
+  max-height: 88vh; overflow-y: auto;
+}
 .ws-fs-crumbs {
-  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  /* W258 任务 1：面包屑固定单行（超长路径横向滚动）——行数不再随路径深度变化，
+     弹窗整体高度因此不跳动 */
+  display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
+  overflow-x: auto;
   border-radius: 8px;
   background: var(--c-code-bg);
   padding: 6px 8px;
@@ -173,21 +180,30 @@
   background: transparent; border: none; cursor: pointer;
   font-family: var(--mono); font-size: 12px; color: var(--c-accent);
   padding: 1px 4px; border-radius: 4px;
+  /* W258 任务 1：面包屑不换行、不压缩（固定单行，横向滚动） */
+  flex: 0 0 auto; white-space: nowrap;
 }
 .ws-fs-crumb:hover { background: var(--c-accent-soft); }
 .ws-fs-crumb.cur { color: var(--c-text-1); font-weight: 600; cursor: default; }
 .ws-fs-crumb.cur:hover { background: transparent; }
 .ws-fs-tree {
+  /* W258 任务 1：固定高度 —— 目录少时不再塌缩、目录多时内部滚动，
+     弹窗（.modal-card 居中）尺寸不随目录数量跳动 */
+  height: 340px;
+  flex: 0 0 340px;
   border-radius: 8px;
   background: var(--c-surface);
   padding: 6px;
-  max-height: 240px; overflow-y: auto;
+  overflow-y: auto;
   display: flex; flex-direction: column; gap: 2px;
+  align-content: flex-start;
 }
+.ws-fs-tree > * { flex: 0 0 auto; }
 .ws-fs-dir {
   display: flex; align-items: center; gap: 8px;
   padding: 5px 8px; border-radius: 6px; cursor: pointer;
   font-size: 12.5px; color: var(--c-text-1);
+  flex: 0 0 auto;
 }
 .ws-fs-dir:hover { background: var(--c-accent-soft); }
 .ws-fs-dir-icon { display: inline-flex; align-items: center; flex: 0 0 auto; color: var(--c-accent); }
@@ -197,6 +213,9 @@
 .ws-fs-addr input { flex: 1; min-width: 0; }
 .ws-fs-name input { width: 100%; }
 .ws-fs-status { font-size: 11.5px; font-family: var(--mono); min-height: 14px; color: var(--c-text-3); }
+/* W258 任务 1：仅新建工作区弹窗预留两行状态高度 —— 长路径/错误文案换行时弹窗高度不跳
+   （.ws-fs-status 也被新建会话/提示词弹窗复用，故此处收窄作用域） */
+.ws-fs .ws-fs-status { min-height: 32px; }
 .ws-fs-status.ok { color: var(--c-ok); }
 .ws-fs-status.err { color: var(--c-err); }
 
