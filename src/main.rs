@@ -135,21 +135,68 @@ pub(crate) fn model_reasoning(id: &str) -> Option<bool> {
     AVAILABLE_MODELS.iter().find(|m| m.id == id).map(|m| m.reasoning)
 }
 
-/// W225: the 'available' block of the config contract — models + effort tiers.
-pub(crate) fn available_json() -> Value {
-    json!({
-        "models": AVAILABLE_MODELS
-            .iter()
-            .map(|m| json!({"id": m.id, "name": m.name, "reasoning": m.reasoning}))
-            .collect::<Vec<Value>>(),
-        "efforts": AVAILABLE_EFFORTS,
-    })
+/// W262: reasoning capability of one provider-store model: an explicit
+/// non-empty `reasoning_efforts` list wins; otherwise the static catalog; an
+/// unknown id is reasoning-capable (the same rule POST /api/config uses).
+fn model_reasoning_of(m: &crate::providers::ProviderModel) -> bool {
+    if !m.reasoning_efforts.is_empty() {
+        return true;
+    }
+    model_reasoning(&m.id).unwrap_or(true)
 }
 
-/// W225: sanitized config JSON — the shared body of GET /api/config and the
-/// POST /api/config response. Never carries an api key (only the KEY's
-/// env-var NAME is exposed) and never persists one.
-pub(crate) fn sanitized_config(profile: &Profile, base_url: &str) -> Value {
+/// W262: the 'available' block of the config contract — models + effort tiers.
+///
+/// Models are built from the LIVE providers store (one entry per stored model,
+/// carrying its provider's display name) and the static AVAILABLE_MODELS
+/// catalog is appended as a fallback for ids no provider lists (those entries
+/// carry `provider: ""`). Ids are deduplicated — the provider-store record
+/// wins and the catalog never repeats one. Entries expose id / name /
+/// provider / reasoning ONLY: a provider's api_key can never ride along.
+pub(crate) fn available_json(store: &crate::providers::ProvidersStore) -> Value {
+    let snap = store.snapshot();
+    let mut seen: Vec<String> = Vec::new();
+    let mut models: Vec<Value> = Vec::new();
+    for p in &snap.providers {
+        let provider = if p.name.trim().is_empty() { p.id.as_str() } else { p.name.trim() };
+        for m in &p.models {
+            if seen.iter().any(|s| s == &m.id) {
+                continue;
+            }
+            seen.push(m.id.clone());
+            let name = if m.name.trim().is_empty() { m.id.as_str() } else { m.name.trim() };
+            models.push(json!({
+                "id": m.id,
+                "name": name,
+                "provider": provider,
+                "reasoning": model_reasoning_of(m),
+            }));
+        }
+    }
+    for m in AVAILABLE_MODELS {
+        if seen.iter().any(|s| s == m.id) {
+            continue;
+        }
+        seen.push(m.id.to_string());
+        models.push(json!({
+            "id": m.id,
+            "name": m.name,
+            "provider": "",
+            "reasoning": m.reasoning,
+        }));
+    }
+    json!({"models": models, "efforts": AVAILABLE_EFFORTS})
+}
+
+/// W225/W262: sanitized config JSON — the shared body of GET /api/config and
+/// the POST /api/config response. Never carries an api key (only the KEY's
+/// env-var NAME is exposed) and never persists one; `available.models` is
+/// built from the provider store handed in.
+pub(crate) fn sanitized_config(
+    profile: &Profile,
+    base_url: &str,
+    store: &crate::providers::ProvidersStore,
+) -> Value {
     json!({
         "model": profile.model.clone(),
         "base_url": base_url,
@@ -160,7 +207,7 @@ pub(crate) fn sanitized_config(profile: &Profile, base_url: &str) -> Value {
         "context_window": profile.context_window_tokens,
         "system_prompt": profile.system_prompt.clone(),
         "api_key_env": profile.api_key_env.clone(),
-        "available": available_json(),
+        "available": available_json(store),
     })
 }
 
@@ -314,7 +361,10 @@ pub(crate) struct Gen {
 /// W225: compose one engine generation from a profile. With
 /// CELESTEA_SESSION_DIR set the engine replays <dir>/cli-main.jsonl into the
 /// new Runtime, so the host conversation survives the swap.
-pub(crate) fn build_gen(profile: Profile) -> Result<Gen, String> {
+pub(crate) fn build_gen(
+    profile: Profile,
+    store: &crate::providers::ProvidersStore,
+) -> Result<Gen, String> {
     // W245: compose-time prompt assembly (plan B, generation-level). A
     // user-set system_prompt from POST /api/config is an in-memory bypass of
     // the registry; otherwise the prompt is assembled from the section chain
@@ -345,7 +395,7 @@ pub(crate) fn build_gen(profile: Profile) -> Result<Gen, String> {
         model: profile.model.clone(),
         base_url: base_url.clone(),
         reasoning_effort: serde_json::to_value(profile.reasoning_effort.clone()).unwrap_or(Value::Null),
-        config_json: sanitized_config(&profile, &base_url),
+        config_json: sanitized_config(&profile, &base_url, store),
         profile,
     })
 }
@@ -355,12 +405,16 @@ pub(crate) fn build_gen(profile: Profile) -> Result<Gen, String> {
 /// engine's only key channel — in-memory only, never logged), then compose a
 /// fresh generation. Env injection happens before compose so the new adapter
 /// reads the new key.
-pub(crate) fn prepare_gen(pj: Value, api_key: Option<&str>) -> Result<Gen, String> {
+pub(crate) fn prepare_gen(
+    pj: Value,
+    api_key: Option<&str>,
+    store: &crate::providers::ProvidersStore,
+) -> Result<Gen, String> {
     let new_profile = merge_profile(&pj).map_err(|e| e.to_string())?;
     if let Some(k) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
         std::env::set_var(new_profile.api_key_env.as_str(), k);
     }
-    build_gen(new_profile).map_err(|e| format!("compose failed: {e}"))
+    build_gen(new_profile, store).map_err(|e| format!("compose failed: {e}"))
 }
 
 /// W236: swap a prepared generation under the gen write lock; returns the
@@ -408,7 +462,7 @@ pub(crate) fn build_and_swap(
     pj: Value,
     api_key: Option<&str>,
 ) -> Result<Value, String> {
-    let gen = prepare_gen(pj, api_key)?;
+    let gen = prepare_gen(pj, api_key, &st.providers)?;
     Ok(swap_gen(st, gen))
 }
 
@@ -1175,7 +1229,7 @@ async fn main() {
         profile.base_url.as_deref(),
         std::env::var("DEEPSEEK_BASE_URL").ok().as_deref(),
     );
-    let gen = match build_gen(profile) {
+    let gen = match build_gen(profile, &providers) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("[celestea-studio] compose error: {e}");
@@ -1605,3 +1659,184 @@ mod w240_tests {
     }
 }
 
+
+/// W262: the model catalog of the config contract is built from the provider
+/// store (with the static AVAILABLE_MODELS as fallback) — these tests pin the
+/// grouping/dedup/fallback rules the statusline tree renders.
+#[cfg(test)]
+mod w262_tests {
+    use super::*;
+    use crate::providers::{Provider, ProviderModel, ProvidersStore, ENGINE_FORMAT};
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "celestea-studio-w262-{}-{}-{}",
+            std::process::id(),
+            name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn model(id: &str, name: &str, efforts: &[&str]) -> ProviderModel {
+        ProviderModel {
+            id: id.to_string(),
+            name: name.to_string(),
+            reasoning_efforts: efforts.iter().map(|e| e.to_string()).collect(),
+            context_window: None,
+            max_output_tokens: None,
+        }
+    }
+
+    fn provider(id: &str, name: &str, models: Vec<ProviderModel>) -> Provider {
+        Provider {
+            id: id.to_string(),
+            name: name.to_string(),
+            note: String::new(),
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            request_format: ENGINE_FORMAT.to_string(),
+            api_key: Some("sk-w262-secret".to_string()),
+            models,
+        }
+    }
+
+    fn models_of(available: &Value) -> Vec<Value> {
+        available
+            .get("models")
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn entry<'a>(models: &'a [Value], id: &str) -> &'a Value {
+        models
+            .iter()
+            .find(|m| m.get("id").and_then(|i| i.as_str()) == Some(id))
+            .unwrap_or_else(|| panic!("model '{id}' missing from available.models"))
+    }
+
+    /// Provider-store models come first, carry their provider's display name,
+    /// and never leak the api_key.
+    #[test]
+    fn available_models_carry_provider_name_and_never_a_key() {
+        let dir = scratch("store");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ProvidersStore::open(dir.join("providers.json")).unwrap();
+        store
+            .upsert(provider(
+                "p1",
+                "本地网关",
+                vec![
+                    model("deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731", &["low", "high"]),
+                    model("mystery-model", "", &[]),
+                ],
+            ))
+            .unwrap();
+
+        let available = available_json(&store);
+        let models = models_of(&available);
+        assert_eq!(
+            entry(&models, "deepseek-v4-flash-0731"),
+            &json!({
+                "id": "deepseek-v4-flash-0731",
+                "name": "DeepSeek V4 Flash 0731",
+                "provider": "本地网关",
+                "reasoning": true,
+            })
+        );
+        // empty display name falls back to the id; empty efforts + unknown id
+        // => reasoning-capable (the POST validation口径)
+        assert_eq!(
+            entry(&models, "mystery-model"),
+            &json!({
+                "id": "mystery-model",
+                "name": "mystery-model",
+                "provider": "本地网关",
+                "reasoning": true,
+            })
+        );
+        // effort tiers are untouched by W262
+        assert_eq!(available.get("efforts"), Some(&json!(["low", "high", "max"])));
+        // ids no provider lists still come from the static catalog (provider "")
+        let flash = entry(&models, "deepseek-v4-flash");
+        assert_eq!(flash.get("provider").and_then(|p| p.as_str()), Some(""));
+        // no key material may ride in the catalog
+        assert!(!available.to_string().contains("sk-w262-secret"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Duplicate ids are emitted once: the first provider-store record wins and
+    /// the static catalog never repeats a store id (its reasoning flag is still
+    /// consulted for store models without an explicit effort list).
+    #[test]
+    fn available_models_dedupes_ids_across_providers_and_catalog() {
+        let dir = scratch("dedupe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ProvidersStore::open(dir.join("providers.json")).unwrap();
+        store
+            .upsert(provider(
+                "p1",
+                "第一提供商",
+                vec![
+                    // a static-catalog id with NO effort list: the catalog's
+                    // reasoning=false must be consulted
+                    model("glm-5.3", "GLM 5.3 (store)", &[]),
+                    model("shared-id", "Shared (p1)", &[]),
+                ],
+            ))
+            .unwrap();
+        store
+            .upsert(provider("p2", "第二提供商", vec![model("shared-id", "Shared (p2)", &["low"])]))
+            .unwrap();
+
+        let models = models_of(&available_json(&store));
+        let shared: Vec<&Value> = models
+            .iter()
+            .filter(|m| m.get("id").and_then(|i| i.as_str()) == Some("shared-id"))
+            .collect();
+        assert_eq!(shared.len(), 1, "duplicate id must be emitted once");
+        assert_eq!(shared[0].get("provider").and_then(|p| p.as_str()), Some("第一提供商"));
+        assert_eq!(shared[0].get("name").and_then(|n| n.as_str()), Some("Shared (p1)"));
+
+        let glm: Vec<&Value> = models
+            .iter()
+            .filter(|m| m.get("id").and_then(|i| i.as_str()) == Some("glm-5.3"))
+            .collect();
+        assert_eq!(glm.len(), 1, "a store id must not repeat from the catalog");
+        assert_eq!(glm[0].get("provider").and_then(|p| p.as_str()), Some("第一提供商"));
+        assert_eq!(
+            glm[0].get("reasoning"),
+            Some(&json!(false)),
+            "store model without efforts falls back to the static reasoning flag"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An empty store still publishes the static catalog (provider "").
+    #[test]
+    fn available_models_fall_back_to_static_catalog_when_store_empty() {
+        let store = ProvidersStore::empty();
+        let models = models_of(&available_json(&store));
+        assert_eq!(models.len(), AVAILABLE_MODELS.len());
+        for (got, want) in models.iter().zip(AVAILABLE_MODELS.iter()) {
+            assert_eq!(got.get("id").and_then(|i| i.as_str()), Some(want.id));
+            assert_eq!(got.get("name").and_then(|n| n.as_str()), Some(want.name));
+            assert_eq!(got.get("provider").and_then(|p| p.as_str()), Some(""));
+            assert_eq!(got.get("reasoning"), Some(&json!(want.reasoning)));
+        }
+        // a store model is APPENDED-TO, never replaces the fallback catalog
+        let dir = scratch("fallback");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ProvidersStore::open(dir.join("providers.json")).unwrap();
+        store
+            .upsert(provider("p1", "P1", vec![model("only-store-model", "Only Store", &["max"])]))
+            .unwrap();
+        let models = models_of(&available_json(&store));
+        assert_eq!(models[0].get("id").and_then(|i| i.as_str()), Some("only-store-model"));
+        assert_eq!(models.len(), AVAILABLE_MODELS.len() + 1);
+        assert!(models.iter().any(|m| m.get("id").and_then(|i| i.as_str()) == Some("glm-5.3-flash")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

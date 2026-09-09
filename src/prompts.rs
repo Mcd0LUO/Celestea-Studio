@@ -660,7 +660,7 @@ fn compose_and_swap(st: &Shared) -> Result<(), String> {
         let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
         profile_to_json(&gen.profile)
     };
-    let gen = prepare_gen(pj, None)?;
+    let gen = prepare_gen(pj, None, &st.providers)?;
     let _ = swap_gen(st, gen);
     Ok(())
 }
@@ -1153,9 +1153,11 @@ mod tests {
         std::env::set_var("CELESTEA_SESSION_DIR", &sess_dir);
         std::env::set_var("W245_TEST_KEY", "test-key");
 
+        // W262: no provider store needed here — an empty store is enough.
+        let store = crate::providers::ProvidersStore::empty();
         // first generation: prompt assembled with the session-bound override
         let p = profile("deepseek-v4-flash-0731");
-        let gen = crate::prepare_gen(profile_to_json(&p), None).unwrap();
+        let gen = crate::prepare_gen(profile_to_json(&p), None, &store).unwrap();
         assert!(
             gen.profile.system_prompt.contains("CUSTOM DELEGATION for deepseek-v4-flash-0731"),
             "assembled into profile.system_prompt: {}",
@@ -1169,7 +1171,7 @@ mod tests {
         // never be mistaken for a user override.
         let mut pj2 = profile_to_json(&gen.profile);
         pj2["model"] = json!("deepseek-v4-pro");
-        let gen2 = crate::prepare_gen(pj2, None).unwrap();
+        let gen2 = crate::prepare_gen(pj2, None, &store).unwrap();
         assert!(
             gen2.profile.system_prompt.contains("CUSTOM DELEGATION for deepseek-v4-pro"),
             "{{model}} refreshed on swap: {}",
@@ -1178,11 +1180,11 @@ mod tests {
 
         // config-panel override bypasses the registry (in-memory slot)
         crate::prompts::set_user_override(Some("USER OVERRIDE PROMPT".to_string()));
-        let gen3 = crate::prepare_gen(profile_to_json(&gen2.profile), None).unwrap();
+        let gen3 = crate::prepare_gen(profile_to_json(&gen2.profile), None, &store).unwrap();
         assert_eq!(gen3.profile.system_prompt, "USER OVERRIDE PROMPT");
         // clearing restores registry assembly
         crate::prompts::set_user_override(None);
-        let gen4 = crate::prepare_gen(profile_to_json(&gen2.profile), None).unwrap();
+        let gen4 = crate::prepare_gen(profile_to_json(&gen2.profile), None, &store).unwrap();
         assert!(gen4.profile.system_prompt.contains("CUSTOM DELEGATION for deepseek-v4-pro"));
 
         std::env::remove_var("CELESTEA_PROMPTS_FILE");
@@ -1198,7 +1200,8 @@ mod tests {
     /// `busy` pre-claims the single-turn slot (409 scenarios).
     fn handler_state(dir: &Path, busy: bool) -> Shared {
         set_user_override(None);
-        let gen = crate::prepare_gen(profile_to_json(&profile("deepseek-v4-flash-0731")), None)
+        let store = crate::providers::ProvidersStore::empty();
+        let gen = crate::prepare_gen(profile_to_json(&profile("deepseek-v4-flash-0731")), None, &store)
             .expect("compose test gen");
         let busy_slot = if busy {
             let (tx, _rx) = watch::channel(false);

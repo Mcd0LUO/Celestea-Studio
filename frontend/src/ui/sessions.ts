@@ -543,7 +543,9 @@ export function newSession(presetWs?: string): void {
   wsRow.appendChild(wsSel);
   card.appendChild(wsRow);
 
-  // 可选模型（W243 任务4）：跟随默认 + providers 全部模型
+  // 可选模型（W243 任务4 / W262）：跟随默认 + available.models
+  // W262：与状态栏模型弹层消费同一份清单（provider store + 静态兜底目录，
+  // 后端按 id 去重并给出 provider 显示名），标签沿用「提供商 · id（显示名）」。
   const modelSel = document.createElement('select');
   modelSel.className = 'cfg-input';
   const optDef = document.createElement('option');
@@ -555,18 +557,19 @@ export function newSession(presetWs?: string): void {
   modelRow.appendChild(modelSel);
   card.appendChild(modelRow);
   void api
-    .providers()
+    .config()
     .then((d) => {
-      const ps = d.providers ?? [];
-      for (const p of ps) {
-        for (const m of p.models ?? []) {
-          const o = document.createElement('option');
-          o.value = m.id;
-          o.textContent = (p.name || p.id) + ' · ' + m.id + (m.name && m.name !== m.id ? '（' + m.name + '）' : '');
-          modelSel.appendChild(o);
-        }
+      const models = d.available?.models ?? [];
+      for (const m of models) {
+        const o = document.createElement('option');
+        o.value = m.id;
+        const name = m.name || m.id;
+        const provider = (m.provider ?? '').trim();
+        o.textContent =
+          (provider ? provider + ' · ' : '') + m.id + (name !== m.id ? '（' + name + '）' : '');
+        modelSel.appendChild(o);
       }
-      if (!ps.length) {
+      if (!models.length) {
         const o = document.createElement('option');
         o.value = '';
         o.textContent = '（暂无可选模型）';

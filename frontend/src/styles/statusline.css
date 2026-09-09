@@ -180,5 +180,24 @@
   font-size: 10.5px; color: var(--c-text-3); letter-spacing: 1px;
   padding: 6px 8px 2px; border-top: 1px solid var(--c-border-subtle); margin-top: 4px;
 }
+
+/* W262：模型清单的树状分组 —— 一级=提供商名（不可点击），二级=模型行缩进一级 */
+.sl-group {
+  padding: 7px 8px 2px;
+  font-size: 10.5px; color: var(--c-text-3);
+  letter-spacing: 1px;
+  cursor: default;
+  user-select: none;
+}
+.sl-group + .sl-group { border-top: 1px solid var(--c-border-subtle); margin-top: 4px; }
+.sl-group-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sl-opt.sub { padding-left: 20px; position: relative; }
+.sl-opt.sub::before {
+  content: '';
+  position: absolute;
+  left: 9px; top: 50%;
+  width: 6px; height: 1px;
+  background: var(--c-border-strong);
+}
 .sl-popup-textrow { display: flex; gap: 6px; padding: 2px; }
 .sl-popup-input { flex: 1; min-width: 0; }

@@ -30,8 +30,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
-    build_and_swap, model_reasoning, profile_to_json, DEFAULT_SYSTEM_PROMPT, MIN_STEPS,
-    Shared,
+    available_json, build_and_swap, model_reasoning, profile_to_json, DEFAULT_SYSTEM_PROMPT,
+    MIN_STEPS, Shared,
 };
 
 // ---- GET /api/tools --------------------------------------------------------
@@ -54,8 +54,19 @@ pub async fn get_tools(State(st): State<Shared>) -> Json<Value> {
 /// Sanitized config JSON of the current engine generation + the deployment
 /// catalog (available.models / available.efforts). Never carries an api key.
 pub async fn get_config(State(st): State<Shared>) -> Json<Value> {
-    let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
-    Json(gen.config_json.clone())
+    let mut cfg = {
+        let gen = st.gen.read().unwrap_or_else(|p| p.into_inner());
+        gen.config_json.clone()
+    };
+    // W262: available.models is rebuilt from the LIVE providers store on every
+    // read, so a provider added/edited at runtime shows up in the model picker
+    // immediately (the baked generation copy can only be as fresh as its last
+    // compose). The rest of the body still comes from the generation snapshot,
+    // so profile fields never mix generations.
+    if let Some(obj) = cfg.as_object_mut() {
+        obj.insert("available".to_string(), available_json(&st.providers));
+    }
+    Json(cfg)
 }
 
 // ---- GET /api/status --------------------------------------------------------

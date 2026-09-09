@@ -9,13 +9,16 @@
 import { api, ApiError } from './api';
 import { el, fmtCompact, need } from './utils/dom';
 import { popOverlay, pushOverlay, type OverlayHandle } from './utils/overlays';
-import type { ConfigInfo, ConfigPatch, StatusPayload, StatusSnapshot } from './types';
+import type { ConfigInfo, ConfigPatch, ModelInfo, StatusPayload, StatusSnapshot } from './types';
 
 const POLL_MS = 2000;
 const RING_R = 5.2;
 const RING_C = 2 * Math.PI * RING_R;
 /** context ring turns warning color at/above this ratio */
 const WARN_RATIO = 0.9;
+
+/** W262：没有 provider 字段的模型（静态兜底目录 / 旧数据）归入的树状分组。 */
+const OTHER_GROUP = '其他';
 
 const EFFORT_OPTIONS: readonly { value: string | null; label: string }[] = [
   { value: null, label: '标准（清除）' },
@@ -161,12 +164,15 @@ export class Statusline {
       cfg = await api.config();
     } catch (err) {
       if (this.popup !== popup) return;
-      body.innerHTML = '';
-      body.appendChild(el('div', 'sl-popup-error', '无法读取 /api/config：' + (err instanceof Error ? err.message : String(err))));
+      body.replaceChildren(
+        el('div', 'sl-popup-error', '无法读取 /api/config：' + (err instanceof Error ? err.message : String(err))),
+      );
       return;
     }
     if (this.popup !== popup) return; // 期间被关闭/切换
-    body.innerHTML = '';
+
+    // 铁律 1：整份清单先离屏构建，就绪后单次替换——「加载清单中…」保持可见到最后一刻。
+    const off = document.createElement('div');
 
     if (kind === 'effort') {
       const options = [...EFFORT_OPTIONS];
@@ -175,12 +181,13 @@ export class Statusline {
         options.push({ value: cur, label: cur + '（当前）' });
       }
       for (const o of options) {
-        body.appendChild(this.optButton(o.label, o.value ?? '', cur, () => this.apply({ reasoning_effort: o.value })));
+        off.appendChild(this.optButton(o.label, o.value ?? '', cur, () => this.apply({ reasoning_effort: o.value })));
       }
+      body.replaceChildren(...off.childNodes);
       return;
     }
 
-    // ---- model ----
+    // ---- model：按提供商分组的树状清单（W262） ----
     const models = Array.isArray(cfg.available?.models) ? cfg.available.models : [];
     const cur = cfg.model ?? this.snapshot.model ?? '';
     if (!models.length) {
@@ -196,24 +203,59 @@ export class Statusline {
         if (v !== '' && v !== cur) void this.apply({ model: v });
       });
       row.appendChild(applyBtn);
-      body.appendChild(row);
-      body.appendChild(el('div', 'sl-popup-note', '后端未返回 available.models，手动输入'));
+      off.appendChild(row);
+      off.appendChild(el('div', 'sl-popup-note', '后端未返回 available.models，手动输入'));
+      body.replaceChildren(...off.childNodes);
       return;
     }
     const known = models.some((m) => m.id === cur);
     if (cur && !known) {
-      body.appendChild(this.optButton(cur + '（当前）', cur, cur, () => this.apply({ model: cur })));
+      // 当前模型不在清单里（自定义端点）→ 置顶一行，仍可点回
+      off.appendChild(this.optButton(cur + '（当前）', cur, cur, () => this.apply({ model: cur })));
       const sep = el('div', 'sl-popup-sep');
       sep.textContent = '候选模型';
-      body.appendChild(sep);
+      off.appendChild(sep);
     }
+    // 树状一级 = provider 显示名（后端已保证模型名未定义时取 id）；
+    // 缺 provider 字段的记录（静态兜底目录 / 旧数据）归入「其他」组。
+    const groups = new Map<string, ModelInfo[]>();
     for (const m of models) {
-      body.appendChild(this.optButton(m.name, m.id, cur, () => this.apply({ model: m.id })));
+      const key = (m.provider ?? '').trim() || OTHER_GROUP;
+      const list = groups.get(key);
+      if (list) list.push(m);
+      else groups.set(key, [m]);
     }
+    for (const [provider, list] of groups) {
+      off.appendChild(this.groupRow(provider));
+      for (const m of list) {
+        off.appendChild(
+          this.optButton(m.name || m.id, m.id, cur, () => this.apply({ model: m.id }), true),
+        );
+      }
+    }
+    body.replaceChildren(...off.childNodes);
   }
 
-  private optButton(label: string, value: string, current: string, onPick: () => void): HTMLElement {
-    const b = el('button', 'sl-opt' + (value !== '' && value === current ? ' current' : '')) as HTMLButtonElement;
+  /** W262：树状分组标题行 —— 提供商显示名，不可点击（无 button/无监听）。 */
+  private groupRow(provider: string): HTMLElement {
+    const row = el('div', 'sl-group');
+    row.appendChild(el('span', 'sl-group-name', provider));
+    return row;
+  }
+
+  /** 模型/档位一行；`sub=true` = 树状缩进一级（provider 组下的模型行）。 */
+  private optButton(
+    label: string,
+    value: string,
+    current: string,
+    onPick: () => void,
+    sub = false,
+  ): HTMLElement {
+    const cls =
+      'sl-opt' +
+      (sub ? ' sub' : '') +
+      (value !== '' && value === current ? ' current' : '');
+    const b = el('button', cls) as HTMLButtonElement;
     b.appendChild(el('span', 'sl-opt-name', label));
     if (value !== '') b.appendChild(el('span', 'sl-opt-val', value));
     if (value !== '' && value === current) b.appendChild(el('span', 'sl-opt-tag', '当前'));

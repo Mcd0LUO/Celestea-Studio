@@ -337,10 +337,12 @@ export interface TurnResp {
 
 // ---- 配置（GET /api/config · POST /api/config） ----------------------------
 
-/** available.models 条目：id=引擎模型标识，name=展示名。 */
+/** available.models 条目：id=引擎模型标识，name=展示名（未定义时后端取 id）。 */
 export interface ModelInfo {
   id: string;
   name: string;
+  /** W262：提供商显示名；静态兜底目录的条目为空串（前端归入「其他」组）。 */
+  provider?: string;
   reasoning?: boolean;
 }
 

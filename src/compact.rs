@@ -465,7 +465,7 @@ async fn compact_locked(st: &Shared, id: &str) -> Result<Value, (StatusCode, Str
             pj["model"] = json!(m);
         }
         std::env::set_var("CELESTEA_SESSION_DIR", &dir);
-        let gen = prepare_gen(pj, None).map_err(|e| {
+        let gen = prepare_gen(pj, None, &st.providers).map_err(|e| {
             err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("compose failed: {e}"),

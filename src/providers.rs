@@ -168,6 +168,13 @@ impl ProvidersStore {
         Ok(true)
     }
 
+    /// W262: an empty in-memory store (no path) — for tests that need a store
+    /// but never mutate it. `upsert`/`delete` on it would fail to persist.
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self { path: PathBuf::new(), inner: RwLock::new(ProvidersFile::default()) }
+    }
+
     /// Persist default_model (the caller hot-applies the engine separately).
     pub(crate) fn set_default_model(&self, model: &str) -> Result<(), String> {
         let mut data = self.inner.write().unwrap_or_else(|p| p.into_inner());
@@ -641,7 +648,7 @@ pub(crate) async fn apply_default_model(
     let api_key = provider.as_ref().and_then(|p| p.api_key.clone());
 
     // 1. compose (env key injection happens inside prepare_gen).
-    let gen = prepare_gen(pj, api_key.as_deref()).map_err(|e| {
+    let gen = prepare_gen(pj, api_key.as_deref(), &st.providers).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"ok": false, "error": e})),
@@ -997,7 +1004,7 @@ mod tests {
             api_key_env: key_env.to_string(),
             ..Profile::default()
         };
-        let gen = build_gen(profile).unwrap();
+        let gen = build_gen(profile, &store).unwrap();
         let st: Shared = Arc::new(AppState {
             gen: RwLock::new(gen),
             bcast: broadcast::channel(4).0,
@@ -1127,7 +1134,8 @@ mod tests {
             api_key_env: key_env.to_string(),
             ..Profile::default()
         };
-        let gen = build_gen(profile).unwrap();
+        let store = Arc::new(ProvidersStore::open(dir.join("providers.json")).unwrap());
+        let gen = build_gen(profile, &store).unwrap();
         Arc::new(AppState {
             gen: RwLock::new(gen),
             bcast: broadcast::channel(4).0,
@@ -1135,7 +1143,7 @@ mod tests {
             next_turn: Arc::new(AtomicU64::new(1)),
             seq: Arc::new(AtomicU64::new(0)),
             status: StatusTracker::new(),
-            providers: Arc::new(ProvidersStore::open(dir.join("providers.json")).unwrap()),
+            providers: store,
             workspaces: Arc::new(crate::workspaces::WorkspaceRegistry::new(
                 dir.join("workspaces.json"),
             )),

@@ -918,7 +918,7 @@ pub(crate) async fn post_workspace_rename(
             profile_to_json(&gen.profile)
         };
         std::env::set_var("CELESTEA_SESSION_DIR", &new_dir);
-        let gen = match prepare_gen(pj, None) {
+        let gen = match prepare_gen(pj, None, &st.providers) {
             Ok(g) => g,
             Err(e) => {
                 let _ = st.workspaces.rename_workspace(&new_name, &name);
@@ -1351,7 +1351,7 @@ pub(crate) async fn post_session_activate(
         pj["model"] = json!(m);
     }
     std::env::set_var("CELESTEA_SESSION_DIR", &dir);
-    let gen = match prepare_gen(pj, None) {
+    let gen = match prepare_gen(pj, None, &st.providers) {
         Ok(g) => g,
         Err(e) => {
             return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("compose failed: {e}"))
@@ -1408,7 +1408,7 @@ pub(crate) async fn post_session_rename(
         };
         let old_dir = new_dir.parent().expect("session dir has a parent").join(&old_name);
         std::env::set_var("CELESTEA_SESSION_DIR", &new_dir);
-        let gen = match prepare_gen(pj, None) {
+        let gen = match prepare_gen(pj, None, &st.providers) {
             Ok(g) => g,
             Err(e) => {
                 let _ = std::fs::rename(&new_dir, &old_dir); // roll the move back
@@ -1921,19 +1921,20 @@ mod tests {
         }))
         .expect("lenient merge");
 
+        let store = crate::providers::ProvidersStore::empty();
         // activate A (the handler tail: resolve -> env -> recompose -> persist)
         let (_id_a, _name_a, dir_a) = session_dir_for(&reg.snapshot(), "ws-a/alpha").unwrap();
         assert_eq!(dir_a, a_sess);
         std::env::set_var("CELESTEA_SESSION_DIR", &dir_a);
         reg.set_active(Some("ws-a/alpha".to_string())).unwrap();
-        let gen_a = crate::build_gen(profile.clone()).unwrap();
+        let gen_a = crate::build_gen(profile.clone(), &store).unwrap();
         assert_eq!(user_texts(&gen_a.runtime.session), vec!["from-alpha".to_string()]);
 
         // switch to B -> the compose replays B's history
         let (_id_b, _name_b, dir_b) = session_dir_for(&reg.snapshot(), "ws-b/beta").unwrap();
         std::env::set_var("CELESTEA_SESSION_DIR", &dir_b);
         reg.set_active(Some("ws-b/beta".to_string())).unwrap();
-        let gen_b = crate::build_gen(profile.clone()).unwrap();
+        let gen_b = crate::build_gen(profile.clone(), &store).unwrap();
         assert_eq!(user_texts(&gen_b.runtime.session), vec!["from-beta".to_string()]);
 
         // the registry persisted the switch (reload from disk)
@@ -1944,7 +1945,7 @@ mod tests {
         let (_id_a, _name_a, dir_a) = session_dir_for(&reloaded.snapshot(), "ws-a/alpha").unwrap();
         std::env::set_var("CELESTEA_SESSION_DIR", &dir_a);
         reloaded.set_active(Some("ws-a/alpha".to_string())).unwrap();
-        let gen_a2 = crate::build_gen(profile).unwrap();
+        let gen_a2 = crate::build_gen(profile, &store).unwrap();
         assert_eq!(user_texts(&gen_a2.runtime.session), vec!["from-alpha".to_string()]);
 
         std::env::remove_var("CELESTEA_SESSION_DIR");
@@ -2017,10 +2018,11 @@ mod tests {
         }))
         .expect("lenient merge");
 
+        let store = crate::providers::ProvidersStore::empty();
         // initial activation state (the activate tail: env -> recompose -> persist)
         std::env::set_var("CELESTEA_SESSION_DIR", &sess);
         reg.set_active(Some("ws/alpha".to_string())).unwrap();
-        let gen_a = crate::build_gen(profile.clone()).unwrap();
+        let gen_a = crate::build_gen(profile.clone(), &store).unwrap();
         assert_eq!(user_texts(&gen_a.runtime.session), vec!["from-alpha".to_string()]);
 
         // rename the ACTIVE session (the handler tail: rename -> env ->
@@ -2030,7 +2032,7 @@ mod tests {
         assert_eq!((ws.as_str(), old.as_str(), new.as_str()), ("ws", "alpha", "重命名"));
         std::env::set_var("CELESTEA_SESSION_DIR", &new_dir);
         reg.set_active(Some(format!("{ws}/{new}"))).unwrap();
-        let gen_b = crate::build_gen(profile).unwrap();
+        let gen_b = crate::build_gen(profile, &store).unwrap();
         // the re-composed generation replays the RENAMED dir's history
         assert_eq!(user_texts(&gen_b.runtime.session), vec!["from-alpha".to_string()]);
 
@@ -2084,19 +2086,20 @@ mod tests {
             "api_key_env": "W237_REPLAY_KEY",
         }))
         .expect("lenient merge");
+        let store = crate::providers::ProvidersStore::empty();
         let mut pj = crate::profile_to_json(&profile);
         if let Some(m) = session_meta(&sess) {
             assert!(crate::api::validate_model_name(&m).is_ok());
             pj["model"] = json!(m);
         }
         std::env::set_var("CELESTEA_SESSION_DIR", &sess);
-        let gen = crate::prepare_gen(pj, None).unwrap();
+        let gen = crate::prepare_gen(pj, None, &store).unwrap();
         assert_eq!(gen.model, "test-model-x", "meta model applied at activate");
         assert_eq!(user_texts(&gen.runtime.session), vec!["meta hello".to_string()]);
 
         // no meta -> the profile model stays (no override)
         std::env::set_var("CELESTEA_SESSION_DIR", &other);
-        let gen2 = crate::prepare_gen(crate::profile_to_json(&profile), None).unwrap();
+        let gen2 = crate::prepare_gen(crate::profile_to_json(&profile), None, &store).unwrap();
         assert_eq!(gen2.model, "deepseek-v4-flash-0731");
 
         // invalid meta model is rejected by the same validation
