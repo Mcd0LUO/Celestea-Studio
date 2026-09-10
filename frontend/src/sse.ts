@@ -33,7 +33,9 @@ export type SseHandler<K extends SseEventName> = SseHandlerMap[K];
 
 /**
  * W263: the envelope carries the turn/seq framing while the payload carries the
- * event body ({"turn":N,"seq":M,"payload":{...}}). Handlers read fields off ONE
+ * event body ({"turn":N,"seq":M,"payload":{...}}).
+ * W514: the envelope may also carry {v:2, session} — merged in as well so every
+ * handler can route the frame to the right session view (absent = legacy). Handlers read fields off ONE
  * flat object (chat.ts reads p.turn / p.phase / p.delta), so merge the envelope
  * fields into the payload WITHOUT dropping any payload field. Non-object
  * payloads (defensive) are passed through untouched.
@@ -45,6 +47,11 @@ function withEnvelope(payload: unknown, env: SseEnvelope): unknown {
   const out = { ...(payload as Record<string, unknown>) };
   if (env.turn !== undefined && out.turn === undefined) out.turn = env.turn;
   if (env.seq !== undefined) out.seq = env.seq;
+  // W514：信封 v2 的会话路由字段（旧后端缺省 → 前端回落单会话行为）
+  if (env.v !== undefined) out.v = env.v;
+  if (env.session !== undefined && env.session !== null && out.session === undefined) {
+    out.session = env.session;
+  }
   return out;
 }
 

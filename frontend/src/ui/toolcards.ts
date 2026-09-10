@@ -1,32 +1,29 @@
 // ============================================================================
-// ui/toolcards.ts — 工具调用卡片（W239 任务 3+4 重写）：
-//   任务4：工具事件按发生时间与 user/assistant 消息交错内联 —— 卡片不再
-//          集中在助手气泡顶部区块，而是作为消息流级条目（.mcol.msg.tool）
-//          按事件顺序插入 #messages（用户消息 → 工具调用+结果 → 助手回复）。
-//   任务3：折叠态即显示粗略内容 —— summary 两行：
-//          第1行 step · 工具名 · 状态；第2行 参数一行摘要（截断 ~60 字）；
-//          结果到达后追加第3行 结果一行摘要（value 首行截断 ~60 字）。
-//          展开（open）才见参数/结果全文（沿用 .tool-details 体系）。
+// ui/toolcards.ts — 工具调用卡片（W239 任务 3+4；W514 多会话化）：
+//   工具事件按发生时间与 user/assistant 消息交错内联，作为消息流级条目
+//   （.mcol.msg.tool）插入「该会话自己的视图容器」（SessionPane.el）。
+//   W514：索引（tool_call_id → 卡片）与步数由全局单例改为每容器一份，
+//         后台会话的工具卡回填不会污染当前视图。
 // ============================================================================
 import { el } from '../utils/dom';
 import { autoscroll } from './messages';
+import type { SessionPane } from './viewctx';
+import type { ToolCardRef } from './view';
 import type { ToolPayload, ToolResultPayload } from '../types';
+
+export type { ToolCardRef };
 
 const SUMMARY_CHARS = 60; // 参数/结果摘要截断字数
 
-/** 按工具调用 id 索引（跨消息流条目）。 */
-const opIndex = new Map<string, ToolCardRef>();
-let toolStep = 0;
-
 /** 当前工具步骤数（供状态栏 step 显示）。 */
-export function getToolStep(): number {
-  return toolStep;
+export function getToolStep(ctx: SessionPane): number {
+  return ctx.step;
 }
 
 /** 清空会话/切换会话时复位（resetMessages 调用）。 */
-export function resetToolCards(): void {
-  opIndex.clear();
-  toolStep = 0;
+export function resetToolCards(ctx: SessionPane): void {
+  ctx.ops.clear();
+  ctx.step = 0;
 }
 
 /**
@@ -34,8 +31,8 @@ export function resetToolCards(): void {
  * 与 resetToolCards 的区别：只清计数器，保留 opIndex —— 迟到/跨轮到达的
  * tool_result 仍能按 id 回填到已渲染的卡片上。
  */
-export function resetTurnStep(): void {
-  toolStep = 0;
+export function resetTurnStep(ctx: SessionPane): void {
+  ctx.step = 0;
 }
 
 function toJsonText(v: unknown): string {
@@ -53,21 +50,11 @@ function summaryOf(text: string): string {
   return t.slice(0, SUMMARY_CHARS) + '…';
 }
 
-
 /** 工具卡构建数据（live 事件与历史恢复共用）。 */
 export interface ToolCardData {
   step: number;
   name: string;
   argsText: string; // 参数全文
-}
-
-/** 已构建的工具卡引用（供结果回填 / 复制）。 */
-export interface ToolCardRef {
-  col: HTMLElement;
-  card: HTMLElement;
-  label: HTMLElement;
-  resultPv: HTMLElement;
-  body: HTMLElement;
 }
 
 /** 构建工具调用卡片 DOM（消息流级条目；live 与恢复渲染共用同一款式）。 */
@@ -112,11 +99,9 @@ export function buildToolCard(d: ToolCardData): ToolCardRef {
   resultPv.textContent = '';
   head.appendChild(resultPv);
   card.appendChild(head);
-  // 展开后可见：参数全文（平铺，无需二级展开）
   const body = el('div', 'toolcard-body');
   body.appendChild(el('div', 'tool-args', d.argsText));
   card.appendChild(body);
-  // 整卡单击展开/收起详情：同步 aria-expanded
   card.addEventListener('toggle', () => {
     head.setAttribute('aria-expanded', card.open ? 'true' : 'false');
   });
@@ -145,20 +130,23 @@ export function setToolResult(ref: ToolCardRef, resultText: string, failed: bool
   }
 }
 
-/** 新建工具调用卡片（live 事件；按事件时间插入消息流尾部）。 */
-export function pushToolCard(p: ToolPayload): HTMLElement {
-  toolStep += 1;
-  const ref = buildToolCard({ step: toolStep, name: String(p.name || 'tool'), argsText: toJsonText(p.args) });
-  const MsgsEl = document.getElementById('messages');
-  if (MsgsEl) MsgsEl.appendChild(ref.col);
-  autoscroll();
-  opIndex.set(String(p.id), ref);
+/** 新建工具调用卡片（live 事件；按事件时间插入该会话视图尾部）。 */
+export function pushToolCard(ctx: SessionPane, p: ToolPayload, into?: HTMLElement): HTMLElement {
+  ctx.step += 1;
+  const ref = buildToolCard({
+    step: ctx.step,
+    name: String(p.name || 'tool'),
+    argsText: toJsonText(p.args),
+  });
+  (into ?? ctx.el).appendChild(ref.col);
+  if (!into) autoscroll(ctx);
+  ctx.ops.set(String(p.id), ref);
   return ref.col;
 }
 
-/** 应用工具结果：状态/结果摘要/结果全文（按 id 索引）。 */
-export function applyToolResult(p: ToolResultPayload): void {
-  const rec = opIndex.get(String(p.id));
+/** 应用工具结果：状态/结果摘要/结果全文（按 id 索引，索引属于该会话）。 */
+export function applyToolResult(ctx: SessionPane, p: ToolResultPayload): void {
+  const rec = ctx.ops.get(String(p.id));
   if (!rec) return;
   const failed = p.ok === false || !!p.error;
   const label = failed
@@ -170,5 +158,5 @@ export function applyToolResult(p: ToolResultPayload): void {
         : '完成';
   setToolResult(rec, p.error ? String(p.error) : toJsonText(p.value), failed || p.decision === 'deny');
   rec.label.textContent = label;
-  autoscroll();
+  autoscroll(ctx);
 }

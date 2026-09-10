@@ -203,3 +203,39 @@
 }
 .sl-popup-textrow { display: flex; gap: 6px; padding: 2px; }
 .sl-popup-input { flex: 1; min-width: 0; }
+
+/* ============================================================================
+ * W302：statusline 第 1 行右端的「停止」方形按钮
+ *   仅运行中可见（.hidden 全局隐藏类，由 ui/inputbar.setBusy 同步），
+ *   点击 = 同一个取消入口 chat.ts requestCancel（#btnCancel 共用）。
+ *   显隐只切 class，不触碰消息区 / 背景视图（FRONTEND-RULES 铁律 5）。
+ * ============================================================================ */
+.sl-stop {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--c-border-subtle);
+  border-radius: 4px;
+  color: var(--c-text-2);
+  cursor: pointer;
+  line-height: 0;
+}
+.sl-stop svg { display: block; }
+.sl-stop:hover {
+  background: var(--c-accent-soft);
+  color: var(--c-text-1);
+  border-color: var(--c-accent-ring);
+}
+.sl-stop:focus-visible {
+  outline: 1px solid var(--c-accent-ring);
+  outline-offset: 1px;
+}
+.sl-stop:disabled {
+  opacity: .45;
+  cursor: default;
+  background: transparent;
+  color: var(--c-text-2);
+  border-color: var(--c-border-subtle);
+}

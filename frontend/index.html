@@ -47,13 +47,11 @@
 
       <!-- ---------- 主区 ---------- -->
       <main id="main">
-        <div id="messages" tabindex="-1">
-          <div id="emptyHint" class="empty-hint">
-            <div class="empty-mark">◇</div>
-            <div class="empty-title">Celestea Studio</div>
-            <div class="empty-sub">在下方输入消息开始对话 · Enter 发送 · Shift+Enter 换行</div>
-          </div>
-        </div>
+        <!-- W514：聚焦会话条（会话名 / worker 标记 / 运行态 / 其它运行中会话入口） -->
+        <div id="sessionBar" class="session-bar" title="当前聚焦会话 · 可切换其它运行中的会话"></div>
+
+        <!-- W514：多会话视图宿主——每个会话一个 .sess-pane 容器（hidden 切换，零重渲染） -->
+        <div id="messages" tabindex="-1"></div>
 
         <!-- ---------- statusline（模型 / 上下文环 / 吞吐，发送栏正上方） ---------- -->
         <div id="statusline" class="statusline" title="上下文占用 · 模型 · 思考强度 · 吞吐 · 缓存命中（GET /api/status + SSE 增量）">
@@ -70,6 +68,10 @@
             <span class="sl-sep">·</span>
             <button class="sl-effort" id="slEffort" title="思考强度（点击快速切换）">—</button>
             <span class="sl-spacer"></span>
+            <!-- W302：运行中显示的正方形停止按钮（取消当前轮次；显隐真源 = ui/inputbar.setBusy） -->
+            <button id="slStop" class="sl-stop hidden" type="button" title="停止本轮生成" aria-label="停止本轮生成">
+              <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1" fill="currentColor"></rect></svg>
+            </button>
             <span class="sl-hint" id="slHint"></span>
           </div>
           <div class="sl-row sl-row-sub">

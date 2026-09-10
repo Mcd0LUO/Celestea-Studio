@@ -1,55 +1,85 @@
 // ============================================================================
-// ui/messages.ts — 消息流（单一职责，W240 连续事件流重构）：
+// ui/messages.ts — 消息流（单一职责，W240 连续事件流重构；W514 多会话化）：
 //   一轮 = 按事件真实时间顺序渲染成一条连续流：
 //     用户消息 → 思考段（弱化块，按序）→ 文本段（markdown 气泡）→
 //     工具调用卡（内联条目）→ 工具结果 → 继续文本段 → ……
 //   文本增量按节拍重渲染；工具事件到达时当前文本段收尾（flushTextSegment），
 //   后续文本开启新段 —— 不再按"思考/文本/工具"分区聚合。
-//   thinking 弱化为独立信息块按序出现；context/status 类事件渲染为信息块。
+//   W301：文本段改用 MarkdownStream 增量渲染（只解析未固化尾部）。
+//   W514：所有渲染目标由「全局 #messages」改为「会话视图容器 SessionPane」——
+//         每个会话各有一份流式状态（assistant/thinkSeg/渲染节拍），后台会话的
+//         增量渲染进它自己的隐藏容器，不触碰当前视图（零重渲染、无空白帧）。
 // ============================================================================
-import { $, el, esc, fmtNow, need } from '../utils/dom';
+import { el, fmtNow } from '../utils/dom';
 import { highlightCode } from '../utils/hljs';
-import { marked } from 'marked';
-import type { AssistantView } from './view';
-import { S } from '../state';
-import { railAdd, railReset, railSync } from './rail';
-import { resetToolCards } from './toolcards';
-
-marked.setOptions({ breaks: true, gfm: true });
-
-const MsgsEl = need<HTMLElement>('#messages');
+import { MarkdownStream, renderMarkdown } from '../utils/markdown';
+import type { AssistantView, StreamDom } from './view';
+import type { SessionPane } from './viewctx';
+import { railAdd, railSync } from './rail';
 
 // ---- markdown ---------------------------------------------------------------
-/** Render markdown to safe-enough HTML. */
+/** Render markdown to safe-enough HTML（历史恢复/一次性渲染路径）。 */
 export function md(text: string): string {
-  try {
-    return marked.parse(text, { async: false }) as string;
-  } catch {
-    return '<pre>' + esc(text) + '</pre>';
+  return renderMarkdown(text);
+}
+
+// ---- 文本段增量渲染器（W301） ---------------------------------------------------
+/** 每个 AssistantView 一份流式渲染状态（WeakMap 挂载，不改 view.ts 公共接口）。 */
+const doms = new WeakMap<AssistantView, StreamDom>();
+
+function domOf(view: AssistantView): StreamDom {
+  let d = doms.get(view);
+  if (!d) {
+    d = {
+      stream: new MarkdownStream(),
+      stableNodes: [],
+      tailNodes: [],
+      lastText: '\u0000',
+      inited: false,
+    };
+    doms.set(view, d);
   }
+  return d;
+}
+
+/** 离屏解析 HTML 片段为节点数组（不挂载；供单次替换用）。 */
+function htmlToNodes(html: string): Node[] {
+  if (!html) return [];
+  const off = document.createElement('div');
+  off.innerHTML = html;
+  return Array.from(off.childNodes);
 }
 
 // ---- scrolling ----------------------------------------------------------------
-/** 粘性自动滚动：仅在用户接近底部时跟随；force 用于完成/新消息时。 */
-export function autoscroll(force = false): void {
-  const nearBottom = MsgsEl.scrollTop + MsgsEl.clientHeight >= MsgsEl.scrollHeight - 200;
-  if (force || nearBottom) MsgsEl.scrollTop = MsgsEl.scrollHeight;
+/**
+ * 粘性自动滚动：仅在用户接近底部时跟随；force 用于完成/新消息时。
+ * W514：只作用于该会话自己的容器；后台（隐藏）容器不写布局——只记录
+ * 「期望贴底」，切回时由 viewctx 恢复滚动位。
+ */
+export function autoscroll(ctx: SessionPane, force = false): void {
+  if (ctx.el.hidden) {
+    if (force) ctx.stickBottom = true;
+    return;
+  }
+  const nearBottom = ctx.el.scrollTop + ctx.el.clientHeight >= ctx.el.scrollHeight - 200;
+  if (force || nearBottom) ctx.el.scrollTop = ctx.el.scrollHeight;
 }
 
-export function hideEmptyHint(): void {
-  const hint = $('#emptyHint');
-  if (hint) hint.classList.add('hidden');
+export function hideEmptyHint(ctx: SessionPane): void {
+  ctx.hint.classList.add('hidden');
 }
 
-/** Rebuild the empty state exactly as it shipped in index.html. */
-export function renderEmptyHint(): void {
-  MsgsEl.innerHTML = '';
+/** Rebuild the empty state exactly as it shipped in index.html（容器级）。 */
+export function renderEmptyHint(ctx: SessionPane): void {
+  ctx.el.replaceChildren();
   const hint = el('div', 'empty-hint empty-hint-fresh');
-  hint.id = 'emptyHint';
   hint.appendChild(el('div', 'empty-mark', '◇'));
   hint.appendChild(el('div', 'empty-title', 'Celestea Studio'));
-  hint.appendChild(el('div', 'empty-sub', '在下方输入消息开始对话 · Enter 发送 · Shift+Enter 换行'));
-  MsgsEl.appendChild(hint);
+  hint.appendChild(
+    el('div', 'empty-sub', '在下方输入消息开始对话 · Enter 发送 · Shift+Enter 换行'),
+  );
+  ctx.el.appendChild(hint);
+  ctx.hint = hint;
 }
 
 /** 助手文本段是否已有内容（占位判定）。 */
@@ -58,120 +88,141 @@ export function assistantHasContent(view: AssistantView): boolean {
 }
 
 /** 直接移除空占位助手气泡（不渲染空块）。 */
-export function removeAssistant(view: AssistantView): void {
+export function removeAssistant(ctx: SessionPane, view: AssistantView): void {
   view.root.remove();
-  S.assistant = null;
+  doms.delete(view);
+  if (ctx.assistant === view) ctx.assistant = null;
 }
 
-/** 清空消息流并重建空态（/api/clear 成功后调用；同时重置流式状态）。 */
-export function resetMessages(): void {
-  if (renderTimer !== null) {
-    window.clearTimeout(renderTimer);
-    renderTimer = null;
+/** 清空该会话消息流并重建空态（/api/clear 成功后调用；同时重置流式状态）。 */
+export function resetMessages(ctx: SessionPane): void {
+  if (ctx.renderTimer !== null) {
+    window.clearTimeout(ctx.renderTimer);
+    ctx.renderTimer = null;
   }
-  S.assistant = null;
-  S.turn = null;
-  thinkSeg = null;
-  lastTextCol = null;
-  resetToolCards(); // 工具卡片（消息流级条目）复位
-  railReset(); // 消息 rail 复位
-  renderEmptyHint();
+  if (ctx.assistant) doms.delete(ctx.assistant);
+  ctx.assistant = null;
+  ctx.turn = null;
+  ctx.thinkSeg = null;
+  ctx.lastTextCol = null;
+  ctx.interjectNote = null;
+  ctx.ops.clear();
+  ctx.step = 0;
+  renderEmptyHint(ctx);
 }
 
 // ---- 流式正文渲染节流 ---------------------------------------------------------
 const RENDER_INTERVAL = 60; // ms —— 重渲染节拍（兼顾流畅与 CPU）
-let renderTimer: number | null = null;
-let renderDeadline = 0;
 
-function renderTextView(view: AssistantView): void {
-  view.content.innerHTML = md(view.text);
+/**
+ * 增量渲染文本段（W301 + W514 每容器独立节拍）：
+ *   1) MarkdownStream 只解析「未固化尾部」，返回 stableHtml / tailHtml 分解；
+ *   2) 新固化的块离屏构建后 append 到 content（已有块 DOM 原地保留）；
+ *   3) 尾部节点离屏构建后**单次替换**（同一帧内完成，无空白帧）。
+ */
+function renderTextView(ctx: SessionPane, view: AssistantView): void {
+  const d = domOf(view);
+  if (d.lastText === view.text) {
+    autoscroll(ctx);
+    railSync(ctx);
+    return;
+  }
+  const parts = d.stream.updateParts(view.text);
+  d.lastText = view.text;
+
+  if (parts.reset || !d.inited) {
+    d.stableNodes = htmlToNodes(parts.stableHtml);
+    d.tailNodes = htmlToNodes(parts.tailHtml);
+    view.content.replaceChildren(...d.stableNodes, ...d.tailNodes);
+    d.inited = true;
+  } else {
+    const anchor = d.tailNodes[0] ?? null;
+    const place = (n: Node) => {
+      if (anchor) view.content.insertBefore(n, anchor);
+      else view.content.appendChild(n);
+    };
+    if (parts.stableDeltaHtml) {
+      for (const n of htmlToNodes(parts.stableDeltaHtml)) {
+        place(n);
+        d.stableNodes.push(n);
+      }
+    }
+    const freshTail = htmlToNodes(parts.tailHtml);
+    for (const n of freshTail) place(n);
+    for (const n of d.tailNodes) n.parentNode?.removeChild(n);
+    d.tailNodes = freshTail;
+  }
+
   highlightCode(view.content);
-  autoscroll();
-  railSync();
+  autoscroll(ctx);
+  railSync(ctx);
 }
 
-function scheduleTextView(view: AssistantView): void {
-  if (renderTimer !== null) return; // 已有一次节拍排队
-  const wait = Math.max(0, renderDeadline + RENDER_INTERVAL - performance.now());
-  renderTimer = window.setTimeout(() => {
-    renderTimer = null;
-    renderDeadline = performance.now();
-    renderTextView(view);
+function scheduleTextView(ctx: SessionPane, view: AssistantView): void {
+  if (ctx.renderTimer !== null) return; // 已有一次节拍排队
+  const wait = Math.max(0, ctx.renderDeadline + RENDER_INTERVAL - performance.now());
+  ctx.renderTimer = window.setTimeout(() => {
+    ctx.renderTimer = null;
+    ctx.renderDeadline = performance.now();
+    renderTextView(ctx, view);
   }, wait);
 }
 
 /** 立即冲刷（turn 结束 / done 事件 / 最终文本到来时调用）。 */
-function flushTextView(view: AssistantView): void {
-  if (renderTimer !== null) {
-    window.clearTimeout(renderTimer);
-    renderTimer = null;
+function flushTextView(ctx: SessionPane, view: AssistantView): void {
+  if (ctx.renderTimer !== null) {
+    window.clearTimeout(ctx.renderTimer);
+    ctx.renderTimer = null;
   }
-  renderDeadline = performance.now();
-  renderTextView(view);
+  ctx.renderDeadline = performance.now();
+  renderTextView(ctx, view);
 }
 
 /** 增量追加正文 delta（节拍渲染，不逐字重排）。 */
-export function appendText(view: AssistantView, delta: string): void {
+export function appendText(ctx: SessionPane, view: AssistantView, delta: string): void {
   view.text += delta || '';
-  scheduleTextView(view);
+  scheduleTextView(ctx, view);
 }
 
 /** Sync final assistant text from the done event. */
-export function applyFinalText(view: AssistantView, text: string): void {
+export function applyFinalText(ctx: SessionPane, view: AssistantView, text: string): void {
   if (typeof text !== 'string' || !text || view.text === text) return;
   view.text = text;
-  flushTextView(view);
+  flushTextView(ctx, view);
 }
 
-/** 冻结当前文本段：有内容则收尾为完整气泡，并解除当前段（工具事件/新段前调用）。 */
-export function flushTextSegment(): void {
-  if (S.assistant) {
-    const a = S.assistant;
-    S.assistant = null;
-    if (assistantHasContent(a)) {
-      a.bubble.classList.remove('streaming');
-      a.bubble.classList.add('complete');
-      flushTextView(a);
-      autoscroll(true);
-    } else {
-      a.root.remove(); // 空占位不渲染
-    }
+/** 冻结当前文本段：有内容则收尾为完整气泡，并解除当前段。 */
+export function flushTextSegment(ctx: SessionPane): void {
+  const a = ctx.assistant;
+  if (!a) return;
+  ctx.assistant = null;
+  if (assistantHasContent(a)) {
+    a.bubble.classList.remove('streaming');
+    a.bubble.classList.add('complete');
+    flushTextView(ctx, a);
+    autoscroll(ctx, true);
+  } else {
+    a.root.remove(); // 空占位不渲染
+    doms.delete(a);
   }
 }
 
 // ---- thinking（弱化独立段，按事件顺序出现，不再聚合进气泡） ----------------------
 
-interface ThinkSeg {
-  root: HTMLElement;   // .mcol 根（含折叠状态 class）
-  head: HTMLElement;   // 标题行（可点折叠/展开）
-  body: HTMLElement;   // 内容
-  text: string;
-}
-
-let thinkSeg: ThinkSeg | null = null;
-/**
- * 同轮最近文本段（含已被工具事件截断收尾的）：thinking 重排的目标锚点。
- * 工具截断场景下 S.assistant 已置空，但思考块仍须位于对应文本块上方。
- */
-let lastTextCol: HTMLElement | null = null;
-
 /** 轮次结束/新轮开始：清除思考段归属与文本段锚点（跨轮不跨移；DOM 保留）。 */
-export function endTurn(): void {
-  thinkSeg = null;
-  lastTextCol = null;
+export function endTurn(ctx: SessionPane): void {
+  ctx.thinkSeg = null;
+  ctx.lastTextCol = null;
 }
 
-/** Append a thinking delta（弱化块：左侧色条 + 浅色底 + 小字；独立成段）。
- * 第 22 轮重排规则收紧（任何到达顺序下成立）：
- *   思考块的目标位置 = 同轮最近文本块的正上方（紧贴）。目标 = 当前流式
- *   文本段（S.assistant.root）若存在，否则为 lastTextCol（同轮最近、含被
- *   tool 截断收尾的文本段）。若思考块当前位于目标之后（无论中间隔着
- *   工具卡/信息块等任何段落）→ insertBefore 局部前移到目标正上方；
- *   已在目标之前 → 不动。跨轮：endTurn() 清 thinkSeg/lastTextCol，绝不串位。
+/**
+ * Append a thinking delta（弱化块：左侧色条 + 浅色底 + 小字；独立成段）。
+ * 重排规则：思考块的目标位置 = 同轮最近文本块的正上方（紧贴）；已在目标
+ * 之前则不动。跨轮：endTurn() 清 thinkSeg/lastTextCol，绝不串位。
  */
-export function appendThinking(delta: string): void {
-  if (!thinkSeg) {
-    hideEmptyHint();
+export function appendThinking(ctx: SessionPane, delta: string): void {
+  if (!ctx.thinkSeg) {
+    hideEmptyHint(ctx);
     const root = el('div', 'mcol');
     const msg = el('div', 'msg think-seg');
     const cap = el('div', 'msg-caption think-head') as HTMLElement;
@@ -187,34 +238,40 @@ export function appendThinking(delta: string): void {
     bubble.appendChild(folded);
     msg.appendChild(bubble);
     root.appendChild(msg);
-    MsgsEl.appendChild(root);
-    thinkSeg = { root, head: cap, body, text: '' };
+    ctx.el.appendChild(root);
+    const seg = { root, head: cap, body, text: '' };
+    ctx.thinkSeg = seg;
     body.textContent = '思考中…'; // 流式思考占位态（弱化）
-    // 点击标题行折叠/展开（第 23 轮：流式思考中不折叠）
     cap.addEventListener('click', () => {
-      if (thinkSeg !== null && S.streaming) return; // 流式思考中不折叠
+      const cur = ctx.thinkSeg;
+      if (cur !== null && ctx.streaming) return; // 流式思考中不折叠
       root.classList.toggle('collapsed');
       foldMark.textContent = root.classList.contains('collapsed') ? '▸' : '▾';
     });
   }
-  // 重排：目标 = 当前文本段 ?? 同轮最近文本段（含 tool 截断收尾的）
-  const target = S.assistant?.root ?? lastTextCol;
-  if (target && thinkSeg.root.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING) {
-    // 思考块位于目标之后（中间可隔工具卡等）→ 紧贴目标上方
-    MsgsEl.insertBefore(thinkSeg.root, target);
+  const seg = ctx.thinkSeg;
+  const target = ctx.assistant?.root ?? ctx.lastTextCol;
+  if (
+    seg !== null &&
+    target &&
+    seg.root.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING
+  ) {
+    ctx.el.insertBefore(seg.root, target); // 紧贴目标上方
   }
-  thinkSeg.text += delta || '';
-  thinkSeg.body.textContent = thinkSeg.text === '' ? '思考中…' : thinkSeg.text;
-  autoscroll();
-  railSync();
+  if (seg !== null) {
+    seg.text += delta || '';
+    seg.body.textContent = seg.text === '' ? '思考中…' : seg.text;
+  }
+  autoscroll(ctx);
+  railSync(ctx);
 }
 
 // ---- 信息块（context/status 类事件：注入、lagged、error 提示等） ------------------
 
 /** 渲染一条可见信息块（按序出现在流中；样式与普通消息区分：左侧色条 + 浅色底）。 */
-export function renderInfoBlock(text: string, cls?: 'err' | 'warn'): void {
+export function renderInfoBlock(ctx: SessionPane, text: string, cls?: 'err' | 'warn'): void {
   if (!text) return;
-  hideEmptyHint();
+  hideEmptyHint(ctx);
   const col = el('div', 'mcol');
   const msg = el('div', 'msg info' + (cls ? ' ' + cls : ''));
   const cap = el('div', 'msg-caption');
@@ -227,18 +284,24 @@ export function renderInfoBlock(text: string, cls?: 'err' | 'warn'): void {
   bubble.appendChild(body);
   msg.appendChild(bubble);
   col.appendChild(msg);
-  MsgsEl.appendChild(col);
-  autoscroll(true);
+  ctx.el.appendChild(col);
+  autoscroll(ctx, true);
 }
 
 // ---- message builders ----------------------------------------------------------
 
-export function addUserMessage(text: string, container: HTMLElement = MsgsEl): void {
-  hideEmptyHint();
+/** 用户消息；interject=true 时渲染为「插话」（运行中注入该轮的输入）。 */
+export function addUserMessage(
+  ctx: SessionPane,
+  text: string,
+  opts?: { interject?: boolean; into?: HTMLElement },
+): HTMLElement {
+  const target = opts?.into ?? ctx.el;
+  if (target === ctx.el) hideEmptyHint(ctx);
   const col = el('div', 'mcol');
-  const msg = el('div', 'msg user');
+  const msg = el('div', 'msg user' + (opts?.interject ? ' interject' : ''));
   const cap = el('div', 'msg-caption');
-  cap.appendChild(el('span', 'who', '你'));
+  cap.appendChild(el('span', 'who', opts?.interject ? '插话' : '你'));
   cap.appendChild(el('span', null, fmtNow()));
   msg.appendChild(cap);
   const bubble = el('div', 'bubble');
@@ -248,16 +311,46 @@ export function addUserMessage(text: string, container: HTMLElement = MsgsEl): v
   bubble.appendChild(body);
   msg.appendChild(bubble);
   col.appendChild(msg);
-  container.appendChild(col);
-  railAdd(col, 'user');
-  railSync();
-  autoscroll(true);
+  target.appendChild(col);
+  railAdd(ctx, col, opts?.interject ? 'interject' : 'user');
+  if (target === ctx.el) {
+    railSync(ctx);
+    autoscroll(ctx, true);
+  }
+  return col;
 }
 
-/** 获取当前文本段视图或创建新的流式文本气泡（连续流中的一段；container 用于离屏构建）。 */
-export function ensureAssistant(container: HTMLElement = MsgsEl): AssistantView {
-  if (S.assistant) return S.assistant;
-  hideEmptyHint();
+/**
+ * 运行中插话的轻提示（贴在插话气泡下方；成功/失败各一态）。
+ * 返回元素句柄，供结果到达后就地改文案（不重建列表）。
+ */
+export function renderInterjectNote(
+  ctx: SessionPane,
+  text: string,
+  cls?: 'ok' | 'err',
+  after?: HTMLElement | null,
+): HTMLElement {
+  const note = el('div', 'mcol interject-note-col');
+  const msg = el('div', 'interject-note' + (cls ? ' ' + cls : ''), text);
+  note.appendChild(msg);
+  const anchor = after ?? null;
+  if (anchor) anchor.after(note);
+  else ctx.el.appendChild(note);
+  if (anchor) {
+    if (anchor.nextSibling === note) autoscroll(ctx, true);
+  } else {
+    autoscroll(ctx, true);
+  }
+  return msg;
+}
+
+/** 获取当前文本段视图或创建新的流式文本气泡（容器 = 该会话的视图）。 */
+export function ensureAssistant(ctx: SessionPane, into?: HTMLElement): AssistantView {
+  const target = into ?? ctx.el;
+  if (target === ctx.el) {
+    if (ctx.assistant) return ctx.assistant;
+    hideEmptyHint(ctx);
+  }
   const col = el('div', 'mcol');
   const msg = el('div', 'msg assistant');
   const cap = el('div', 'msg-caption');
@@ -269,9 +362,9 @@ export function ensureAssistant(container: HTMLElement = MsgsEl): AssistantView 
   bubble.appendChild(content);
   msg.appendChild(bubble);
   col.appendChild(msg);
-  container.appendChild(col);
-  railAdd(col, 'assistant');
-  railSync();
+  target.appendChild(col);
+  railAdd(ctx, col, 'assistant');
+  if (target === ctx.el) railSync(ctx);
 
   // think/cards 字段为类型兼容保留（不挂载；thinking/工具卡均独立成段）
   const view: AssistantView = {
@@ -287,16 +380,18 @@ export function ensureAssistant(container: HTMLElement = MsgsEl): AssistantView 
     ops: new Map(),
     steps: 0,
   };
-  lastTextCol = col; // 同轮最近文本段（thinking 重排锚点）
-  S.assistant = view;
-  autoscroll(true);
+  if (target === ctx.el) {
+    ctx.lastTextCol = col; // 同轮最近文本段（thinking 重排锚点）
+    ctx.assistant = view;
+    autoscroll(ctx, true);
+  }
   return view;
 }
 
 /** 文本段收尾（turn 结束 / done 冲刷）。 */
-export function finalizeAssistant(view: AssistantView): void {
+export function finalizeAssistant(ctx: SessionPane, view: AssistantView): void {
   view.bubble.classList.remove('streaming');
   view.bubble.classList.add('complete');
-  flushTextView(view);
-  autoscroll(true);
+  flushTextView(ctx, view);
+  autoscroll(ctx, true);
 }

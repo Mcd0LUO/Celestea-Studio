@@ -7,7 +7,10 @@
 //   （进入勾选模式：叶子左侧勾选框 + 底部操作条，走 batch-delete）。
 //   会话「⋯」菜单：重命名 / 删除 / 归档 / 分支（成功后刷新并高亮新分支）。
 //   搜索过滤工作区与会话；排序切换「最近活跃（modified）/ 名称」。
-//   点击会话行 = 激活切换聊天区（第 4 轮契约）；活跃会话高亮。
+//   点击会话行 = **立即**打开该会话的视图容器（不因别的会话在跑而阻塞），
+//   随后后台 POST activate（409/不可用只提示，视图照常可看）。
+//   W514：Worker 组可展开（wid / 标题 / 运行状态 / 模型），点击打开其会话视图；
+//         会话行显示运行态点，运行态变化只做局部 class 更新（铁律 6）。
 //   图标：内联 SVG（不引图标库）。端点缺失（W243 并行开发）优雅降级。
 // ============================================================================
 import { api, ApiError } from '../api';
@@ -15,7 +18,9 @@ import { el, need } from '../utils/dom';
 import { popOverlay, pushOverlay, type OverlayHandle } from '../utils/overlays';
 import type { SessionInfo, WorkspaceInfo } from '../types';
 import { S } from '../state';
-import { switchToSession } from './restore';
+import { openSession } from './restore';
+import { activeSessionId, onBusyChange, paneBusy, setPaneMeta, setRemoteBusy } from './viewctx';
+import { updateSessionBar } from './sessionbar';
 import { confirmDialog } from './confirm';
 
 // ---- 面板状态 ---------------------------------------------------------------------
@@ -38,15 +43,41 @@ function note(text: string): void {
   if (foot) foot.textContent = text;
 }
 
+/** W514：worker 会话只出现在 Worker 组，不再重复列进工作区树。 */
+function isWorkerSession(s: SessionInfo): boolean {
+  return s.kind === 'worker' || (s.id ?? '').startsWith('worker:');
+}
+
 function wsNameOf(s: SessionInfo): string {
   const ws = (s.workspace ?? '').trim();
   return ws === '' ? 'root' : ws;
 }
 
-/** 激活高亮只切 class（不重建树，避免闪烁）。 */
+/** 激活高亮只切 class（不重建树，避免闪烁）；真源 = 当前聚焦容器。 */
 function updateActiveHighlight(container: HTMLElement): void {
+  const act = activeSessionId() || activeSession;
   for (const n of container.querySelectorAll<HTMLElement>('.sess-leaf')) {
-    n.classList.toggle('active', n.dataset.id === activeSession);
+    n.classList.toggle('active', n.dataset.id === act);
+  }
+}
+
+/** 运行态点：只切 class/文案，不重建行（铁律 6：轮询/事件只做局部更新）。 */
+function updateBusyDots(container: HTMLElement): void {
+  for (const d of container.querySelectorAll<HTMLElement>('.sess-dot[data-dot]')) {
+    const id = d.dataset.dot ?? '';
+    const busy = paneBusy(id);
+    d.classList.toggle('busy', busy);
+    d.title = busy ? '运行中' : '空闲';
+  }
+  for (const row of container.querySelectorAll<HTMLElement>('.ws-worker-row')) {
+    const id = row.dataset.id ?? '';
+    const busy = paneBusy(id);
+    row.classList.toggle('running', busy);
+    const st = row.querySelector<HTMLElement>('.ws-worker-state');
+    if (st) {
+      st.textContent = busy ? '运行中' : '空闲';
+      st.classList.toggle('busy', busy);
+    }
   }
 }
 
@@ -171,23 +202,37 @@ function closeCtxMenu(): void {
 
 // ---- 会话 / 工作区操作 -----------------------------------------------------------------
 
-async function activateSession(container: HTMLElement, id: string): Promise<void> {
-  if (id === activeSession) return;
-  try {
-    const r = await api.activateSession(id);
-    if (r.ok === false) {
-      note('激活失败：' + (r.error || '—'));
-      return;
-    }
-    activeSession = r.active_session ?? id;
-    S.selSession = activeSession;
-    note('已切换到会话：' + activeSession);
-    switchToSession(activeSession); // 离屏双缓冲：无空白帧
-    updateActiveHighlight(container); // 只切 class，不重建整棵树
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 409) note('轮次进行中，请稍后重试');
-    else note('激活失败：' + (err instanceof Error ? err.message : String(err)));
-  }
+/**
+ * 打开会话视图（W514）：
+ *   - **立即**切换容器（hidden 切换 / 零重渲染）：别的会话正在跑也照样切，
+ *     不等任何网络请求（旧行为：await activate，409 时无法切换）；
+ *   - 随后后台 POST /api/sessions/{id}/activate（运行中的目标会话旧后端会 409，
+ *     此时视图仍是可看的实时流 —— 只提示，不影响已打开的视图）；
+ *   - 高亮/运行态点只切 class（不重建树）。
+ */
+function openSessionRow(
+  container: HTMLElement,
+  id: string,
+  meta?: { kind?: string; title?: string },
+): void {
+  openSession(id, meta); // 立即开容器（未恢复过历史 → 离屏双缓冲恢复）
+  activeSession = id;
+  S.selSession = id;
+  updateActiveHighlight(container);
+  updateBusyDots(container);
+  note('已切换到会话：' + id);
+  void api
+    .activateSession(id)
+    .then((r) => {
+      if (r.ok === false) note('视图已打开 · 激活失败：' + (r.error || '—'));
+    })
+    .catch((err: unknown) => {
+      if (err instanceof ApiError && err.status === 409) {
+        note('该会话运行中（视图已打开 · 实时流可见）');
+      } else {
+        note('视图已打开 · 激活接口不可用：' + (err instanceof Error ? err.message : String(err)));
+      }
+    });
 }
 
 async function archiveSession(container: HTMLElement, id: string): Promise<void> {
@@ -352,6 +397,12 @@ function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
   const leaf = el('div', 'sess-leaf' + (isActive ? ' active' : '') + (S.selSession === id ? ' sel' : ''));
   leaf.dataset.id = id;
 
+  if (!batchMode) {
+    const dot = el('span', 'sess-dot' + (paneBusy(id) ? ' busy' : ''));
+    dot.dataset.dot = id;
+    dot.title = paneBusy(id) ? '运行中' : '空闲';
+    leaf.appendChild(dot);
+  }
   if (batchMode) {
     const cb = el('input', 'sess-check') as HTMLInputElement;
     cb.type = 'checkbox';
@@ -380,7 +431,12 @@ function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
     kebab.addEventListener('click', (e) => {
       e.stopPropagation();
       openCtxMenu(container, kebab.getBoundingClientRect(), [
-        { label: isActive ? '当前活跃' : '激活', disabled: isActive, onPick: () => void activateSession(container, id) },
+        {
+          label: isActive ? '当前会话' : '打开',
+          disabled: isActive,
+          onPick: () =>
+            openSessionRow(container, id, { kind: s.kind === 'worker' ? 'worker' : 'session', title: s.title }),
+        },
         { label: '重命名', onPick: () => void renameSession(container, id, s.title || truncateName(id)) },
         { label: '归档', onPick: () => void archiveSession(container, id) },
         { label: '分支', onPick: () => void branchSession(container, id) },
@@ -390,7 +446,7 @@ function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
     leaf.appendChild(kebab);
   }
   leaf.addEventListener('click', () => {
-    void activateSession(container, id);
+    openSessionRow(container, id, { kind: s.kind === 'worker' ? 'worker' : 'session', title: s.title });
   });
   return leaf;
 }
@@ -454,34 +510,67 @@ function workerSessions(list: SessionInfo[]): SessionInfo[] {
   return list.filter((s) => s.kind === 'worker' || (s.id ?? '').startsWith('worker:'));
 }
 
-function renderWorkerGroup(container: HTMLElement, workers: SessionInfo[]): void {
-  const group = el('div', 'ws-worker-group');
-  const head = el('div', 'ws-worker-head');
-  head.appendChild(el('span', null, '引擎 Worker'));
-  head.appendChild(el('span', 'ws-worker-count', String(workers.length)));
-  group.appendChild(head);
+/** wid：标题前缀「W514·短名」优先，否则取 id 末段。 */
+function widOf(w: SessionInfo): string {
+  const t = (w.title ?? '').trim();
+  const m = /^(W\d+)/.exec(t);
+  if (m && m[1]) return m[1];
+  const id = w.id ?? '';
+  const i = id.lastIndexOf('/');
+  return i >= 0 ? id.slice(i + 1) : id;
+}
+
+/** 标题：去掉「W514·」前缀后的短名（与 wid 标签分列显示）。 */
+function workerTitleOf(w: SessionInfo): string {
+  const t = (w.title ?? '').trim();
+  const stripped = t.replace(/^W\d+\s*[·:：-]\s*/, '');
+  return stripped || truncateName(w.id ?? '') || (w.id ?? '');
+}
+
+/** Worker 组内容签名：不变则不重建（铁律 6：轮询只做局部更新）。 */
+function workerSigOf(workers: SessionInfo[]): string {
+  return workers
+    .map((w) =>
+      [w.id ?? '', w.title ?? '', w.model ?? '', paneBusy(w.id ?? '') ? '1' : '0', String(w.events ?? '')].join('\u0001'),
+    )
+    .join('\u0002');
+}
+
+/** 渲染 Worker 组（可展开 details；每行：运行态点 · wid · 标题 · 状态 · 模型）。 */
+function renderWorkerGroup(host: HTMLElement, workers: SessionInfo[], open: boolean): void {
+  const det = document.createElement('details');
+  det.className = 'ws-worker-details';
+  det.open = open;
+  const sum = document.createElement('summary');
+  sum.className = 'ws-worker-summary';
+  sum.appendChild(el('span', null, '引擎 Worker'));
+  sum.appendChild(el('span', 'ws-worker-count', String(workers.length)));
+  det.appendChild(sum);
   for (const w of workers) {
     const id = w.id ?? '';
-    const row = el('div', 'ws-worker-row' + (S.selSession === id ? ' active' : ''));
+    const busy = paneBusy(id);
+    const row = el('div', 'ws-worker-row' + (activeSessionId() === id ? ' active' : ''));
     row.dataset.id = id;
-    row.appendChild(el('span', 'sess-dot live'));
-    const name = el('span', 'ws-worker-name', w.title || truncateName(id) || id);
-    row.appendChild(name);
+    row.appendChild(el('span', 'sess-dot' + (busy ? ' busy' : '')));
+    row.appendChild(el('span', 'ws-worker-wid', widOf(w)));
+    row.appendChild(el('span', 'ws-worker-title', workerTitleOf(w)));
+    const st = el('span', 'ws-worker-state' + (busy ? ' busy' : ''), busy ? '运行中' : '空闲');
+    row.appendChild(st);
     const bits: string[] = [];
     if (w.model) bits.push(String(w.model));
     if (w.events !== undefined) bits.push('ev:' + w.events);
     row.appendChild(el('span', 'ws-worker-meta', bits.join(' · ')));
-    row.title = id + (w.model ? ' · ' + w.model : '');
+    row.title = id + (w.model ? ' · ' + w.model : '') + '（点击打开该 worker 会话视图：只读）';
     row.addEventListener('click', () => {
-      S.selSession = id;
-      for (const n of container.querySelectorAll<HTMLElement>('.ws-worker-row')) {
-        n.classList.toggle('active', n.dataset.id === id);
-      }
+      const hostEl = document.getElementById('sessionTree') ?? host;
+      openSessionRow(hostEl, id, { kind: 'worker', title: w.title || id });
     });
-    group.appendChild(row);
+    det.appendChild(row);
   }
-  container.appendChild(group);
+  host.replaceChildren(det);
 }
+
+let workerSig = '';
 
 async function refreshWorkers(container: HTMLElement): Promise<void> {
   if (!container.isConnected) return;
@@ -493,8 +582,17 @@ async function refreshWorkers(container: HTMLElement): Promise<void> {
     return;
   }
   const workers = workerSessions(list);
-  container.querySelector('.ws-worker-group')?.remove();
-  if (workers.length) renderWorkerGroup(container, workers);
+  const host = container.querySelector<HTMLElement>('.ws-worker-host');
+  if (!host) return;
+  const sig = workerSigOf(workers);
+  if (sig === workerSig) {
+    updateBusyDots(container); // 只切点，不重建组
+    return;
+  }
+  const prevOpen = host.querySelector<HTMLDetailsElement>('.ws-worker-details')?.open ?? true;
+  workerSig = sig;
+  if (workers.length) renderWorkerGroup(host, workers, prevOpen);
+  else host.replaceChildren();
 }
 
 function ensureWorkerPoll(container: HTMLElement): void {
@@ -681,24 +779,19 @@ export function newSession(presetWs?: string): void {
           void loadSessions();
           return;
         }
-        // 自动激活 + 聊天区切换
-        try {
-          const ar = await api.activateSession(id);
-          if (ar.ok === false) {
-            status.className = 'ws-fs-status err';
-            status.textContent = '创建成功，但激活失败：' + (ar.error || '—');
-            close();
-            void loadSessions();
-            return;
-          }
-          activeSession = ar.active_session ?? id;
-          S.selSession = activeSession;
-          note('已创建并激活会话：' + activeSession);
-          switchToSession(activeSession);
-        } catch (err) {
-          status.className = 'ws-fs-status err';
-          status.textContent = '创建成功，但激活失败：' + (err instanceof Error ? err.message : String(err));
-        }
+        // W514：立即打开新会话视图（不等激活结果），激活在后台进行
+        openSession(id, { kind: 'session', title: t });
+        activeSession = id;
+        S.selSession = id;
+        note('已创建并打开会话：' + id);
+        void api
+          .activateSession(id)
+          .then((ar) => {
+            if (ar.ok === false) note('视图已打开 · 激活失败：' + (ar.error || '—'));
+          })
+          .catch((err: unknown) => {
+            note('视图已打开 · 激活接口不可用：' + (err instanceof Error ? err.message : String(err)));
+          });
         close();
         void loadSessions();
       })
@@ -900,8 +993,23 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
   try {
     const d = await api.sessions();
     sessions = d.sessions ?? [];
+    // W514：容器元数据（kind/标题/模型）+ 远端运行态（busy 字段缺失 → 不覆盖本地）
+    for (const s of sessions) {
+      const id = s.id ?? '';
+      if (!id) continue;
+      setPaneMeta(id, {
+        kind: s.kind === 'worker' ? 'worker' : s.kind === 'session' ? 'session' : undefined,
+        title: s.title,
+        model: s.model,
+        workspace: s.workspace ?? undefined,
+      });
+      if (typeof s.busy === 'boolean') setRemoteBusy(id, s.busy);
+    }
     const act = (d.sessions ?? []).find((s) => s.active === true);
-    if (act?.id) activeSession = act.id;
+    // 客户端已打开的容器是更强真源：不因后端 active 字段把高亮带偏
+    const open = activeSessionId();
+    if (open) activeSession = open;
+    else if (act?.id) activeSession = act.id;
   } catch (err) {
     stopWorkerPoll();
     off.appendChild(el('div', 'side-note err', '会话接口不可用'));
@@ -911,14 +1019,15 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
     return;
   }
 
+  const treeSessions = sessions.filter((s) => !isWorkerSession(s));
   const wsNames = new Set<string>();
-  for (const s of sessions) if (!s.archived) wsNames.add(wsNameOf(s));
+  for (const s of treeSessions) if (!s.archived) wsNames.add(wsNameOf(s));
   for (const n of wsNames) {
     if (!wsList.some((w) => w.name === n)) wsList.push({ name: n });
   }
   wsList.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
-  if (countEl) countEl.textContent = String(sessions.filter((s) => s.archived !== true).length);
+  if (countEl) countEl.textContent = String(treeSessions.filter((s) => s.archived !== true).length);
 
   renderToolbar(off);
 
@@ -927,11 +1036,11 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
   const wsWith = wsList.filter(
     (w) =>
       matchesQuery(w.name) ||
-      sessions.some((s) => !s.archived && wsNameOf(s) === w.name && matchesQuery(s.title ?? s.id ?? '')),
+      treeSessions.some((s) => !s.archived && wsNameOf(s) === w.name && matchesQuery(s.title ?? s.id ?? '')),
   );
   let rendered = 0;
   for (const w of wsWith) {
-    const list = sessions.filter(
+    const list = treeSessions.filter(
       (s) => !s.archived && wsNameOf(s) === w.name && matchesQuery(s.title ?? s.id ?? ''),
     );
     if (!matchesQuery(w.name) && !list.length) continue;
@@ -946,10 +1055,13 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
   // 批量勾选模式：底部操作条
   if (batchMode) renderBatchBar(off);
 
-  // 引擎 Worker 组
+  // 引擎 Worker 组（W514：常驻 host —— 轮询只替换 host 内容，不重建整棵树）
   const workers = workerSessions(sessions);
+  const wHost = el('div', 'ws-worker-host');
+  off.appendChild(wHost);
+  workerSig = workerSigOf(workers);
   if (workers.length) {
-    renderWorkerGroup(off, workers);
+    renderWorkerGroup(wHost, workers, true);
     ensureWorkerPoll(container);
   } else {
     stopWorkerPoll();
@@ -968,6 +1080,9 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
     const inp = container.querySelector<HTMLInputElement>('.ws-search-input');
     if (inp) inp.focus();
   }
+  // W514：元数据（标题/kind）回填后同步会话条与运行态点（只改文本/class）
+  updateBusyDots(container);
+  updateSessionBar();
 }
 
 // ---- 装配 ------------------------------------------------------------------------
@@ -981,6 +1096,14 @@ export function initSessionsPanel(): void {
   // 第 22 轮：清空/刷新入口已移除（后端端点保留）
   document.addEventListener('click', (e) => {
     if (!(e.target instanceof Element) || !e.target.closest('.sess-menu')) closeCtxMenu();
+  });
+  // W514：任一会话运行态变化 → 只更新侧栏运行态点/Worker 行状态（局部）
+  onBusyChange(() => {
+    const c = document.getElementById('sessionTree');
+    if (!c) return;
+    updateBusyDots(c);
+    const host = c.querySelector<HTMLElement>('.ws-worker-host');
+    if (host) void refreshWorkers(c); // 只重建 Worker 组（签名变化时）
   });
   void loadSessions();
 }

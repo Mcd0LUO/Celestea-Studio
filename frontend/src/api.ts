@@ -77,8 +77,15 @@ function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   health: () => requestJson<HealthInfo>('/api/health'),
-  /** Statusline fallback source (polled + SSE incremental). */
-  status: () => requestJson<StatusSnapshot>('/api/status'),
+  /**
+   * Statusline fallback source (polled + SSE incremental).
+   * W514: `session` 非空 → GET /api/status?session=<id>（任意会话状态；旧后端
+   * 忽略该参数，返回活跃会话快照 = 现状行为）。
+   */
+  status: (session?: string) =>
+    requestJson<StatusSnapshot>(
+      '/api/status' + (session ? '?session=' + encodeURIComponent(session) : ''),
+    ),
   tools: () => requestJson<ToolsResp>('/api/tools'),
   /** 当前运行配置（安全剖面，不含密钥）。 */
   config: () => requestJson<ConfigInfo>('/api/config'),
@@ -89,8 +96,15 @@ export const api = {
   messages: (id: string) =>
     requestJson<MessagesResp>('/api/sessions/' + encodeURIComponent(id) + '/messages'),
   clear: () => postJson<ClearResp>('/api/clear', {}),
-  turn: (input: string) => postJson<TurnResp>('/api/turn', { input }),
-  cancel: () => postJson<CancelResp>('/api/cancel', {}),
+  /**
+   * W514：POST /api/turn {input, session?}——目标会话空闲 → 开新轮；
+   * 运行中 → 作为插话注入该轮（响应 injected=true，不新开轮）。
+   * 旧后端忽略多余字段（serde 默认），仍按现状返回 409/新轮。
+   */
+  turn: (input: string, session?: string) =>
+    postJson<TurnResp>('/api/turn', session ? { input, session } : { input }),
+  /** 取消当前聚焦会话的轮次（W514：带 session，旧后端忽略）。 */
+  cancel: (session?: string) => postJson<CancelResp>('/api/cancel', session ? { session } : {}),
   // ---- 工作区 / 会话管理（W236；缺失时 404 优雅降级） ----
   workspaces: () => requestJson<WorkspacesResp>('/api/workspaces'),
   /** W243 任务2：纯文件管理器建工作区——仅按目录注册（name 由后端取文件夹 basename）。 */

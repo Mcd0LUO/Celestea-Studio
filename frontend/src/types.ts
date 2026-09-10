@@ -12,9 +12,25 @@
 
 /** SSE envelope: every event carries { turn, seq, payload }. */
 export interface SseEnvelope {
+  /** W514: envelope version (2 = carries `session`; absent/1 = legacy single-session). */
+  v?: number;
+  /** W514: target session id — the frontend routes every frame by this field. */
+  session?: string;
   turn?: number;
   seq?: number;
   payload?: Record<string, unknown>;
+}
+
+/**
+ * W514: fields the envelope contributes to every payload (the SSE client merges
+ * them flat). All optional — a legacy backend omits them and the frontend falls
+ * back to the single-session behaviour.
+ */
+export interface SseMeta {
+  v?: number;
+  session?: string;
+  turn?: number;
+  seq?: number;
 }
 
 /** SSE event names (mirrored from the engine LoopEvent variants). */
@@ -47,6 +63,10 @@ export interface StatusSnapshot {
   context_usage?: ContextUsage;
   /** W263: engine token usage (latest LLM stream + cumulative `total`). */
   usage?: UsageSnapshot;
+  /** W237/W514: the session this snapshot describes (GET /api/status?session=). */
+  session?: string | null;
+  /** W514: whether that session currently has a turn running (may be absent). */
+  busy?: boolean;
 }
 
 /**
@@ -69,6 +89,10 @@ export interface UsageSnapshot extends UsageCounters {
 
 /** status SSE payload: turn lifecycle + optional statusline fields. */
 export interface StatusPayload extends StatusSnapshot {
+  /** W514: envelope version (2 = carries `session`). */
+  v?: number;
+  /** W514: `session` is inherited from StatusSnapshot (may be null on legacy). */
+  seq?: number;
   phase?: 'start' | 'completed' | 'cancelled' | 'error' | 'lagged';
   turn?: number;
   error?: string;
@@ -80,25 +104,21 @@ export interface StatusPayload extends StatusSnapshot {
   statusline?: StatusSnapshot;
 }
 
-export interface TextPayload {
-  turn?: number;
+export interface TextPayload extends SseMeta {
   delta: string;
 }
 
-export interface ThinkingPayload {
-  turn?: number;
+export interface ThinkingPayload extends SseMeta {
   delta: string;
 }
 
-export interface ToolPayload {
-  turn?: number;
+export interface ToolPayload extends SseMeta {
   id: string;
   name?: string;
   args?: unknown;
 }
 
-export interface ToolResultPayload {
-  turn?: number;
+export interface ToolResultPayload extends SseMeta {
   id: string;
   ok?: boolean;
   value?: unknown;
@@ -107,15 +127,13 @@ export interface ToolResultPayload {
   decision?: 'allow' | 'deny' | 'ask' | null;
 }
 
-export interface DonePayload {
-  turn?: number;
+export interface DonePayload extends SseMeta {
   text?: string;
   tool_calls?: ToolPayload[];
 }
 
 /** context 类事件（W240：上下文注入 / 裁剪等系统提示）。 */
-export interface ContextPayload {
-  turn?: number;
+export interface ContextPayload extends SseMeta {
   text?: string;
   cls?: string;
 }
@@ -152,7 +170,10 @@ export interface ToolsResp {
 export interface SessionInfo {
   id?: string;
   title?: string;
-  kind?: string;
+  /** W514: 'session' | 'worker' (absent on legacy backends). */
+  kind?: 'session' | 'worker' | string;
+  /** W514: a turn is running on this session (absent on legacy backends). */
+  busy?: boolean;
   workspace?: string | null;
   events?: number;
   live?: boolean;
@@ -357,6 +378,13 @@ export interface CancelResp extends OkResp {}
 export interface TurnResp {
   ok?: boolean;
   turn?: number;
+  /**
+   * W514: true = the input was injected into the running turn (no new turn),
+   * false/absent = a new turn was started with `turn` as its id.
+   */
+  injected?: boolean;
+  /** W514: session the turn (or the injection) belongs to. */
+  session?: string;
   error?: string;
 }
 

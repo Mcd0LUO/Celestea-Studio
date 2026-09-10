@@ -53,6 +53,9 @@ export class Statusline {
   private hintEl: HTMLElement;
 
   // ---- 快速切换（W227） ----
+  /** W514: 当前聚焦会话 id（'' = 未解析/旧单会话）；轮询与快照按会话缓存。 */
+  private session = '';
+  private cache = new Map<string, StatusSnapshot>();
   private popup: HTMLElement | null = null;
   private popupKind: SwitchKind | null = null;
   /** 任务 3：弹层在全局层级栈中的句柄（Esc 只关栈顶一层）。 */
@@ -95,6 +98,25 @@ export class Statusline {
     this.timer = window.setInterval(() => this.poll(), POLL_MS);
   }
 
+  /**
+   * W514：切换聚焦会话（chat.ts 在容器激活时调用）。
+   * 立即显示该会话上次已知快照（缓存），并即时拉一次 /api/status?session=；
+   * 模型/思考档位是全局配置，跨会话保留显示——切换不会闪成空白。
+   */
+  setSession(id: string): void {
+    const next = id ?? '';
+    if (this.session === next) return;
+    this.session = next;
+    const cached = this.cache.get(next);
+    this.snapshot = {
+      model: this.snapshot.model,
+      reasoning_effort: this.snapshot.reasoning_effort,
+      ...(cached ?? {}),
+    };
+    this.render();
+    void this.poll();
+  }
+
   stop(): void {
     if (this.timer !== null) {
       window.clearInterval(this.timer);
@@ -112,6 +134,7 @@ export class Statusline {
     const flat = pickStatusFields({ ...(p.statusline ?? {}), ...p });
     if (Object.keys(flat).length > 0) {
       this.snapshot = { ...this.snapshot, ...flat };
+      this.cache.set(this.session, this.snapshot);
       this.render();
     }
   }
@@ -333,11 +356,14 @@ export class Statusline {
   }
 
   private async poll(): Promise<void> {
+    const asked = this.session;
     try {
-      const s = await api.status();
+      const s = await api.status(asked === '' ? undefined : asked);
+      if (asked !== this.session) return; // 竞态：期间已切换会话，丢弃本次结果
       this.staleMsg = '';
       this.el.classList.remove('sl-stale');
       this.snapshot = { ...this.snapshot, ...s };
+      this.cache.set(this.session, this.snapshot);
       this.render();
     } catch (err) {
       // /api/status 未上线或后端不可达：保持占位符，不打断聊天
@@ -381,6 +407,9 @@ export class Statusline {
 
     const steps = s.steps;
     this.stepsEl.textContent = typeof steps === 'number' && steps >= 1 ? 'step ' + steps : 'step —';
+
+    // W514：后端 busy 字段（多会话状态显示）——只切 class，不改布局
+    this.el.classList.toggle('sl-live', s.busy === true);
   }
 
   /**
@@ -418,7 +447,8 @@ function fixed1(v: number): string {
   return Number.isFinite(v) ? v.toFixed(1) : '—';
 }
 
-function pickStatusFields(p: StatusSnapshot): StatusSnapshot {
+/** W514：状态字段筛选（statusline 渲染 + chat.ts 的每会话快照共用）。 */
+export function pickStatusFields(p: StatusSnapshot): StatusSnapshot {
   const out: StatusSnapshot = {};
   if (p.model !== undefined) out.model = p.model;
   if (p.reasoning_effort !== undefined) out.reasoning_effort = p.reasoning_effort;
@@ -426,5 +456,12 @@ function pickStatusFields(p: StatusSnapshot): StatusSnapshot {
   if (p.tokens_per_sec !== undefined) out.tokens_per_sec = p.tokens_per_sec;
   if (p.context_usage !== undefined) out.context_usage = p.context_usage;
   if (p.usage !== undefined) out.usage = p.usage; // W263 缓存命中率
+  if (p.busy !== undefined) out.busy = p.busy; // W514 运行态
   return out;
 }
+
+/**
+ * W514：模块级单例——statusline 是「当前聚焦会话」的 chrome，chat.ts 需要在
+ * 会话切换时调用 setSession()，因此由模块持有唯一实例（main.ts 只负责 start）。
+ */
+export const statusline = new Statusline();
