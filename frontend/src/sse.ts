@@ -9,6 +9,7 @@ import type {
   ConnState,
   ContextPayload,
   DonePayload,
+  InboxPayload,
   SseEnvelope,
   SseEventName,
   StatusPayload,
@@ -27,6 +28,8 @@ export interface SseHandlerMap {
   done: (p: DonePayload) => void;
   context: (p: ContextPayload) => void;
   compact: (p: CompactPayload) => void;
+  /** W515：Agent Inbox / worker 回执（系统注入，与普通用户消息分类展示）。 */
+  inbox: (p: InboxPayload) => void;
 }
 
 export type SseHandler<K extends SseEventName> = SseHandlerMap[K];
@@ -64,6 +67,7 @@ const EVENT_NAMES: readonly SseEventName[] = [
   'done',
   'context',
   'compact',
+  'inbox',
 ];
 
 export class SseClient {

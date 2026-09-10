@@ -42,7 +42,9 @@ export type SseEventName =
   | 'tool_result'
   | 'done'
   | 'context'
-  | 'compact';
+  | 'compact'
+  /** W515：Agent Inbox / worker 回执等系统注入（kind='inbox' 的转录条目）。 */
+  | 'inbox';
 
 export type ConnState = 'connecting' | 'online' | 'down';
 
@@ -138,6 +140,23 @@ export interface ContextPayload extends SseMeta {
   cls?: string;
 }
 
+/**
+ * W515：inbox 事件（Agent Inbox / worker 回执 / 系统注入）。
+ * DSH 的 inbox 分两车道：next-step（steer，最近 step 边界插入）与
+ * next-turn（queue，下一回合独立投递）——前端只负责分类展示。
+ * 字段全部可选：后端未就绪时不发该事件（现状降级）。
+ */
+export interface InboxPayload extends SseMeta {
+  /** 展示文本（缺省时回落到 note/hint）。 */
+  text?: string;
+  /** 来源标记：worker id / 'system' 等。 */
+  source?: string;
+  /** 'next-step' | 'next-turn'（与 InboxTarget 对齐）。 */
+  target?: string;
+  note?: string;
+  hint?: string;
+}
+
 /** compact 类事件（W259：/compact 压缩完成；payload 带会话 id）。 */
 export interface CompactPayload {
   session?: string;
@@ -184,6 +203,13 @@ export interface SessionInfo {
   archived?: boolean;
   /** W237：是否为当前活跃会话 */
   active?: boolean;
+  /**
+   * W515：谱系父会话 id（对齐 DSH 的 parentSessionId）。
+   * 兼容三种写法：parent / parentSessionId / parent_session；缺失 → 现状平坦展示。
+   */
+  parent?: string | null;
+  parentSessionId?: string | null;
+  parent_session?: string | null;
 }
 
 export interface SessionsResp {
@@ -194,7 +220,7 @@ export interface SessionsResp {
 
 // ---- 会话历史（GET /api/sessions/{id}/messages，回放/恢复用） --------------------
 
-export type HistoryRole = 'user' | 'assistant' | 'tool' | 'thinking';
+export type HistoryRole = 'user' | 'assistant' | 'tool' | 'thinking' | 'inbox';
 
 /**
  * 消息契约（W252 结构化，无兼容层）：
@@ -206,8 +232,14 @@ export interface HistoryMsg {
   role: HistoryRole;
   /** 普通消息文本（tool 消息无此字段）。 */
   content?: string;
-  /** tool 消息类型：调用 / 结果 */
-  kind?: 'call' | 'result';
+  /**
+   * tool 消息：'call' | 'result'；
+   * user 消息（W515）：'steering'（插话）/ 'queued'（排队）；
+   * 'inbox'（worker 回执 / 系统注入）。
+   */
+  kind?: 'call' | 'result' | 'steering' | 'queued' | 'inbox';
+  /** W515：inbox 条目的来源标记（worker id 等）。 */
+  source?: string;
   tool_call_id?: string;
   tool_name?: string;
   tool_args?: unknown;
@@ -383,6 +415,10 @@ export interface TurnResp {
    * false/absent = a new turn was started with `turn` as its id.
    */
   injected?: boolean;
+  /** W515: true = 已按「排队（下一回合投递）」接收（mode='queue'）。 */
+  queued?: boolean;
+  /** W515: 后端回声的投递车道（'next-step' | 'next-turn'）。 */
+  inbox_target?: string;
   /** W514: session the turn (or the injection) belongs to. */
   session?: string;
   error?: string;

@@ -103,7 +103,7 @@
   border: 1px dashed var(--c-border-strong);
   background: var(--c-surface);
 }
-.msg.user.interject .who::after { content: ' · 运行中注入'; color: var(--c-text-3); font-weight: 400; }
+/* 注：`.interject` 是 W514 的旧别名（steering 沿用），样式见文件末尾 W515 分区 */
 .interject-note {
   align-self: flex-start;
   margin: -10px 0 0;
@@ -145,3 +145,79 @@
 }
 .ws-worker-state { flex: 0 0 auto; font-family: var(--mono); font-size: 10px; color: var(--c-text-3); }
 .ws-worker-state.busy { color: var(--c-text-1); }
+
+/* ============================================================================
+   W515 增量：转录三类消息（user / steering / queued / inbox）+ 谱系缩进 +
+   提交两态切换。全部只做样式与 class，切换不重建 DOM。
+   ========================================================================== */
+
+/* ---- 转录条目分类：普通用户消息保持原样，插话/排队/回执各有可辨识形态 ---- */
+.msg.user.steering .bubble,
+.msg.user.interject:not(.queued) .bubble {
+  border: 1px dashed var(--c-border-strong);
+  background: var(--c-surface);
+  box-shadow: inset 3px 0 0 var(--c-accent-ring);
+}
+.msg.user.steering .who::after { content: ' · 下一步送达'; color: var(--c-text-3); font-weight: 400; }
+
+.msg.user.queued .bubble {
+  border: 1px dotted var(--c-border-strong);
+  background: var(--c-bg);
+  box-shadow: inset 3px 0 0 var(--c-border-strong);
+}
+.msg.user.queued .who::after { content: ' · 下一回合送达'; color: var(--c-text-3); font-weight: 400; }
+
+/* inbox 条目（worker 回执 / 系统注入）：与用户消息、系统 info 块都不同——
+   顶部双线 + 等宽小字 + 左侧粗标记，明确「不是用户说的话」。 */
+.msg.inbox .bubble.inbox-bubble {
+  border: 1px solid var(--c-border-strong);
+  border-top-width: 3px;
+  background: var(--c-surface);
+  border-radius: 8px;
+}
+.msg.inbox .who {
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .6px;
+  color: var(--c-text-2);
+}
+.msg.inbox .inbox-lane {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .8px;
+  border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 4px;
+  color: var(--c-text-3);
+}
+.msg.inbox .inbox-content {
+  font-family: var(--mono); font-size: 12px; color: var(--c-text-2);
+  white-space: pre-wrap;
+}
+
+/* ---- 提交两态切换（#btnMode：插话 / 排队） ---- */
+#btnMode.queue {
+  background: var(--c-bg);
+  border-style: dotted;
+}
+#inputbar.interject #btnMode { display: inline-flex; align-items: center; }
+
+/* ---- W515 谱系缩进（父会话 → worker 子行） ---- */
+.ws-worker-parent {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px 2px;
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: .4px;
+  color: var(--c-text-2); cursor: pointer;
+}
+.ws-worker-parent:hover { color: var(--c-text-1); }
+.ws-lineage-mark { color: var(--c-text-3); }
+.ws-worker-parent-name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-worker-row.child {
+  margin-left: 14px;
+  border-left: 1px solid var(--c-border-subtle);
+  border-radius: 0 7px 7px 0;
+}
+.ws-worker-row.child:hover { border-left-color: var(--c-border-strong); }
+.sess-worker-count {
+  flex: 0 0 auto;
+  font-family: var(--mono); font-size: 9.5px;
+  border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 4px;
+  color: var(--c-text-3);
+}

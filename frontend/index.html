@@ -100,6 +100,8 @@
         <div id="inputbar">
           <textarea id="input" rows="2" placeholder="输入消息，Enter 发送，Shift+Enter 换行" spellcheck="false"></textarea>
           <div class="input-side">
+            <!-- W515：提交两态切换（运行中显示）：插话（下一步送达）/ 排队（本轮结束后送达） -->
+            <button id="btnMode" class="btn btn-soft btn-mini hidden" type="button" title="提交车道：插话 / 排队">插话</button>
             <button id="btnCancel" class="btn btn-soft hidden">取消</button>
             <button id="btnSend" class="btn btn-accent">发送</button>
           </div>

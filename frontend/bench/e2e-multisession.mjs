@@ -90,6 +90,18 @@ async function runV2(browser) {
   });
   check('T1 Worker 组可展开（details）', !!wDetails && wDetails.tag === 'DETAILS', JSON.stringify(wDetails));
 
+  // ---- T1b W515 谱系缩进：父会话 → worker 子行（无 parent → 未关联） ----
+  const lin = await page.evaluate(() => ({
+    parents: Array.from(document.querySelectorAll('.ws-worker-parent .ws-worker-parent-name')).map((n) => n.textContent),
+    childRows: document.querySelectorAll('.ws-worker-row.child').length,
+    childOfA: !!document.querySelector('.ws-worker-row.child[data-id="server-center/W514·前端多会话"]'),
+    badge: document.querySelector('.sess-leaf[data-id="CelesteaTeamAPI/sess-A"] .sess-worker-count')?.textContent ?? '',
+    flatRows: document.querySelectorAll('.ws-worker-row:not(.child)').length,
+  }));
+  check('T1b Worker 组按父会话分组（谱系缩进）', lin.parents.includes('A · 会话一') && lin.childOfA && lin.childRows >= 1, JSON.stringify(lin));
+  check('T1b 无 parent 的 worker 归入「未关联」', lin.parents.includes('未关联父会话') && lin.childRows >= 2, JSON.stringify(lin.parents));
+  check('T1b 父会话行显示 worker 子会话数徽标', lin.badge === 'W1', 'badge=' + lin.badge);
+
   // ---- T2 任意点击即切换（不等待网络 / 不受其它会话影响）+ 草稿独立 ----
   await page.fill('#input', 'DRAFT-A');
   await page.click('.sess-leaf[data-id="' + ID_B + '"]');
@@ -139,18 +151,65 @@ async function runV2(browser) {
 
   await page.fill('#input', 'B 插话内容');
   await page.keyboard.press('Enter');
-  await page.waitForSelector('.sess-pane[data-session="' + ID_B + '"] .msg.user.interject', { timeout: 3000 });
+  await page.waitForSelector('.sess-pane[data-session="' + ID_B + '"] .msg.user.steering', { timeout: 3000 });
   await page.waitForFunction(
-    () => (document.querySelector('.interject-note')?.textContent ?? '').includes('将在下一步送达'),
-    null,
+    (sid) => {
+      const el = document.querySelector('.sess-pane[data-session="' + sid + '"]');
+      const notes = el ? el.querySelectorAll('.interject-note') : [];
+      return Array.from(notes).some((n) => (n.textContent ?? '').includes('将在下一步送达'));
+    },
+    ID_B,
     { timeout: 5000 },
   );
-  const interjectNote = await page.textContent('.interject-note');
+  const interjectNote = await page.evaluate((sid) => {
+    const el = document.querySelector('.sess-pane[data-session="' + sid + '"]');
+    return Array.from(el.querySelectorAll('.interject-note'))
+      .map((n) => n.textContent)
+      .join(' | ');
+  }, ID_B);
   check('T3 插话渲染 + 轻提示「将在下一步送达」', (interjectNote ?? '').includes('将在下一步送达'), interjectNote ?? '');
   const st = await api(V2, '/control/state');
   const inj = st.turnReqs.find((r) => r.input === 'B 插话内容');
   check('T3 插话走 POST /api/turn 且带聚焦 session', !!inj && inj.sessionField === ID_B, JSON.stringify(inj));
   check('T3 插话不新开轮（mock 记为 injected）', st.notes.some((n) => n.kind === 'interject' && n.text === 'B 插话内容'));
+
+  // ---- T3b W515 提交两态：Ctrl/Cmd+Enter = 排队（下一回合送达） ----
+  const modeChip = await page.evaluate(() => {
+    const b = document.querySelector('#btnMode');
+    return { hidden: b.classList.contains('hidden'), text: b.textContent };
+  });
+  check('T3b 运行中显示提交车道切换（插话/排队）', modeChip.hidden === false && modeChip.text === '插话', JSON.stringify(modeChip));
+  await page.fill('#input', 'B 排队内容');
+  await page.keyboard.press('Control+Enter');
+  await page.waitForSelector('.sess-pane[data-session="' + ID_B + '"] .msg.user.queued', { timeout: 3000 });
+  await page.waitForFunction(
+    (sid) => {
+      const el = document.querySelector('.sess-pane[data-session="' + sid + '"]');
+      const notes = el ? el.querySelectorAll('.interject-note.ok') : [];
+      const last = notes[notes.length - 1];
+      return !!last && (last.textContent ?? '').includes('本轮结束后送达');
+    },
+    ID_B,
+    { timeout: 5000 },
+  );
+  const qNote = await page.evaluate((sid) => {
+    const el = document.querySelector('.sess-pane[data-session="' + sid + '"]');
+    const notes = el.querySelectorAll('.interject-note.ok');
+    return notes[notes.length - 1]?.textContent ?? '';
+  }, ID_B);
+  check('T3b 排队提示「本轮结束后送达」', (qNote ?? '').includes('本轮结束后送达'), qNote ?? '');
+  const stQ = await api(V2, '/control/state');
+  const qReq = stQ.turnReqs.find((r) => r.input === 'B 排队内容');
+  const sReq = stQ.turnReqs.find((r) => r.input === 'B 插话内容');
+  check('T3b 排队走 mode=queue 且带 session', !!qReq && qReq.mode === 'queue' && qReq.sessionField === ID_B, JSON.stringify(qReq));
+  check('T3b 插话走 mode=steer', !!sReq && sReq.mode === 'steer', JSON.stringify(sReq));
+  check('T3b 排队与插话是不同车道（mock 分别记账）', stQ.notes.some((n) => n.kind === 'queued') && stQ.notes.some((n) => n.kind === 'interject'));
+  const qChip = await page.evaluate(() => {
+    document.querySelector('#btnMode').click();
+    return { text: document.querySelector('#btnMode').textContent, send: document.querySelector('#btnSend').textContent };
+  });
+  check('T3b 车道切换按钮可切换（排队态按钮文案同步）', qChip.text === '排队' && qChip.send === '排队', JSON.stringify(qChip));
+  await page.evaluate(() => document.querySelector('#btnMode').click()); // 切回插话
 
   // ---- T4 后台会话继续接收增量 + 当前视图零重渲染 + 滚动位/草稿保留 ----
   await page.click('.sess-leaf[data-id="' + ID_A + '"]');
@@ -182,7 +241,7 @@ async function runV2(browser) {
   check('T4 切回 B：仍在跟随最新（流未中断）', !!bBack && bBack.marked === true);
   const draftB2 = await page.inputValue('#input');
   check('T4 切回 B：B 的草稿（空）而非 A 的草稿', draftB2 === '', JSON.stringify(draftB2));
-  const interjectStill = await page.locator('.sess-pane[data-session="' + ID_B + '"] .msg.user.interject').count();
+  const interjectStill = await page.locator('.sess-pane[data-session="' + ID_B + '"] .msg.user.steering').count();
   check('T4 切回 B：插话气泡仍在', interjectStill === 1, 'count=' + interjectStill);
   await page.click('.sess-leaf[data-id="' + ID_A + '"]');
   await page.waitForFunction((sid) => document.querySelector('.sess-pane:not([hidden])')?.dataset.session === sid, ID_A, { timeout: 2000 });
@@ -208,6 +267,34 @@ async function runV2(browser) {
     { timeout: 15000 },
   );
   check('T5 轮次结束后运行态点熄灭', true);
+
+  // ---- T5b W515 转录分类：user / steering / queued / inbox 可区分 ----
+  const kinds = await page.evaluate((sid) => {
+    const el = document.querySelector('.sess-pane[data-session="' + sid + '"]');
+    const cap = (sel) => (el.querySelector(sel + ' .who')?.textContent ?? '');
+    return {
+      plain: el.querySelectorAll('.msg.user:not(.steering):not(.queued)').length,
+      steering: el.querySelectorAll('.msg.user.steering').length,
+      queued: el.querySelectorAll('.msg.user.queued').length,
+      inbox: el.querySelectorAll('.msg.inbox').length,
+      inboxWho: cap('.msg.inbox'),
+      inboxLane: el.querySelector('.msg.inbox .inbox-lane')?.textContent ?? '',
+      inboxText: el.querySelector('.msg.inbox .inbox-content')?.textContent ?? '',
+      steeringWho: cap('.msg.user.steering'),
+      queuedWho: cap('.msg.user.queued'),
+    };
+  }, ID_B);
+  check('T5b 三类用户侧消息可区分（普通/插话/排队）', kinds.plain >= 1 && kinds.steering === 1 && kinds.queued === 1, JSON.stringify(kinds));
+  check('T5b 标题前缀区分插话/排队', kinds.steeringWho.includes('插话') && kinds.queuedWho.includes('排队'), JSON.stringify([kinds.steeringWho, kinds.queuedWho]));
+  check('T5b inbox 事件渲染为回执条目（带来源与车道）', kinds.inbox === 1 && kinds.inboxWho.includes('回执') && kinds.inboxLane.includes('下一回合') && kinds.inboxText.includes('Worker 回执'), JSON.stringify(kinds));
+  const histKinds = await page.evaluate((sid) => {
+    const el = document.querySelector('.sess-pane[data-session="' + sid + '"]');
+    return {
+      steering: el.querySelectorAll('.msg.user.steering').length,
+      inbox: el.querySelectorAll('.msg.inbox').length,
+    };
+  }, ID_A);
+  check('T5b 历史恢复同样区分 steering / inbox', histKinds.steering >= 1 && histKinds.inbox >= 1, JSON.stringify(histKinds));
 
   // ---- T4b 静止会话：切走再切回，滚动位原样保留（非贴底不吸附） ----
   await page.click('.sess-leaf[data-id="' + ID_B + '"]');
@@ -277,6 +364,8 @@ async function runLegacy(browser) {
   check('L1 降级：启动仍聚焦活跃会话且不空白', !!v && v.mcols > 0, JSON.stringify(v && { id: v.id, mcols: v.mcols }));
   const workerRows = await page.locator('.ws-worker-row').count();
   check('L1 降级：kind 缺失 → 不显示 Worker 组（与现状一致）', workerRows === 0, 'rows=' + workerRows);
+  const linLegacy = await page.locator('.ws-worker-parent').count();
+  check('L1 降级：parent 缺失 → 无谱系缩进（平坦）', linLegacy === 0, 'parents=' + linLegacy);
   const bar = await page.textContent('#sessionBar');
   check('L1 降级：会话条可用', (bar ?? '').trim().length > 0, bar ?? '');
 
@@ -293,15 +382,34 @@ async function runLegacy(browser) {
     null,
     { timeout: 5000 },
   );
+  // 注：历史里本身就有 steering/inbox 存量条目，故「撤销乐观渲染」断言按**文本**判断
   const after = await page.evaluate(() => ({
     draft: document.querySelector('#input').value,
-    optimistic: document.querySelectorAll('.msg.user.interject').length,
+    optimistic: Array.from(document.querySelectorAll('.msg.user.steering .content, .msg.user.queued .content')).filter(
+      (c) => (c.textContent ?? '').includes('旧后端插话'),
+    ).length,
     note: Array.from(document.querySelectorAll('.sess-pane .msg.info')).map((n) => n.textContent).join(' || '),
     status: document.querySelector('#statusText').textContent,
   }));
   check('L2 降级：插话失败 → 文本还原回输入框（不丢字）', after.draft === '旧后端插话', JSON.stringify(after.draft));
   check('L2 降级：撤销乐观渲染的插话气泡', after.optimistic === 0, 'count=' + after.optimistic);
   check('L2 降级：给出可见提示（信息块/状态栏）', after.note.includes('插话未送达') || after.status.includes('插话未送达'), after.status);
+
+  // W515：排队车道在旧后端同样不可用 → 回退插话也失败 → 还原输入 + 排队条目撤销
+  await page.fill('#input', '旧后端排队');
+  await page.keyboard.press('Control+Enter');
+  await page.waitForFunction(() => (document.body.textContent ?? '').includes('排队未送达'), null, { timeout: 6000 });
+  const qAfter = await page.evaluate(() => {
+    const txt = (sel) =>
+      Array.from(document.querySelectorAll(sel)).filter((c) => (c.textContent ?? '').includes('旧后端排队')).length;
+    return {
+      draft: document.querySelector('#input').value,
+      queued: txt('.msg.user.queued .content'),
+      steering: txt('.msg.user.steering .content'),
+    };
+  });
+  check('L2b 降级：排队失败 → 还原输入框且撤销排队条目', qAfter.draft === '旧后端排队' && qAfter.queued === 0 && qAfter.steering === 0, JSON.stringify(qAfter));
+  await page.fill('#input', '');
 
   // 别的会话在跑 → 点击依然立即切换
   await page.click('.sess-leaf[data-id="' + ID_B + '"]');

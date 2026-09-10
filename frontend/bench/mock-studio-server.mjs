@@ -28,21 +28,29 @@ const ID_A = 'CelesteaTeamAPI/sess-A';
 const ID_B = 'CelesteaTeamAPI/sess-B';
 const ID_W = 'server-center/W514·前端多会话';
 
+const ID_W2 = 'server-center/W520·无父worker';
+
 const sessions = [
   { id: ID_A, title: 'A · 会话一', kind: 'session', workspace: 'CelesteaTeamAPI', model: 'deepseek-flash', events: 12, active: true },
   { id: ID_B, title: 'B · 会话二', kind: 'session', workspace: 'CelesteaTeamAPI', model: 'deepseek-flash', events: 5 },
-  { id: ID_W, title: 'W514·前端多会话', kind: 'worker', workspace: 'server-center', model: 'deepseek-v4-flash', events: 7 },
+  // W515 谱系：parentSessionId（DSH 语义）→ 父会话 A 的子 worker
+  { id: ID_W, title: 'W514·前端多会话', kind: 'worker', workspace: 'server-center', model: 'deepseek-v4-flash', events: 7, parentSessionId: ID_A },
+  // 无 parent 字段 → 归入「未关联父会话」（降级/对照）
+  { id: ID_W2, title: 'W520·无父worker', kind: 'worker', workspace: 'server-center', model: 'deepseek-v4-flash', events: 2 },
 ];
 
 const history = {
   [ID_A]: [
     { role: 'user', content: 'A 的历史提问' },
     { role: 'assistant', content: 'A 的历史回复（存量消息 · 用于验证切回后仍在）' },
+    { role: 'user', kind: 'steering', content: '（历史）插话：补充一个约束' },
+    { role: 'inbox', kind: 'inbox', source: 'W513', content: '（历史）runtime 回执：W513 已提交' },
     { role: 'user', content: 'A 的第二问' },
     { role: 'assistant', content: 'A 的第二答' },
   ],
   [ID_B]: [{ role: 'user', content: 'B 的历史提问' }, { role: 'assistant', content: 'B 的历史回复' }],
   [ID_W]: [{ role: 'user', content: 'worker 简报' }, { role: 'assistant', content: 'worker 已完成 X' }],
+  [ID_W2]: [{ role: 'user', content: 'worker2 简报' }, { role: 'assistant', content: 'worker2 已完成 Y' }],
 };
 
 const state = {
@@ -115,6 +123,8 @@ async function runTurn(session, text) {
   emit('tool_result', { id: 'tool-' + turn, ok: true, value: '文件读取成功' }, session, turn);
   await sleep(step);
   if (!alive()) return;
+  // W515：worker 回执 / 系统注入（inbox 车道 next-turn）
+  emit('inbox', { text: 'Worker 回执：子任务已完成（W515 演示）', source: 'W520', target: 'next-turn' }, session, turn);
   emit('done', { text: full }, session, turn);
   await sleep(step);
   if (!alive()) return;
@@ -195,7 +205,10 @@ const server = http.createServer(async (req, res) => {
     const list = sessions.map((s) => {
       const out = { ...s, active: s.id === state.active };
       if (!LEGACY) out.busy = state.busy.has(s.id);
-      else delete out.kind;
+      else {
+        delete out.kind;
+        delete out.parentSessionId; // 旧后端无谱系字段 → 前端平坦降级
+      }
       return out;
     });
     return json(res, 200, { sessions: list, active_session: state.active });
@@ -208,16 +221,39 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     const target = typeof body.session === 'string' && body.session ? body.session : state.active;
     const input = String(body.input ?? '');
-    state.turnReqs.push({ target, input, sessionField: body.session ?? null, at: Date.now() });
+    state.turnReqs.push({
+      target,
+      input,
+      sessionField: body.session ?? null,
+      mode: body.mode ?? null,
+      at: Date.now(),
+    });
     if (LEGACY) {
       if (state.busy.size > 0) return json(res, 409, { ok: false, error: 'a turn is already running' });
       void runTurn(target, input);
       return json(res, 202, { turn: state.turn + 1, status: 'started' });
     }
     if (state.busy.has(target)) {
+      // W515：mode='queue' = 下一回合投递（DSH inbox next-turn）；默认 steer = 下一步注入
+      if (body.mode === 'queue') {
+        note('queued', target, input);
+        return json(res, 202, {
+          ok: true,
+          queued: true,
+          session: target,
+          inbox_target: 'next-turn',
+          turn: state.turn,
+        });
+      }
       note('interject', target, input);
       emit('context', { text: '已插话：' + input, cls: 'info' }, target, state.turn);
-      return json(res, 202, { ok: true, injected: true, session: target, turn: state.turn });
+      return json(res, 202, {
+        ok: true,
+        injected: true,
+        session: target,
+        inbox_target: 'next-step',
+        turn: state.turn,
+      });
     }
     void runTurn(target, input);
     return json(res, 202, { ok: true, injected: false, session: target, turn: state.turn + 1 });

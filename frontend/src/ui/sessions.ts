@@ -38,9 +38,21 @@ let searchTimer: number | null = null;
 
 const WORKER_POLL_MS = 5000;
 
+/** W515：父会话 id → worker 子会话数（用于父会话行的「W n」徽标）。 */
+let workersByParent = new Map<string, number>();
+
 function note(text: string): void {
   const foot = document.getElementById('sideFoot');
   if (foot) foot.textContent = text;
+}
+
+/**
+ * W515：谱系父会话 id（对齐 DSH 的 parentSessionId）。
+ * 兼容 parent / parentSessionId / parent_session 三种写法；缺失 → null（平坦展示）。
+ */
+function parentOf(s: SessionInfo): string | null {
+  const v = s.parentSessionId ?? s.parent_session ?? s.parent;
+  return typeof v === 'string' && v.trim() !== '' ? v.trim() : null;
 }
 
 /** W514：worker 会话只出现在 Worker 组，不再重复列进工作区树。 */
@@ -418,6 +430,12 @@ function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
   leaf.appendChild(svgIcon('file'));
   const name = el('span', 'sess-leaf-name', s.title || truncateName(id) || '(未命名)');
   leaf.appendChild(name);
+  const kidCount = workersByParent.get(id) ?? 0;
+  if (kidCount > 0) {
+    const badge = el('span', 'sess-worker-count', 'W' + kidCount);
+    badge.title = '该会话下有 ' + kidCount + ' 个 worker 子会话';
+    leaf.appendChild(badge);
+  }
   const bits: string[] = [];
   if (s.events !== undefined) bits.push('ev:' + s.events);
   bits.push(truncateName(id));
@@ -531,12 +549,47 @@ function workerTitleOf(w: SessionInfo): string {
 function workerSigOf(workers: SessionInfo[]): string {
   return workers
     .map((w) =>
-      [w.id ?? '', w.title ?? '', w.model ?? '', paneBusy(w.id ?? '') ? '1' : '0', String(w.events ?? '')].join('\u0001'),
+      [
+        w.id ?? '',
+        w.title ?? '',
+        w.model ?? '',
+        paneBusy(w.id ?? '') ? '1' : '0',
+        String(w.events ?? ''),
+        parentOf(w) ?? '',
+      ].join('\u0001'),
     )
     .join('\u0002');
 }
 
-/** 渲染 Worker 组（可展开 details；每行：运行态点 · wid · 标题 · 状态 · 模型）。 */
+/** 渲染一条 Worker 行（child=true 时缩进到父会话之下）。每行：运行态点 · wid · 标题 · 状态 · 模型。 */
+function renderWorkerRow(host: HTMLElement, w: SessionInfo, child: boolean): HTMLElement {
+  const id = w.id ?? '';
+  const busy = paneBusy(id);
+  const row = el('div', 'ws-worker-row' + (child ? ' child' : '') + (activeSessionId() === id ? ' active' : ''));
+  row.dataset.id = id;
+  row.appendChild(el('span', 'sess-dot' + (busy ? ' busy' : '')));
+  row.appendChild(el('span', 'ws-worker-wid', widOf(w)));
+  row.appendChild(el('span', 'ws-worker-title', workerTitleOf(w)));
+  const st = el('span', 'ws-worker-state' + (busy ? ' busy' : ''), busy ? '运行中' : '空闲');
+  row.appendChild(st);
+  const bits: string[] = [];
+  if (w.model) bits.push(String(w.model));
+  if (w.events !== undefined) bits.push('ev:' + w.events);
+  row.appendChild(el('span', 'ws-worker-meta', bits.join(' · ')));
+  row.title = id + (w.model ? ' · ' + w.model : '') + '（点击打开该 worker 会话视图：只读）';
+  row.addEventListener('click', () => {
+    const hostEl = document.getElementById('sessionTree') ?? host;
+    openSessionRow(hostEl, id, { kind: 'worker', title: w.title || id });
+  });
+  return row;
+}
+
+/**
+ * 渲染 Worker 组（可展开 details）。
+ * W515 谱系：后端给出 parentSessionId（含 parent/parent_session 兼容）时，
+ * 按「父会话 → 其 worker 子行（缩进）」展示；父会话行可点击打开该父会话视图。
+ * 无任何 parent 字段（旧后端）→ 与现状一致的平坦列表（降级）。
+ */
 function renderWorkerGroup(host: HTMLElement, workers: SessionInfo[], open: boolean): void {
   const det = document.createElement('details');
   det.className = 'ws-worker-details';
@@ -546,26 +599,53 @@ function renderWorkerGroup(host: HTMLElement, workers: SessionInfo[], open: bool
   sum.appendChild(el('span', null, '引擎 Worker'));
   sum.appendChild(el('span', 'ws-worker-count', String(workers.length)));
   det.appendChild(sum);
+
+  const byParent = new Map<string, SessionInfo[]>();
+  const orphans: SessionInfo[] = [];
   for (const w of workers) {
-    const id = w.id ?? '';
-    const busy = paneBusy(id);
-    const row = el('div', 'ws-worker-row' + (activeSessionId() === id ? ' active' : ''));
-    row.dataset.id = id;
-    row.appendChild(el('span', 'sess-dot' + (busy ? ' busy' : '')));
-    row.appendChild(el('span', 'ws-worker-wid', widOf(w)));
-    row.appendChild(el('span', 'ws-worker-title', workerTitleOf(w)));
-    const st = el('span', 'ws-worker-state' + (busy ? ' busy' : ''), busy ? '运行中' : '空闲');
-    row.appendChild(st);
-    const bits: string[] = [];
-    if (w.model) bits.push(String(w.model));
-    if (w.events !== undefined) bits.push('ev:' + w.events);
-    row.appendChild(el('span', 'ws-worker-meta', bits.join(' · ')));
-    row.title = id + (w.model ? ' · ' + w.model : '') + '（点击打开该 worker 会话视图：只读）';
-    row.addEventListener('click', () => {
-      const hostEl = document.getElementById('sessionTree') ?? host;
-      openSessionRow(hostEl, id, { kind: 'worker', title: w.title || id });
-    });
-    det.appendChild(row);
+    const p = parentOf(w);
+    if (!p) {
+      orphans.push(w);
+      continue;
+    }
+    const list = byParent.get(p);
+    if (list) list.push(w);
+    else byParent.set(p, [w]);
+  }
+  // 父会话顺序 = 会话列表顺序（稳定）；未关联的 worker 排在最后
+  const ordered = new Set<string>();
+  for (const s of sessions) {
+    const id = s.id ?? '';
+    if (id && byParent.has(id)) ordered.add(id);
+  }
+  for (const p of byParent.keys()) ordered.add(p);
+
+  if (ordered.size === 0) {
+    for (const w of orphans) det.appendChild(renderWorkerRow(host, w, false));
+  } else {
+    for (const parentId of ordered) {
+      const kids = byParent.get(parentId) ?? [];
+      const parentSession = sessions.find((s) => s.id === parentId);
+      const head = el('div', 'ws-worker-parent');
+      head.appendChild(el('span', 'ws-lineage-mark', '└'));
+      const pname = el('span', 'ws-worker-parent-name', parentSession?.title || truncateName(parentId));
+      head.appendChild(pname);
+      head.appendChild(el('span', 'ws-worker-count', String(kids.length)));
+      head.title = '父会话：' + parentId + '（点击打开父会话视图）';
+      head.addEventListener('click', () => {
+        const hostEl = document.getElementById('sessionTree') ?? host;
+        openSessionRow(hostEl, parentId, { kind: 'session', title: parentSession?.title });
+      });
+      det.appendChild(head);
+      for (const w of kids) det.appendChild(renderWorkerRow(host, w, true));
+    }
+    if (orphans.length) {
+      const head = el('div', 'ws-worker-parent');
+      head.appendChild(el('span', 'ws-lineage-mark', '·'));
+      head.appendChild(el('span', 'ws-worker-parent-name', '未关联父会话'));
+      det.appendChild(head);
+      for (const w of orphans) det.appendChild(renderWorkerRow(host, w, true));
+    }
   }
   host.replaceChildren(det);
 }
@@ -1029,6 +1109,15 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
 
   if (countEl) countEl.textContent = String(treeSessions.filter((s) => s.archived !== true).length);
 
+  // W515：父会话 → worker 子会话数（建树前算好，供父会话行徽标使用）
+  const workers = workerSessions(sessions);
+  workersByParent = new Map();
+  for (const w of workers) {
+    const p = parentOf(w);
+    if (!p) continue;
+    workersByParent.set(p, (workersByParent.get(p) ?? 0) + 1);
+  }
+
   renderToolbar(off);
 
   // 树：按工作区收束（可折叠）
@@ -1056,7 +1145,6 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
   if (batchMode) renderBatchBar(off);
 
   // 引擎 Worker 组（W514：常驻 host —— 轮询只替换 host 内容，不重建整棵树）
-  const workers = workerSessions(sessions);
   const wHost = el('div', 'ws-worker-host');
   off.appendChild(wHost);
   workerSig = workerSigOf(workers);

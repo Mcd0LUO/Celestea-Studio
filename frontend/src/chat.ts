@@ -12,6 +12,7 @@ import { pickStatusFields, statusline } from './statusline';
 import type {
   CompactPayload,
   DonePayload,
+  InboxPayload,
   StatusPayload,
   TextPayload,
   ThinkingPayload,
@@ -31,11 +32,20 @@ import {
   finalizeAssistant,
   flushTextSegment,
   removeAssistant,
+  renderInboxMessage,
   renderInfoBlock,
   renderInterjectNote,
+  laneLabel,
 } from './ui/messages';
 import { applyToolResult, getToolStep, pushToolCard, resetTurnStep } from './ui/toolcards';
-import { clearInput, initInputBar, setBusy, setInputMode, setInputValue } from './ui/inputbar';
+import {
+  clearInput,
+  initInputBar,
+  setBusy,
+  setInputMode,
+  setInputValue,
+  type SubmitMode,
+} from './ui/inputbar';
 import {
   feedAssistantDelta,
   finalAssistantDedup,
@@ -341,6 +351,13 @@ export function connectSse(): SseClient {
       console.warn('SSE compact', err);
     }
   });
+  sse.on('inbox', (p) => {
+    try {
+      onInbox(ctxFor(p), p);
+    } catch (err) {
+      console.warn('SSE inbox', err);
+    }
+  });
   sse.connect();
   return sse;
 }
@@ -415,8 +432,18 @@ export function requestCancel(): void {
   });
 }
 
-/** 发送入口：命令 → 只读拦截 → 运行中插话 → 空闲开新轮。 */
-function dispatchSend(text: string): void {
+/**
+ * W515：inbox 事件（Agent Inbox / worker 回执 / 系统注入）→ 转录里的独立条目。
+ * 只读展示，不与用户消息混同；字段缺失（无 text）→ 不发任何事件，保持现状。
+ */
+function onInbox(ctx: SessionPane, p: InboxPayload): void {
+  const text = (p.text ?? p.note ?? p.hint ?? '').trim();
+  if (text === '') return;
+  renderInboxMessage(ctx, text, { source: p.source, target: p.target });
+}
+
+/** 发送入口：命令 → 只读拦截 → 运行中插话/排队 → 空闲开新轮。 */
+function dispatchSend(text: string, mode: SubmitMode = 'steer'): void {
   const t = text.trim();
   const ctx = activePane();
   if (!ctx || t === '') return;
@@ -431,7 +458,7 @@ function dispatchSend(text: string): void {
   }
   ctx.draft = '';
   if (ctx.streaming) {
-    void interject(ctx, t);
+    void injectInput(ctx, t, mode);
     return;
   }
   startTurn(ctx, t);
@@ -482,42 +509,70 @@ function startTurn(ctx: SessionPane, t: string): void {
 }
 
 /**
- * 运行中插话（W514 契约 4）：POST /api/turn {input, session} 在目标会话运行中
- * = 注入该轮（不新开轮）。
- *   1) 先按「插话」样式渲染该条输入 + 轻提示「已插话 · 等待送达…」；
- *   2) 成功（injected=true）→ 提示改「已插话 · 将在下一步送达」；
- *   3) 后端把它当成新轮（injected=false，旧后端在本地 streaming 过期时）→ 按新一轮记账；
- *   4) 失败（409/404/405：契约未就绪的旧后端 / 目标会话已结束）→ 撤销乐观渲染、
- *      把文本还原回输入框（不丢字），只在状态栏给出错误 —— 与现状行为一致。
+ * 运行中提交（W514 插话 + W515 两车道）：
+ *   mode='steer'（默认）—— POST /api/turn {input, session, mode:'steer'}
+ *     = 插话：注入该轮最近 step 边界（DSH inbox next-step），不新开轮；
+ *   mode='queue' —— {mode:'queue'} = 排队：本轮结束后作为下一回合独立投递
+ *     （DSH inbox next-turn）。
+ *   1) 先按对应样式渲染（插话 / 排队），并给轻提示「等待送达…」；
+ *   2) 成功后改写为「将在下一步送达」/「本轮结束后送达」；
+ *   3) 后端把它当成新轮（injected=false，本地运行态过期）→ 按新轮记账；
+ *   4) 失败（409/404/405：契约未就绪的旧后端 / 目标会话已结束）：
+ *      queue 先回退为 steer 再试一次（旧后端同样 409 时一并失败），
+ *      最终撤销乐观渲染、文本还原输入框，只在状态栏/信息块给出错误 —— 不丢字。
  */
-async function interject(ctx: SessionPane, t: string): Promise<void> {
-  const col = addUserMessage(ctx, t, { interject: true });
+async function injectInput(ctx: SessionPane, t: string, mode: SubmitMode): Promise<void> {
+  const col = addUserMessage(ctx, t, { kind: mode === 'queue' ? 'queued' : 'steering' });
   clearInput();
   ctx.draft = '';
-  const note = renderInterjectNote(ctx, '已插话 · 等待送达…', undefined, col);
+  const waitText = mode === 'queue' ? '已排队 · 等待本轮结束…' : '已插话 · 等待送达…';
+  const doneText =
+    mode === 'queue' ? '已排队 · 本轮结束后送达' : '已插话 · 将在下一步送达';
+  const note = renderInterjectNote(ctx, waitText, undefined, col);
   legacyOwner = ctx;
-  if (isActivePane(ctx)) flashStatus('已插话，将在下一步送达', 'busy', 4_000);
+  if (isActivePane(ctx)) {
+    flashStatus(mode === 'queue' ? '已排队，将在本轮结束后送达' : '已插话，将在下一步送达', 'busy', 4_000);
+  }
+  const ok = (text: string): void => {
+    note.textContent = text;
+    note.className = 'interject-note ok';
+  };
   try {
-    const r = await api.turn(t, sid(ctx));
-    if (r.injected === false) {
-      // 后端按新一轮接收（本地运行态已过期）：按开新轮记账
-      ctx.turn = r.turn ?? ctx.turn;
-      setPaneStreaming(ctx, true);
-      ctx.phase = '运行中…';
-      note.textContent = '已作为新一轮发送';
-      note.className = 'interject-note ok';
-      updateSessionBar();
+    const r = await api.turn(t, sid(ctx), mode);
+    if (r.injected === true) {
+      // 后端按插话接收（含 queue 回退到 steer 的情况）
+      ok('已插话 · 将在下一步送达');
       return;
     }
-    note.textContent = '已插话 · 将在下一步送达';
-    note.className = 'interject-note ok';
+    if (r.queued === true || mode === 'queue') {
+      ok(doneText);
+      return;
+    }
+    // 后端按新一轮接收（本地运行态已过期）：按开新轮记账
+    ctx.turn = r.turn ?? ctx.turn;
+    setPaneStreaming(ctx, true);
+    ctx.phase = '运行中…';
+    ok('已作为新一轮发送');
+    updateSessionBar();
   } catch (err: unknown) {
+    if (mode === 'queue') {
+      // 排队不被支持（旧后端一律 409）：回退为插话再试一次，并如实提示
+      try {
+        const r2 = await api.turn(t, sid(ctx), 'steer');
+        if (r2.injected !== false) {
+          const lane = laneLabel(r2.inbox_target ?? 'next-step');
+          ok('后端未支持排队 → 已按插话送达' + (lane ? '（' + lane + '）' : ''));
+          return;
+        }
+      } catch {
+        /* 两条车道都不可用：走统一失败路径 */
+      }
+    }
     col.remove();
     note.parentElement?.remove();
     ctx.interjectNote = null;
     restoreDraft(ctx, t);
-    const hint =
-      '插话未送达（' + msgOf(err) + '）：已将内容还原到输入框';
+    const hint = (mode === 'queue' ? '排队未送达（' : '插话未送达（') + msgOf(err) + '）：已将内容还原到输入框';
     if (isActivePane(ctx)) {
       setStatus(hint, 'err');
       window.setTimeout(() => flashStatus(hint, 'err', 6_000), 0);
@@ -538,8 +593,9 @@ function restoreDraft(ctx: SessionPane, text: string): void {
 
 export function initChat(): void {
   initInputBar({
-    send(text) {
-      dispatchSend(text);
+    // W515：mode = 提交车道（Enter=当前车道，Ctrl/Cmd+Enter=另一条）
+    send(text, mode) {
+      dispatchSend(text, mode);
     },
     // W302：取消回调改为模块级 requestCancel，与 #slStop 共用同一入口
     cancel: requestCancel,

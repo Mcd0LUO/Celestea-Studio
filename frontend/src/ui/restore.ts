@@ -24,6 +24,8 @@ import {
   ensureAssistant,
   finalizeAssistant,
   renderEmptyHint,
+  renderInboxMessage,
+  type MsgKind,
 } from './messages';
 import { railReset, railSync } from './rail';
 import { buildToolCard, setToolResult } from './toolcards';
@@ -139,10 +141,26 @@ function renderToolMessage(ctx: SessionPane, m: HistoryMsg, container: HTMLEleme
   );
 }
 
+/**
+ * W515：历史条目的种类映射 ——
+ *   role=user + kind='steering'|'queued' → 插话/排队气泡（与普通用户消息可区分）；
+ *   role/kind='inbox' → 回执/系统注入条目；
+ *   其余保持现状（未知 kind 一律按普通消息渲染，不丢内容）。
+ */
+function userKindOf(m: HistoryMsg): MsgKind {
+  if (m.kind === 'steering') return 'steering';
+  if (m.kind === 'queued') return 'queued';
+  return 'user';
+}
+
 function renderOne(ctx: SessionPane, m: HistoryMsg, container: HTMLElement): void {
   const content = String(m.content ?? '');
+  if (m.role === 'inbox' || m.kind === 'inbox') {
+    renderInboxMessage(ctx, content, { source: m.source, into: container });
+    return;
+  }
   if (m.role === 'user') {
-    addUserMessage(ctx, content, { into: container });
+    addUserMessage(ctx, content, { kind: userKindOf(m), into: container });
     return;
   }
   if (m.role === 'assistant') {

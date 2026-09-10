@@ -97,12 +97,21 @@ export const api = {
     requestJson<MessagesResp>('/api/sessions/' + encodeURIComponent(id) + '/messages'),
   clear: () => postJson<ClearResp>('/api/clear', {}),
   /**
-   * W514：POST /api/turn {input, session?}——目标会话空闲 → 开新轮；
-   * 运行中 → 作为插话注入该轮（响应 injected=true，不新开轮）。
-   * 旧后端忽略多余字段（serde 默认），仍按现状返回 409/新轮。
+   * W514/W515：POST /api/turn {input, session?, mode?}
+   *   - 目标会话空闲 → 开新轮；
+   *   - 运行中 + mode='steer'（默认）→ 插话（注入该轮最近 step 边界，
+   *     响应 injected=true，不新开轮）；
+   *   - 运行中 + mode='queue' → 排队（本轮结束后作为下一回合投递，
+   *     响应 queued=true）。
+   * 旧后端忽略多余字段（serde 默认），仍按现状返回 409/新轮 →
+   * 前端按「插话/排队失败」提示并还原输入，不丢字。
    */
-  turn: (input: string, session?: string) =>
-    postJson<TurnResp>('/api/turn', session ? { input, session } : { input }),
+  turn: (input: string, session?: string, mode?: 'steer' | 'queue') => {
+    const body: Record<string, unknown> = { input };
+    if (session) body.session = session;
+    if (mode) body.mode = mode;
+    return postJson<TurnResp>('/api/turn', body);
+  },
   /** 取消当前聚焦会话的轮次（W514：带 session，旧后端忽略）。 */
   cancel: (session?: string) => postJson<CancelResp>('/api/cancel', session ? { session } : {}),
   // ---- 工作区 / 会话管理（W236；缺失时 404 优雅降级） ----
