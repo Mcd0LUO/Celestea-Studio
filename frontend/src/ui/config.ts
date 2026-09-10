@@ -215,9 +215,8 @@ export async function loadConfig(): Promise<void> {
   }
   try {
     renderForm(cfg, statusWindow, off);
-    statusHint.textContent = '数据源：GET /api/config' +
-      (statusWindow !== null ? ' · 窗口补充：GET /api/status' : '') +
-      ' · 保存 POST /api/config（后端需支持热调）';
+    // 说明性技术文案已按要求移除（不再暴露数据源/端点/实现细节）。
+    statusHint.textContent = '';
     box.replaceChildren(...off.childNodes);
   } catch (err) {
     off.appendChild(el('div', 'side-note err', '配置接口不可用'));
