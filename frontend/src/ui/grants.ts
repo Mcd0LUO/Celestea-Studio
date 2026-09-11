@@ -918,23 +918,37 @@ function validateTools(raw: string): { values: string[]; error: string } {
   return { values: Array.from(new Set(out)), error: '' };
 }
 
-// ---- 范围哈希（与服务复核同一序列化：无空白 JSON + 列表有序去重） --------------
+// ---- 范围哈希（必须与服务端逐字一致 —— 契约见设计 §6.4） ----------------------
+//
+// 服务端 source of truth：apps/studio/src/store/grants.ts 的 canonicalScopeJson，
+// 形如 {"cap":"write_roots","scope":{"roots":["/a","/b"]}}；布尔类 cap
+// （network/unsandboxed）为 {"cap":"network","scope":{}}。
+//
+// 曾经这里是 {"roots":[…]}（只放 scope 字段、不含 cap/scope 包裹），与服务端
+// 哈希不同 ⇒ 令牌绑定的是前端哈希、POST 时服务端按自己的公式重算 ⇒ 每次授予都
+// 会被判 403。两侧必须同步改：任何一侧动了这个形状，另一侧跟上。
+
+function scopeKeyOf(cap: GrantCap): 'roots' | 'hosts' | 'tools' | null {
+  if (cap === 'read_roots' || cap === 'write_roots') return 'roots';
+  if (cap === 'net_hosts') return 'hosts';
+  if (cap === 'tool_extra') return 'tools';
+  return null;
+}
 
 function normList(v: readonly string[] | undefined): string[] {
   if (!v) return [];
   return Array.from(new Set(v.map((x) => x.trim()).filter((x) => x !== ''))).sort();
 }
 
-/** 规范序列化：单键对象、键名有序、列表去重升序、无空白。 */
+/** 规范序列化（与服务端 store/grants.ts:canonicalScopeJson 逐字一致，§6.4）。 */
 export function canonicalScopeJson(cap: GrantCap, scope: GrantScope): string {
-  const obj: Record<string, string[]> = {};
-  if (cap === 'read_roots' || cap === 'write_roots') obj.roots = normList(scope.roots);
-  else if (cap === 'net_hosts') obj.hosts = normList(scope.hosts);
-  else if (cap === 'tool_extra') obj.tools = normList(scope.tools);
-  const keys = Object.keys(obj).sort();
-  const out: Record<string, string[]> = {};
-  for (const k of keys) out[k] = obj[k]!;
-  return JSON.stringify(out);
+  const key = scopeKeyOf(cap);
+  const inner: Record<string, string[]> = {};
+  if (key !== null) {
+    const raw = key === 'roots' ? scope.roots : key === 'hosts' ? scope.hosts : scope.tools;
+    inner[key] = normList(raw);
+  }
+  return JSON.stringify({ cap, scope: inner });
 }
 
 async function scopeHashOf(cap: GrantCap, scope: GrantScope): Promise<string> {
