@@ -49,6 +49,14 @@
   --c-err-dim: rgba(0, 0, 0, 0.1);
   --c-warn-dim: rgba(0, 0, 0, 0.05);
 
+  /* W701：权限盾牌的**语义色例外**——放宽权限是安全状态指示，
+     必须与灰阶 UI 明确区分（设计 §3.1 要求橙盾 / 危险红盾），
+     因此单列 token，组件层仍只引用 token、不写死颜色。 */
+  --c-grant: #c2410c;
+  --c-grant-soft: rgba(194, 65, 12, 0.1);
+  --c-grant-danger: #b91c1c;
+  --c-grant-idle: #b8b8b8;
+
   --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.09);
 
   /* 代码高亮 token 灰阶 */

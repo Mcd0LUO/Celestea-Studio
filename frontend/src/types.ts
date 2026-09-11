@@ -69,6 +69,11 @@ export interface StatusSnapshot {
   session?: string | null;
   /** W514: whether that session currently has a turn running (may be absent). */
   busy?: boolean;
+  /**
+   * W701（设计 §5.7）：该会话当前生效的放宽项名称列表（不含路径细节）。
+   * 仅用于侧栏会话叶子的小盾牌标记；字段缺失 = 旧服务，不显示标记。
+   */
+  grants_active?: string[];
 }
 
 /**
@@ -167,12 +172,25 @@ export interface CompactPayload {
 
 // ---- REST -------------------------------------------------------------------
 
+/**
+ * W701：能力位（设计 §6.5）——某项特性在当前服务上是否可用。
+ * 只有显式 `true` 才算可用；字段缺失/为 false（旧服务）一律按不可用处理：
+ * 入口**隐藏**而不是置灰报错（设计 §6.5）。
+ */
+export interface HealthCapabilities {
+  grants?: boolean;
+  /** 其它能力位（未知键原样保留，本层不解释）。 */
+  [key: string]: unknown;
+}
+
 export interface HealthInfo {
   ok?: boolean;
   name?: string;
   model?: string;
   base_url?: string;
   bind?: string;
+  /** W701：能力位（缺失 = 旧服务，全部按不可用处理）。 */
+  capabilities?: HealthCapabilities;
 }
 
 export interface ToolInfo {
@@ -210,6 +228,11 @@ export interface SessionInfo {
   parent?: string | null;
   parentSessionId?: string | null;
   parent_session?: string | null;
+  /**
+   * W701：该会话当前生效的放宽项名称列表（可选字段；服务给出时优先用它，
+   * 省掉逐会话查询）。缺失 = 走按需查询 / 不显示标记。
+   */
+  grants_active?: string[];
 }
 
 export interface SessionsResp {
@@ -471,3 +494,95 @@ export interface ConfigPatch {
 
 /** POST /api/config 成功响应 = 消毒后的完整配置（同 GET 体型）。 */
 export type ConfigSaveResp = ConfigInfo & OkResp;
+
+// ---- 会话权限（W701 提权通道；契约见 feature-session-grants.md §6） -------------
+
+/** 6 项能力位（设计 §2.2）。 */
+export type GrantCap =
+  | 'network'
+  | 'read_roots'
+  | 'write_roots'
+  | 'net_hosts'
+  | 'tool_extra'
+  | 'unsandboxed';
+
+/** 能力范围：布尔类为空对象；目录/站点/工具类为列表。 */
+export interface GrantScope {
+  roots?: string[];
+  hosts?: string[];
+  tools?: string[];
+  [key: string]: unknown;
+}
+
+/** 一条授权记录（GET /grants 的 grants[]）。 */
+export interface GrantEntry {
+  id?: string;
+  cap?: GrantCap | string;
+  scope?: GrantScope;
+  granted_at?: number;
+  granted_by?: string;
+  expires_at?: number | null;
+  uses_left?: number | null;
+  note?: string;
+  /** 服务端判定：该条已过期（读取时判定，设计 §2.3）。 */
+  expired?: boolean;
+}
+
+/** 生效结果快照（服务端返回；UI 只原样展示，绝不改写措辞）。 */
+export interface EffectiveGrants {
+  network?: boolean;
+  read_roots?: string[];
+  write_roots?: string[];
+  net_hosts?: string[];
+  tool_extra?: string[];
+  unsandboxed?: boolean;
+  [key: string]: unknown;
+}
+
+export interface GrantsResp {
+  ok?: boolean;
+  session?: string;
+  grants?: GrantEntry[];
+  effective?: EffectiveGrants;
+  /** 每种能力的有效期上限（秒）；缺失 = 不限制（前端只用文档默认值 1800）。 */
+  max_ttl_sec?: Record<string, number>;
+  /** 降低隔离运行是否在本部署中开放（设计 §2.2 注 3 / §8.1）。 */
+  unsandboxed_available?: boolean;
+  error?: string;
+}
+
+export interface GrantTokenResp {
+  ok?: boolean;
+  token?: string;
+  expires_at?: number;
+  error?: string;
+}
+
+/** 授予请求体（POST /grants）。 */
+export interface GrantReq {
+  cap: GrantCap;
+  scope?: GrantScope;
+  ttl_sec?: number;
+  uses_left?: number | null;
+  note?: string;
+}
+
+export interface GrantResp {
+  ok?: boolean;
+  grant?: GrantEntry;
+  effective?: EffectiveGrants;
+  error?: string;
+}
+
+/** 撤销请求体（DELETE /grants）；两者都省略 = 全部撤销。 */
+export interface RevokeReq {
+  cap?: GrantCap;
+  grant_id?: string;
+}
+
+export interface GrantRevokeResp {
+  ok?: boolean;
+  revoked?: string[];
+  effective?: EffectiveGrants;
+  error?: string;
+}

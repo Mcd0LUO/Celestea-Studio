@@ -13,10 +13,16 @@ import type {
   FsBrowseResp,
   ConfigPatch,
   ConfigSaveResp,
+  GrantReq,
+  GrantResp,
+  GrantRevokeResp,
+  GrantsResp,
+  GrantTokenResp,
   HealthInfo,
   MessagesResp,
   ProviderFetchResp,
   ProviderTestResp,
+  RevokeReq,
   ProvidersResp,
   PromptUpsertReq,
   PromptsResp,
@@ -103,10 +109,14 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (data ?? {}) as T;
 }
 
-function postJson<T>(path: string, body: unknown): Promise<T> {
+function postJson<T>(
+  path: string,
+  body: unknown,
+  headers?: Record<string, string>,
+): Promise<T> {
   return requestJson<T>(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(headers ?? {}) },
     body: JSON.stringify(body ?? {}),
   });
 }
@@ -222,4 +232,38 @@ export const api = {
       '/api/prompts/' + encodeURIComponent(id) + '/default',
       workspace ? { workspace } : {},
     ),
+  // ---- 会话权限 / 提权通道（W701；能力位未就绪时调用方不显示入口） ----
+  /**
+   * GET /api/sessions/{id}/grants：
+   * 无 grants.json 时返回空列表 + 默认生效集（200，不是 404）。
+   * 404 = 该会话不存在；405/404 亦可能是服务未提供此能力（调用方按能力位降级）。
+   */
+  grants: (id: string) =>
+    requestJson<GrantsResp>('/api/sessions/' + encodeURIComponent(id) + '/grants'),
+  /**
+   * GET /api/sessions/{id}/grants/confirm-token?cap=&scope_hash=：
+   * 一次性确认令牌（TTL 60s，绑定 会话+能力+范围哈希，用后即焚）。
+   * 只在**授予**时使用；撤销降权不需要令牌。
+   */
+  grantToken: (id: string, cap: string, scopeHash: string) =>
+    requestJson<GrantTokenResp>(
+      '/api/sessions/' +
+        encodeURIComponent(id) +
+        '/grants/confirm-token?cap=' +
+        encodeURIComponent(cap) +
+        '&scope_hash=' +
+        encodeURIComponent(scopeHash),
+    ),
+  /** POST /api/sessions/{id}/grants：带一次性确认令牌头（人工点击路径专用）。 */
+  grantCap: (id: string, req: GrantReq, token: string) =>
+    postJson<GrantResp>('/api/sessions/' + encodeURIComponent(id) + '/grants', req, {
+      'X-Celestea-Grant-Confirm': token,
+    }),
+  /** DELETE /api/sessions/{id}/grants：撤销单项或全部；不带令牌（降权永远安全）。 */
+  revokeCap: (id: string, req: RevokeReq = {}) =>
+    requestJson<GrantRevokeResp>('/api/sessions/' + encodeURIComponent(id) + '/grants', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    }),
 };

@@ -68,6 +68,13 @@
             <span class="sl-sep">·</span>
             <button class="sl-effort" id="slEffort" title="思考强度（点击快速切换）">—</button>
             <span class="sl-spacer"></span>
+            <!-- W701：本会话权限盾牌（三态：未授予 / 已授予 / 即将失效）。
+                 显隐真源 = ui/grants.ts —— 能力位未就绪时保持 .hidden（入口隐藏，不置灰报错）。 -->
+            <button id="slGrant" class="sl-grant hidden" type="button" title="本会话权限：默认（仅工作区，无网络）" aria-label="本会话权限">
+              <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M8 1.6 13.2 3.4v4.2c0 3.1-2.1 5.6-5.2 6.8-3.1-1.2-5.2-3.7-5.2-6.8V3.4z"></path></svg>
+              <span class="sl-grant-badge" id="slGrantBadge"></span>
+              <span class="sl-grant-dot" aria-hidden="true"></span>
+            </button>
             <!-- W302：运行中显示的正方形停止按钮（取消当前轮次；显隐真源 = ui/inputbar.setBusy） -->
             <button id="slStop" class="sl-stop hidden" type="button" title="停止本轮生成" aria-label="停止本轮生成">
               <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><rect x="1.5" y="1.5" width="9" height="9" rx="1" fill="currentColor"></rect></svg>

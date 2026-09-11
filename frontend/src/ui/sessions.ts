@@ -22,6 +22,9 @@ import { openSession } from './restore';
 import { activeSessionId, onBusyChange, paneBusy, setPaneMeta, setRemoteBusy } from './viewctx';
 import { updateSessionBar } from './sessionbar';
 import { confirmDialog } from './confirm';
+import { openFsBrowser } from './fsbrowser';
+// W701：会话权限标记（只读消费；本模块不反向被 grants.ts 依赖，避免循环引用）
+import { ensureGrantMarks, grantMarkOf, GRANTS_CHANGED_EVENT, type GrantMark } from './grants';
 
 // ---- 面板状态 ---------------------------------------------------------------------
 
@@ -403,6 +406,44 @@ function sortSessions(list: SessionInfo[]): SessionInfo[] {
   return arr;
 }
 
+/** W701：把某条会话的放宽标记画到已存在的节点上（只改 class/文本/显隐）。 */
+function paintGrantMark(node: HTMLElement, mark: GrantMark | null): void {
+  if (!mark || mark.count <= 0) {
+    node.classList.add('hidden');
+    node.replaceChildren();
+    node.title = '';
+    return;
+  }
+  node.classList.remove('hidden');
+  node.classList.toggle('danger', mark.danger);
+  node.title = mark.danger
+    ? '该会话权限已放宽（含危险能力）：' + mark.count + ' 项'
+    : '该会话权限已放宽：' + mark.count + ' 项';
+  if (!node.firstChild) node.appendChild(grantShieldIcon());
+}
+
+/** 侧栏用的小盾牌图标（实心；颜色由 .sess-leaf-grant 的 class 决定）。 */
+function grantShieldIcon(): SVGSVGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('width', '10');
+  svg.setAttribute('height', '10');
+  svg.setAttribute('aria-hidden', 'true');
+  const p = document.createElementNS(ns, 'path');
+  p.setAttribute('d', 'M8 1.6 13.2 3.4v4.2c0 3.1-2.1 5.6-5.2 6.8-3.1-1.2-5.2-3.7-5.2-6.8V3.4z');
+  svg.appendChild(p);
+  return svg;
+}
+
+/** W701：标记变化 → 只更新既有叶子的标记节点（不重建树）。 */
+function updateGrantMarks(container: HTMLElement): void {
+  for (const node of container.querySelectorAll<HTMLElement>('.sess-leaf-grant[data-grant-mark]')) {
+    const id = node.dataset.grantMark ?? '';
+    paintGrantMark(node, grantMarkOf(id));
+  }
+}
+
 function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
   const id = s.id ?? '';
   const isActive = id === activeSession;
@@ -440,6 +481,14 @@ function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
   const bits: string[] = [];
   if (s.events !== undefined) bits.push(s.events + ' 次事件');
   if (bits.length) leaf.appendChild(el('span', 'sess-leaf-meta', bits.join(' · ')));
+
+  // W701：已放宽权限的会话显示小盾牌（危险能力用红色小盾）。
+  // 节点常驻、只切 class/文本/显隐 —— 标记到货时局部更新，不重建整棵树（铁律 6）。
+  const grant = el('span', 'sess-leaf-grant hidden');
+  grant.dataset.grantMark = id;
+  leaf.appendChild(grant);
+  paintGrantMark(grant, grantMarkOf(id));
+
   leaf.title = displayName + '（点击打开）';
 
   if (!batchMode) {
@@ -890,162 +939,37 @@ export function newSession(presetWs?: string): void {
   titleInput.focus();
 }
 
-/** 新建工作区：文件管理器弹窗（fs/browse 懒加载；缺失降级手输路径）。 */
+/** 新建工作区：文件管理器弹窗（fs/browse 懒加载；缺失降级手输路径）。
+ *  W701：浏览器本体已抽到 ui/fsbrowser.ts（与「提权 · 选择目录」共用同一体验）。 */
 export function newWorkspace(): void {
-  const scrim = el('div', 'modal-scrim');
-  const card = el('div', 'modal-card ws-fs');
-  card.appendChild(el('div', 'modal-card-title', '新建工作区 · 选择目录'));
-  card.appendChild(el('div', 'side-note', '选中目录即注册该目录为工作区（名称 = 文件夹名）'));
-
-  let curPath = '';
-
-  const crumbs = el('div', 'ws-fs-crumbs');
-  const tree = el('div', 'ws-fs-tree');
-  const addrRow = el('div', 'ws-fs-addr');
-  const addrInput = el('input', 'cfg-input') as HTMLInputElement;
-  addrInput.placeholder = '目录路径（可编辑后跳转）';
-  addrInput.value = '';
-  const goBtn = el('button', 'btn btn-soft btn-mini', '跳转') as HTMLButtonElement;
-  goBtn.type = 'button';
-  addrRow.appendChild(addrInput);
-  addrRow.appendChild(goBtn);
-
-  const status = el('div', 'ws-fs-status');
-  card.appendChild(crumbs);
-  card.appendChild(tree);
-  card.appendChild(addrRow);
-  card.appendChild(status);
-
-  function renderCrumbs(path: string): void {
-    // 第 26 轮（W256）：根目录快捷 chips 已删除；面包屑始终以可点击的 '/' 开头
-    //（路径为空时也渲染 '/' crumb，点击 loadDirs('/')）。
-    // 离屏构建 + 单次替换（铁律 1：不先清空可见容器）。
-    const off = document.createElement('div');
-    const parts = path.split('/').filter(Boolean);
-    const rootBtn = el('button', 'ws-fs-crumb' + (parts.length ? '' : ' cur'), '/') as HTMLButtonElement;
-    rootBtn.type = 'button';
-    rootBtn.title = '根目录 /';
-    rootBtn.addEventListener('click', () => void loadDirs('/'));
-    off.appendChild(rootBtn);
-    let acc = '';
-    for (let i = 0; i < parts.length; i++) {
-      const seg = parts[i]!;
-      acc += '/' + seg;
-      const b = el('button', 'ws-fs-crumb' + (i === parts.length - 1 ? ' cur' : ''), seg) as HTMLButtonElement;
-      b.type = 'button';
-      const target = acc;
-      b.addEventListener('click', () => void loadDirs(target));
-      off.appendChild(b);
-    }
-    crumbs.replaceChildren(...off.childNodes);
-  }
-
-  async function loadDirs(path: string): Promise<void> {
-    // 第 11 轮：目录跳转双缓冲——旧目录列表保留到新列表就绪，一次替换
-    status.className = 'ws-fs-status';
-    status.textContent = '加载中…';
-    let r;
-    try {
-      r = await api.fsBrowse(path);
-    } catch (err) {
-      status.className = 'ws-fs-status err';
-      status.textContent = '文件浏览暂不可用 · 请直接在下方输入路径';
-      const off = document.createElement('div');
-      off.appendChild(el('div', 'side-note', '可编辑底部路径后点「跳转」，或直接填写名称+路径创建'));
-      tree.replaceChildren(...off.childNodes);
-      addrInput.value = path;
-      curPath = path;
-      return;
-    }
-    if (r.error) {
-      status.className = 'ws-fs-status err';
-      status.textContent = '浏览失败：' + userErrorText(r.error, '请手动输入目录路径');
-    } else {
-      status.textContent = '已选择目录：' + (r.path || '/');
-      status.className = 'ws-fs-status ok';
-    }
-    curPath = r.path ?? path;
-    addrInput.value = r.path ?? path;
-    renderCrumbs(r.path ?? path);
-    const off = document.createElement('div');
-    const dirs = r.dirs ?? [];
-    if (!dirs.length) off.appendChild(el('div', 'side-note', '（该目录下没有子目录）'));
-    for (const d of dirs) {
-      const row = el('div', 'ws-fs-dir');
-      const icon = el('span', 'ws-fs-dir-icon');
-      icon.appendChild(svgIcon('folder')); // 第 26 轮：'▸' 文本图标 → 文件夹 SVG
-      row.appendChild(icon);
-      row.appendChild(el('span', 'ws-fs-dir-name', d));
-      row.addEventListener('click', () => {
-        const next = (curPath ? curPath.replace(/\/+$/, '') : '') + '/' + d;
-        void loadDirs(next);
-      });
-      off.appendChild(row);
-    }
-    tree.replaceChildren(...off.childNodes);
-  }
-
-  goBtn.addEventListener('click', () => {
-    const p = addrInput.value.trim();
-    if (p) void loadDirs(p);
+  openFsBrowser({
+    title: '新建工作区 · 选择目录',
+    note: '选中目录即注册该目录为工作区（名称 = 文件夹名）',
+    confirmLabel: '创建',
+    busyLabel: '注册中…',
+    fallbackNote: '可编辑底部路径后点「跳转」，或直接填写名称+路径创建',
+    onPick: (path, ui) => {
+      ui.setBusy(true);
+      void api
+        .createWorkspaceByPath(path)
+        .then((r) => {
+          if (r.ok === false) {
+            ui.status.className = 'ws-fs-status err';
+            ui.status.textContent = '注册失败：' + userErrorText(r.error, '请检查目录路径');
+            ui.setBusy(false);
+            return;
+          }
+          note('工作区已注册：' + path);
+          ui.close();
+          void loadSessions();
+        })
+        .catch((err: unknown) => {
+          ui.status.className = 'ws-fs-status err';
+          ui.status.textContent = '注册失败：' + userErrorText(err, '请检查目录路径');
+          ui.setBusy(false);
+        });
+    },
   });
-  addrInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') goBtn.click();
-  });
-
-  const actions = el('div', 'modal-card-actions');
-  const cancel = el('button', 'btn btn-soft', '取消') as HTMLButtonElement;
-  cancel.type = 'button';
-  const create = el('button', 'btn btn-accent', '创建') as HTMLButtonElement;
-  create.type = 'button';
-  // 任务 3：挂到 body 的弹窗打开时 push 自身 close，Esc 只关栈顶一层
-  let overlay: OverlayHandle | null = null;
-  const close = () => {
-    if (overlay) {
-      popOverlay(overlay);
-      overlay = null;
-    }
-    scrim.remove();
-  };
-  overlay = pushOverlay(close);
-  cancel.addEventListener('click', close);
-  create.addEventListener('click', () => {
-    const path = curPath || addrInput.value.trim();
-    if (!path) {
-      status.className = 'ws-fs-status err';
-      status.textContent = '请先选择/输入目录路径';
-      addrInput.focus();
-      return;
-    }
-    create.disabled = true;
-    create.textContent = '注册中…';
-    void api
-      .createWorkspaceByPath(path)
-      .then((r) => {
-        if (r.ok === false) {
-          status.className = 'ws-fs-status err';
-          status.textContent = '注册失败：' + userErrorText(r.error, '请检查目录路径');
-          create.disabled = false;
-          create.textContent = '注册';
-          return;
-        }
-        note('工作区已注册：' + path);
-        close();
-        void loadSessions();
-      })
-      .catch((err: unknown) => {
-        status.className = 'ws-fs-status err';
-        status.textContent = '注册失败：' + (err instanceof Error ? err.message : String(err));
-        create.disabled = false;
-        create.textContent = '注册';
-      });
-  });
-  actions.appendChild(cancel);
-  actions.appendChild(create);
-  card.appendChild(actions);
-  scrim.appendChild(card);
-  document.body.appendChild(scrim);
-  void loadDirs('');
 }
 
 // ---- 树渲染主流程 ----------------------------------------------------------------------
@@ -1171,6 +1095,9 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
   // W514：元数据（标题/kind）回填后同步会话条与运行态点（只改文本/class）
   updateBusyDots(container);
   updateSessionBar();
+  // W701：权限标记只做局部更新；未知项按需查询（能力位未就绪时该调用是空操作）
+  updateGrantMarks(container);
+  ensureGrantMarks(treeSessions.filter((s) => !s.archived).map((s) => s.id ?? ''));
 }
 
 // ---- 装配 ------------------------------------------------------------------------
@@ -1184,6 +1111,11 @@ export function initSessionsPanel(): void {
   // 第 22 轮：清空/刷新入口已移除（后端端点保留）
   document.addEventListener('click', (e) => {
     if (!(e.target instanceof Element) || !e.target.closest('.sess-menu')) closeCtxMenu();
+  });
+  // W701：权限标记到货/变化 → 只更新既有叶子的标记节点（局部，不重建树）
+  window.addEventListener(GRANTS_CHANGED_EVENT, () => {
+    const c = document.getElementById('sessionTree');
+    if (c) updateGrantMarks(c);
   });
   // W514：任一会话运行态变化 → 只更新侧栏运行态点/Worker 行状态（局部）
   onBusyChange(() => {

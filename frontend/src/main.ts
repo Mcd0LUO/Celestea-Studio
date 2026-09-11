@@ -13,6 +13,7 @@ import './styles/statusline.css';
 import './styles/settings.css';
 import './styles/views.css'; // W514 多会话视图容器 / 聚焦会话条 / 插话
 import './styles/sessions.css';
+import './styles/grants.css'; // W701 提权通道（本会话权限盾牌 / 面板 / 二次确认）
 import './styles/rail.css'; // 灵动选择条 v3（W238 重做）
 
 import { api } from './api';
@@ -22,6 +23,7 @@ import { initViewCtx } from './ui/viewctx'; // W514 每会话视图容器
 import { initSessionBar } from './ui/sessionbar'; // W514 聚焦会话条
 import { initSettingsPage } from './ui/config';
 import { initSessionsPanel } from './ui/sessions';
+import { initGrants } from './ui/grants'; // W701 提权通道（能力位未就绪时入口隐藏）
 import { restoreActiveHistory } from './ui/restore';
 import { initRail } from './ui/rail';
 import { APP_VERSION, BUILD_TIME } from './version'; // 灵动选择条 v3（W238 重做）
@@ -66,6 +68,9 @@ function init(): void {
 
   // 5) 「通用设置」页（取代原 #modal 弹层；热调 + 工具列表；保存成功后刷新健康信息）
   initSettingsPage();
+
+  // 5.1) W701：本会话权限盾牌（能力位未就绪 → 入口保持隐藏，不报错不崩溃）
+  initGrants();
 
   // 6) 版本标识（原「v2 · TS」位置，第 22 轮改为构建版本）
   const verEl = document.getElementById('brandVersion');
