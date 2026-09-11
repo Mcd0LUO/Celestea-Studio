@@ -50,6 +50,7 @@
 .sl-ring {
   display: inline-flex; align-items: center; justify-content: center;
   width: 14px; height: 14px;
+  cursor: pointer; /* W726：点击打开只读「完整上下文」浮层 */
 }
 .sl-ring svg { display: block; }
 .sl-ring circle { fill: none; stroke-width: 2; }

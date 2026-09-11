@@ -6,8 +6,11 @@
 //   （SSE status 的 statusline 快照是嵌套对象，fromSse 里拍平后合并）。
 // W227：模型/推理档位改为可点击按钮 → 紧凑下拉面板快速切换（POST /api/config），
 //   409（轮次进行中）→ 提示并挂起，SSE done 后自动重试一次；400/500 → 内联报错。
+// W726：上下文圆环可点击 → 打开只读「完整上下文」浮层（系统提示词/工具清单/
+//   消息流）；能力位未就绪 → 只给一句轻提示，不报错、不打开浮层。
 // ============================================================================
 import { api, ApiError, userErrorText } from './api';
+import { contextSupported, openContextView } from './ui/contextview'; // W726 只读上下文浮层
 import { el, fmtCompact, need } from './utils/dom';
 import { popOverlay, pushOverlay, type OverlayHandle } from './utils/overlays';
 import type {
@@ -79,6 +82,16 @@ export class Statusline {
     this.ringProg.style.strokeDasharray = String(RING_C);
     this.el.title = '上下文占用 · 模型 · 思考强度 · 吞吐 · 缓存命中';
 
+    // W726：点上下文圆环 → 只读完整上下文浮层
+    this.ring.setAttribute('role', 'button');
+    this.ring.setAttribute('tabindex', '0');
+    this.ring.addEventListener('click', () => void this.openContext());
+    this.ring.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        void this.openContext();
+      }
+    });
     // W227：模型/档位点击快速切换
     this.modelEl.addEventListener('click', () => this.togglePopup('model'));
     this.effortEl.addEventListener('click', () => this.togglePopup('effort'));
@@ -161,6 +174,25 @@ export class Statusline {
       .catch((err: unknown) => {
         this.setNote('切换失败：' + (err instanceof Error ? err.message : String(err)), 6000);
       });
+  }
+
+  // ---- 只读完整上下文（W726） -------------------------------------------------
+
+  /**
+   * 点上下文圆环：能力位就绪（capabilities.context === true）→ 打开只读浮层；
+   * 未就绪 / 探测失败 → 只给一句用户语言的轻提示（不报错、不打开浮层）。
+   * 会话 id 未解析（旧单会话容器）→ 同样只提示，不发无主请求。
+   */
+  private async openContext(): Promise<void> {
+    if (!(await contextSupported())) {
+      this.setNote('当前版本不支持查看上下文', 4000);
+      return;
+    }
+    if (this.session === '') {
+      this.setNote('当前会话尚未就绪，请稍后再试', 4000);
+      return;
+    }
+    openContextView(this.session);
   }
 
   // ---- 快速切换面板 ---------------------------------------------------------
@@ -383,11 +415,13 @@ export class Statusline {
       this.ring.style.strokeDashoffset = String(RING_C * (1 - ratio));
       this.ring.classList.toggle('warn', ratio >= WARN_RATIO);
       this.ring.title = '上下文占用 ' + Math.round(ratio * 1000) / 10 + '%' +
-        ' · ' + fmtCompact(usage.used) + '/' + fmtCompact(usage.window);
+        ' · ' + fmtCompact(usage.used) + '/' + fmtCompact(usage.window) +
+        '（点击查看完整上下文）';
     } else {
       this.ctxEl.textContent = '—/—';
       this.ring.style.strokeDashoffset = String(RING_C);
       this.ring.classList.remove('warn');
+      this.ring.title = '上下文占用（点击查看完整上下文）';
     }
 
     this.modelEl.textContent = s.model || '—';

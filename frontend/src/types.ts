@@ -179,6 +179,8 @@ export interface CompactPayload {
  */
 export interface HealthCapabilities {
   grants?: boolean;
+  /** W726：只读上下文快照（点状态栏上下文圆环可查看）。 */
+  context?: boolean;
   /** 其它能力位（未知键原样保留，本层不解释）。 */
   [key: string]: unknown;
 }
@@ -584,5 +586,54 @@ export interface GrantRevokeResp {
   ok?: boolean;
   revoked?: string[];
   effective?: EffectiveGrants;
+  error?: string;
+}
+
+// ---- W726：上下文快照（只读完整上下文，点状态栏上下文圆环查看） ----------------
+
+/** 工具（名称 + 说明 + 参数结构）。 */
+export interface ContextToolInfo {
+  name: string;
+  description?: string;
+  parameters?: unknown;
+  /** 该条目超长被服务端截断。 */
+  truncated?: boolean;
+}
+
+/** 一条消息（role: user / assistant / tool）。 */
+export interface ContextMessage {
+  role: 'user' | 'assistant' | 'tool' | string;
+  content?: string;
+  tool_name?: string;
+  tool_call_id?: string;
+  /** 该条目超长被服务端截断。 */
+  truncated?: boolean;
+}
+
+export interface ContextCounts {
+  system_chars?: number;
+  tool_count?: number;
+  message_count?: number;
+}
+
+export interface ContextUsageInfo {
+  used?: number;
+  window?: number;
+  ratio?: number;
+  /** 用量为估算值（非精确计量）。 */
+  estimated?: boolean;
+}
+
+export interface SessionContextResp {
+  ok?: boolean;
+  session?: string;
+  model?: string;
+  system?: string;
+  tools?: ContextToolInfo[];
+  messages?: ContextMessage[];
+  counts?: ContextCounts;
+  context?: ContextUsageInfo;
+  /** 整份快照存在被截断的条目。 */
+  truncated?: boolean;
   error?: string;
 }

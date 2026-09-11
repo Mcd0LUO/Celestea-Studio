@@ -9,6 +9,7 @@ import './styles/base.css';
 import './styles/layout.css';
 import './styles/components.css';
 import './styles/statusline.css';
+import './styles/contextview.css'; // W726 只读「完整上下文」浮层
 
 import './styles/settings.css';
 import './styles/views.css'; // W514 多会话视图容器 / 聚焦会话条 / 插话

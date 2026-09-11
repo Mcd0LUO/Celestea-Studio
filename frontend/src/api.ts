@@ -28,6 +28,7 @@ import type {
   PromptsResp,
   SessionCreateReq,
   SessionCreateResp,
+  SessionContextResp,
   SessionsResp,
   StatusSnapshot,
   ToolsResp,
@@ -141,6 +142,12 @@ export const api = {
   /** 会话历史（回放/恢复）；404/超时 → ApiError。 */
   messages: (id: string) =>
     requestJson<MessagesResp>('/api/sessions/' + encodeURIComponent(id) + '/messages'),
+  /**
+   * W726：只读上下文快照 —— 模型本轮实际看到的内容（系统提示词 / 工具清单 /
+   * 消息流 + 用量）。404 = 该会话不存在（或服务未提供此能力，调用方按能力位降级）。
+   */
+  sessionContext: (id: string) =>
+    requestJson<SessionContextResp>('/api/sessions/' + encodeURIComponent(id) + '/context'),
   clear: () => postJson<ClearResp>('/api/clear', {}),
   /**
    * W514/W515：POST /api/turn {input, session?, mode?}
