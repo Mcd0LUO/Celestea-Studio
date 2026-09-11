@@ -1,5 +1,9 @@
 # Celestea Studio · 开发文档（权威入口）
 
+> 🧭 **仓库角色（2026-09-11）**：本仓现役 = **线上前端（`frontend/`）+ 共享数据文件**（`workspaces.json` / `providers.json` / `prompts.json` / `sessions/`）。
+> Rust Studio 后端已于 2026-09-11 **退役**（见 [`../LEGACY-RUST-BACKEND.md`](../LEGACY-RUST-BACKEND.md)），因此本文描述的 Rust 后端架构 / 构建 / 测试属**历史参考**。
+> **后端开发请看 [`/src/celestea_studio-ts/docs/README.md`](/src/celestea_studio-ts/docs/README.md)**（TypeScript 后端，生产）；Rust 引擎见 [`/src/celestea_harness/docs/README.md`](/src/celestea_harness/docs/README.md)；本仓 `docs/` 索引见 [`README.md`](./README.md)。
+
 > 本文是 Celestea Studio 的**开发者入口文档**，内容全部来自对 `/src/celestea_studio` 实际代码的核对（文件:行号可回溯）。
 > 契约字段名 / 代码标识符保留英文原文，其余以中文叙述。
 > 拿不准的地方一律标 `TODO` / `UNCLEAR`，不臆测。
@@ -15,14 +19,16 @@
 | 文档 | 内容 | 什么时候读 |
 |---|---|---|
 | **本文 `docs/DEVELOPMENT.md`** | 架构总览、模块职责、关键机制、工作流、测试现状、文档索引 | 第一次上手；改任何东西之前 |
-| [`docs/api-contract.md`](./api-contract.md) | 全部 HTTP 端点契约（method / path / 请求体 / 响应体 / 错误码与错误原文） | 改后端 handler、改前端 api 层 |
+| [`docs/README.md`](./README.md) | **`docs/` 全量索引**：状态（当前 / 设计 / 历史）、一句话、权威入口 | 找文档时先看它 |
+| [`docs/archive/api-contract.md`](./archive/api-contract.md) | **历史**：已退役 Rust 后端的全部 HTTP 端点契约（method / path / 请求体 / 响应体 / 错误码与错误原文）。TS 侧契约真源见 `/src/celestea_studio-ts/contracts/endpoints.json` | 追溯 Rust 端点语义 |
 | [`docs/data-files.md`](./data-files.md) | `workspaces.json` / `providers.json` / `prompts.json` / 会话目录与 `cli-main.jsonl` / `session.json` 的 schema 与格式 | 改持久化、迁移、回放 |
 | [`docs/pitfalls.md`](./pitfalls.md) | **踩坑档案**：每一条都来自真实修复（症状 / 根因 / 正确做法 / 代码位置） | 动 providers、compact、SSE、前端渲染之前**必读** |
-| [`docs/deployment.md`](./deployment.md) | systemd / nginx / 环境变量 / 健康检查 / 重启与回滚 | 部署、排障、改环境变量 |
+| [`docs/archive/deployment.md`](./archive/deployment.md) | **历史**：已退役 Rust 后端 `celestea-studio.service` 的 systemd / nginx / 环境变量 / 重启与回滚。TS 部署见 `/src/celestea_studio-ts/scripts/run-studio-ts.sh` | 追溯旧部署形态 |
 | [`frontend/FRONTEND-RULES.md`](../frontend/FRONTEND-RULES.md) | 前端渲染**铁律**（验收硬性标准） | 写任何前端 UI 之前 |
-| `docs/backend-language-eval.md`、`docs/frontend-session-persistence-eval.md`、`docs/prompt-injection-eval.md` | 历史评估报告（决策留痕，非当前契约） | 追溯"为什么这样设计" |
+| [`docs/archive/`](./archive/)（7 篇） | **历史文档**（2026-09-11 归档，正文保留 + 顶部 📦 横幅）：`api-contract.md`、`deployment.md`、`backend-language-eval.md`、`backend-ts-rewrite-eval.md`、`frontend-session-persistence-eval.md`、`prompt-injection-eval.md`、`frontend-freeze-stop-button-plan.md` | 追溯"为什么这样设计" |
 
-**一句话职责边界**：后端是唯一真源（状态、文件、引擎代际都在 Rust 进程里）；前端只是"渲染 + 转发"，不持有业务真值。
+**一句话职责边界（Rust 期口径）**：后端是唯一真源（状态、文件、引擎代际都在 Rust 进程里）；前端只是"渲染 + 转发"，不持有业务真值。
+> 2026-09-11 起后端已换为 TypeScript（`celestea-studio-ts`），该边界仍然成立，只是"后端进程"指 TS 服务。
 
 ---
 
@@ -44,7 +50,7 @@ Celestea Studio 是架在 **celestea-runtime 引擎**之上的本地 Web 工作�
 export RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 cd /src/celestea_studio
 cargo build --release
-./target/release/celestea-studio            # 需要 CELESTEA_API_KEY（见 docs/deployment.md）
+./target/release/celestea-studio            # 需要 CELESTEA_API_KEY（见 docs/archive/deployment.md）
 
 # 前端
 cd frontend
@@ -52,7 +58,7 @@ pnpm install                                # 首次
 pnpm build                                  # tsc --noEmit && vite build -> frontend/dist/
 ```
 
-访问 `http://127.0.0.1:3777`（本机）或经 nginx 的 `https://studio.celestea.top`（basic auth，见 `docs/deployment.md`）。
+访问 `http://127.0.0.1:3777`（本机）或经 nginx 的 `https://studio.celestea.top`（basic auth，见 `docs/archive/deployment.md`）。
 
 ### 1.2 改动生效方式（**最容易踩的一条**）
 
@@ -288,13 +294,13 @@ pnpm build                                  # tsc --noEmit && vite build -> fron
 - 版本号：`frontend/src/version.ts` 的 `APP_VERSION` / `BUILD_TIME` **手动维护**，需与 `frontend/package.json` 的 `version` 同步（`frontend/src/version.ts:1-11`）。
 - 主题：**只有 `mono` 单主题**（`frontend/src/theme.ts:12-14`）；旧 `localStorage` 里的已删主题 id 会自动回落 `mono`。
 
-部署（systemd / nginx / 环境变量 / 重启命令）见 [`docs/deployment.md`](./deployment.md)。
+部署（systemd / nginx / 环境变量 / 重启命令）见 [`docs/archive/deployment.md`](./archive/deployment.md)（历史）。
 
 ---
 
 ## 4. HTTP API 索引
 
-完整契约（请求体字段、响应体字段、**每个错误分支的 status + error 原文**）在 [`docs/api-contract.md`](./api-contract.md)。这里只给总表。
+完整契约（请求体字段、响应体字段、**每个错误分支的 status + error 原文**）在 [`docs/archive/api-contract.md`](./archive/api-contract.md)（历史）。这里只给总表。
 
 | 分组 | 端点 |
 |---|---|
@@ -401,7 +407,7 @@ CELESTEA_API_KEY="$CELESTEA_API_KEY" \
 
 ### 7.3 改动的自检清单
 
-- 后端：`cargo build --release` + `cargo test --release` 全绿；新端点要在 `docs/api-contract.md` 补一行。
+- 后端：`cargo build --release` + `cargo test --release` 全绿；新端点要在 `docs/archive/api-contract.md` 补一行。
 - 前端：`pnpm typecheck` + `pnpm build` 通过；对照 `frontend/FRONTEND-RULES.md` 逐条自查（空白帧 / 整树闪动 / 旧结果覆盖新状态 任一出现即不合格）。
 - 改了 `AppState` / `swap_gen` / busy 槽：确认**所有**释放路径（成功、取消、错误、409 前置返回）都不漏。
 - 改了 provider / prompts / 会话写盘：确认"先判 409 再落盘"的顺序没有被破坏（否则会出现"返回 409 但已经写盘"）。
@@ -473,7 +479,7 @@ cargo test --release
 
 ## 9. 文档维护约定
 
-- 端点增删 → 同步 `docs/api-contract.md` 的总表 + 明细；数据文件字段变化 → 同步 `docs/data-files.md`。
+- 端点增删 → 同步 `docs/archive/api-contract.md` 的总表 + 明细；数据文件字段变化 → 同步 `docs/data-files.md`。
 - 修掉一个 bug → 在 `docs/pitfalls.md` 追加/更新条目（**必须写根因与代码位置**），不要只写"已修复"。
 - 本文档里的行号以当前代码为准；大规模重构后行号会漂移，**以符号名为准**（每个结论都给了函数名）。
 - 不在文档里写任何 API key、token、真实密钥（只用环境变量名与文件路径）。

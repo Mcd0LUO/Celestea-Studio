@@ -25,5 +25,8 @@ Studio 后端已完成 **TypeScript 全量重写**，生产实例为 `celestea-s
   注意：`celestea-studio.service` 与 `celestea-studio-ts.service` 曾设 `Conflicts=`，两者不要同时启用。
 
 ## 相关文档
-- `docs/deployment.md`：**旧 Rust 部署文档（已过时，仅存史）**；TS 部署见 `/src/celestea_studio-ts/scripts/run-studio-ts.sh` 与 `/etc/systemd/system/celestea-studio-ts.service`。
-- `/src/celestea_harness`：Rust **引擎**（非 Studio 后端），保留作为参考实现与迭代路线图来源。
+- `docs/archive/deployment.md`：**旧 Rust 部署文档（已过时，仅存史）**；TS 部署见 `/src/celestea_studio-ts/scripts/run-studio-ts.sh` 与 `/etc/systemd/system/celestea-studio-ts.service`。
+- `docs/archive/api-contract.md`：**旧 Rust 后端 HTTP 契约（仅存史）**；TS 契约真源见 `/src/celestea_studio-ts/contracts/endpoints.json`。
+- `docs/README.md`：本仓 `docs/` 索引（当前 / 历史一览；`DEVELOPMENT.md`、`data-files.md`、`pitfalls.md` 保留在 `docs/`）。
+- `/src/celestea_harness`：Rust **引擎**（非 Studio 后端），保留作为参考实现与迭代路线图来源（路线图已归档：`/src/celestea_harness/docs/archive/agent-iteration-roadmap.md`）；文档索引见 `/src/celestea_harness/docs/README.md`。
+- `/src/celestea_studio-ts`：Studio 后端（TypeScript，**生产**）；文档索引见 `/src/celestea_studio-ts/docs/README.md`，后端开发一律在那里。

@@ -1,5 +1,7 @@
 # Celestea-Studio 后端语言切换评估报告
 
+> 📦 历史文档（2026-09-11 归档）：结论「维持 Rust axum、不换语言」已被后端 TypeScript 全量重写推翻（Rust 后端 2026-09-11 退役）。当前权威入口见 [../DEVELOPMENT.md](../DEVELOPMENT.md) 与 [/src/celestea_studio-ts/docs/README.md](/src/celestea_studio-ts/docs/README.md)。
+
 - 评估人：W229（DSH worker）
 - 评估对象：维持 Rust axum（基准）/ Go / C# (.NET 8/9) / TypeScript（Node 24 + Hono/Fastify，附 Bun/Deno）
 - 结论：**维持 Rust axum，不换语言；同时建议把「抽引擎 sidecar」作为独立的、语言中立的架构演进（优先级高于任何换语言方案）**

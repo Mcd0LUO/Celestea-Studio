@@ -27,13 +27,18 @@ ssh -L 3777:localhost:3777 <server>
 - GET /api/events - SSE stream (event names: status/text/thinking/tool/tool_result/done)
 - GET /api/health - {ok, name, model, base_url, bind}
 
-## Docs
+## Docs / 仓库角色
 
-- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — 开发者权威入口：架构总览、模块职责表、关键机制（Gen/swap_gen、SSE 信封、autowake、提示词装配）、开发工作流、测试现状与文档索引。
-- [docs/api-contract.md](docs/api-contract.md) — 全部 HTTP 端点契约（请求/响应/错误码与错误原文）。
-- [docs/data-files.md](docs/data-files.md) — `workspaces.json` / `providers.json` / `prompts.json` / 会话目录与 `cli-main.jsonl` 的 schema 与格式。
-- [docs/pitfalls.md](docs/pitfalls.md) — 踩坑档案（每条来自真实修复）。
-- [docs/deployment.md](docs/deployment.md) — systemd / nginx / 环境变量 / 健康检查 / 重启与回滚。
-- [frontend/FRONTEND-RULES.md](frontend/FRONTEND-RULES.md) — 前端渲染铁律（验收硬性标准）。
+> 本仓现役 = **线上前端（`frontend/`）+ 共享数据文件**（`workspaces.json` / `providers.json` / `prompts.json` / `sessions/`）。
+> **Studio 后端开发（TypeScript，生产）见 [`/src/celestea_studio-ts/docs/README.md`](/src/celestea_studio-ts/docs/README.md)**；
+> Rust **引擎**（参考实现）见 [`/src/celestea_harness/docs/README.md`](/src/celestea_harness/docs/README.md)。
+> 本仓 Rust 后端已于 2026-09-11 退役：见 [`LEGACY-RUST-BACKEND.md`](LEGACY-RUST-BACKEND.md)。
+
+- **[docs/README.md](docs/README.md)** — `docs/` 全量索引：每份文档的**状态（当前 / 设计 / 历史）**、一句话、权威入口。
+- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) — Rust 期开发者权威入口（架构总览、模块职责表、关键机制、工作流、测试现状）。**后端已退役，本文属历史参考。**
+- [docs/data-files.md](docs/data-files.md) — 共享数据文件 schema：`workspaces.json` / `providers.json` / `prompts.json` / 会话目录与 `cli-main.jsonl`（TS 后端读写同一批文件）。
+- [docs/pitfalls.md](docs/pitfalls.md) — 踩坑档案（每条来自真实修复），前端与数据文件相关条目**当前仍适用**。
+- [docs/archive/](docs/archive/) — **历史文档**（2026-09-11 归档，只存史）：Rust 期 API 契约、部署、语言/重构评估、前端方案。
+- [frontend/FRONTEND-RULES.md](frontend/FRONTEND-RULES.md) — 前端渲染铁律（验收硬性标准，**当前仍适用**）。
 
 > 改动生效方式：前端 `cd frontend && pnpm build`（无需重启）；后端 `cargo build --release` + `sudo systemctl restart celestea-studio`。

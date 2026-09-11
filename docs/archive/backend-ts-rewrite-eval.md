@@ -1,6 +1,8 @@
 # Celestea 后端 TypeScript 全量重构评估（W268 · 增量复评 + 可执行迁移计划）
 
-> **前序与契约**：[W229《Celestea-Studio 后端语言切换评估报告》](./backend-language-eval.md)（2026-09-07，commit `e4b73ce`，结论：维持 Rust axum，加权 4.81 : TS 3.63）｜[`celestea_studio/docs/DEVELOPMENT.md`](./DEVELOPMENT.md)（W264，代码基线 `937fe63`，39 端点契约 + 数据文件）｜[`celestea_harness/docs/DEVELOPMENT.md`](/src/celestea_harness/docs/DEVELOPMENT.md)（W265，7 crate / 10 工具 / 沙箱 / 事件模型）。
+> 📦 历史文档（2026-09-11 归档）：描述的是 Rust → TypeScript 全量重构的评估与迁移计划（W268），迁移已完成（TS 后端为生产），本报告作为立项依据留痕。当前权威入口见 [../DEVELOPMENT.md](../DEVELOPMENT.md) 与 [/src/celestea_studio-ts/docs/README.md](/src/celestea_studio-ts/docs/README.md)。
+
+> **前序与契约**：[W229《Celestea-Studio 后端语言切换评估报告》](./backend-language-eval.md)（2026-09-07，commit `e4b73ce`，结论：维持 Rust axum，加权 4.81 : TS 3.63）｜[`celestea_studio/docs/DEVELOPMENT.md`](../DEVELOPMENT.md)（W264，代码基线 `937fe63`，39 端点契约 + 数据文件）｜[`celestea_harness/docs/DEVELOPMENT.md`](/src/celestea_harness/docs/DEVELOPMENT.md)（W265，7 crate / 10 工具 / 沙箱 / 事件模型）。
 >
 > **本轮口径**：① 用户已决定「引擎 + Studio 后端全量重构为 TypeScript」→ **场景 B 为主结论**，场景 A（core 留 Rust）降为对照；② 用户明确「性能不是关键」→ 性能维度权重压到 4%；③ 评估重心 = 维护成本与语义耦合、双进程/运行时运维、回归风险、语言统一/心智负担、打包发布形态。④ 本报告只写文档，**不改任何代码/配置、不 push、不重启服务**；文中不含任何 key/token 明文。
 >
@@ -114,14 +116,14 @@ cargo test -p celestea-tools --test run_code_e2e         # 单独复现
 ```bash
 cd /src/celestea_studio
 grep -c '\.route(' src/main.rs          # 38
-grep -cE '^### ' docs/api-contract.md   # 39
+grep -cE '^### ' docs/archive/api-contract.md   # 39
 ```
 
 | 项 | 数字 | 来源 |
 |---|---|---|
 | 路由声明 | **38 条 `route()`** | `src/main.rs:1337-1378` |
 | method+path 组合 | **43**（5 组 GET+POST：config/sessions/workspaces/providers/prompts）+ 1 fallback | `src/main.rs:1379` |
-| 契约化端点 | **39**（api-contract.md 逐条） | `docs/api-contract.md` |
+| 契约化端点 | **39**（api-contract.md 逐条） | `docs/archive/api-contract.md` |
 | SSE 事件（后端实际发出） | **8 种**：`status` `text` `thinking` `tool` `tool_result` `turn_end` `done` `compact` | `src/main.rs:669-710`、`src/compact.rs:484` |
 | SSE 事件（前端监听） | **8 种**：`status` `text` `thinking` `tool` `tool_result` `done` `context` `compact` | `frontend/src/sse.ts:51-60` |
 | 工具面 | **10 个** | harness `docs/DEVELOPMENT.md` §2.1 |
@@ -459,7 +461,7 @@ cd /src/celestea_harness && git log --numstat --pretty=format:'%H' -80 | awk 'NF
 | **纯逻辑/单元**（类型、投影、usage 提取、配置合并、guard 决策、协议解析、路径消毒、prompt 装配、compact 规划） | ≈180–220 | ≈55–65 | **1:1 复刻**为 `node:test`/`vitest`；用同一批 fixtures |
 | **宿主相关**（沙箱 rlimit/bwrap/超时、进程注册表、fork 健康、上游超时） | ≈80–110 | 0 | **改为契约测试**：断言结构化错误码、输出上限、进程组被杀、超时行为；能力探测失败时 **skip 而非 fail**（修掉 §1.2 那个 fail 行为） |
 | **golden / 回放对拍** | 新增 | 新增 | 从 Rust 实现导出 fixtures（真实 JSONL、SSE transcript、messages 投影、registry.tsv），TS 侧断言**逐字节/逐字段一致** |
-| **端点契约** | — | 39 端点 | 对 Hono app 发真实 HTTP 请求，断言 status + 错误原文 + 响应形状（`docs/api-contract.md` 是唯一真源） |
+| **端点契约** | — | 39 端点 | 对 Hono app 发真实 HTTP 请求，断言 status + 错误原文 + 响应形状（`docs/archive/api-contract.md` 是唯一真源） |
 | **前端** | — | 无测试框架 | 保持 `tsc --noEmit` + `FRONTEND-RULES.md` 人工核对（迁移不改前端） |
 
 ### 7.2 三条硬性验收线（不通过不进入下一阶段）
@@ -581,7 +583,7 @@ cd /src/celestea_harness && git log --numstat --pretty=format:'%H' -80 | awk 'NF
 
 | 项 | 内容 |
 |---|---|
-| 交付 | ① pnpm workspace 骨架（`packages/{core,llm,session,tools,agent-loop,workers,runtime}` + `apps/studio`）；② 从 `docs/api-contract.md` / 引擎 `DEVELOPMENT.md` 提取**机器可读契约**（39 端点 JSON、8 SSE 事件、`SessionEvent` JSONL schema、10 工具 spec、数据文件 schema）；③ golden fixture 导出器（跑 Rust 实现导出真实 JSONL / SSE transcript / messages 投影 / registry.tsv）；④ 回放对拍脚本骨架；⑤ Node 24 + Hono + node:test/vitest 工具链 |
+| 交付 | ① pnpm workspace 骨架（`packages/{core,llm,session,tools,agent-loop,workers,runtime}` + `apps/studio`）；② 从 `docs/archive/api-contract.md` / 引擎 `DEVELOPMENT.md` 提取**机器可读契约**（39 端点 JSON、8 SSE 事件、`SessionEvent` JSONL schema、10 工具 spec、数据文件 schema）；③ golden fixture 导出器（跑 Rust 实现导出真实 JSONL / SSE transcript / messages 投影 / registry.tsv）；④ 回放对拍脚本骨架；⑤ Node 24 + Hono + node:test/vitest 工具链 |
 | 验收 | `pnpm typecheck` 全绿；契约 JSON 入库；对拍脚本能跑通 3 个真实会话并输出 diff 报告（此时 diff 必然非空，只要求工具链可用） |
 | 回滚 | 不触碰生产，无需回滚 |
 | 风险 | 低 |
@@ -748,7 +750,7 @@ cd /src/celestea_harness && for d in crates/*/; do n=$(find "$d" -name '*.rs'|wc
 find . -name '*.rs'|wc -l; find . -name '*.rs' -print0|xargs -0 cat|wc -l
 cd /src/celestea_studio && find src -name '*.rs'|xargs wc -l|sort -n
 find frontend/src -name '*.ts'|xargs wc -l|tail -1; find frontend/src -name '*.css'|xargs wc -l|tail -1
-grep -c '\.route(' src/main.rs; grep -cE '^### ' docs/api-contract.md
+grep -c '\.route(' src/main.rs; grep -cE '^### ' docs/archive/api-contract.md
 
 # ---- 测试 ----
 export RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
@@ -792,7 +794,7 @@ cd /src/celestea_harness && git log --numstat --pretty=format:'%H' -80 | awk 'NF
 
 ## 附录 B：核对过的源码与文档
 
-- Studio：`docs/backend-language-eval.md`（W229 全文）、`docs/DEVELOPMENT.md`（W264 全文）、`docs/api-contract.md`（端点标题清单）、`src/{main,api,workspaces,providers,prompts,compact}.rs`（规模、符号、关键常量）、`frontend/src/sse.ts`、`frontend/package.json`、`Cargo.toml`、`workspaces.json`、`providers.json`（仅权限位）、`scripts/run-studio.sh`、`/etc/systemd/system/celestea-studio.service`、`/etc/nginx/sites-available/studio.celestea.top.ssl`
+- Studio：`docs/archive/backend-language-eval.md`（W229 全文）、`docs/DEVELOPMENT.md`（W264 全文）、`docs/archive/api-contract.md`（端点标题清单）、`src/{main,api,workspaces,providers,prompts,compact}.rs`（规模、符号、关键常量）、`frontend/src/sse.ts`、`frontend/package.json`、`Cargo.toml`、`workspaces.json`、`providers.json`（仅权限位）、`scripts/run-studio.sh`、`/etc/systemd/system/celestea-studio.service`、`/etc/nginx/sites-available/studio.celestea.top.ssl`
 - 引擎：`docs/DEVELOPMENT.md`（W265 全文 987 行）、`crates/*/src/**`（规模 + 关键实现：`tools/src/{sandbox,run_code,guard,http,process}.rs`、`session/src/{log,persistent,registry,mailbox}.rs`、`agent-loop/src/{lib,loop,context}.rs`、`runtime/src/{compose,run,config}.rs`、`llm/src/client.rs`、`workers/src/{registry,watchdog,tools}.rs`、`core/src/{session_log,tool,message,event_bus}.rs`）、`Cargo.toml` / `Cargo.lock`
 - 运行态：`/tmp/celestea-studio.log`（沙箱降级证据）、systemd 状态、只读 GET 延迟、真实 `cli-main.jsonl`（2 个）
 - 本报告所有数字均为 W268 在 2026-09-10 实测；架构师提供的数字（Studio 28.9s / 引擎 20.7s / 前端 5.4s / 重启 0.03s）已逐项复核，差异见 §1.5。

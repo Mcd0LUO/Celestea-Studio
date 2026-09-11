@@ -2,6 +2,8 @@
 
 # Celestea Studio · 部署与运维
 
+> 📦 历史文档（2026-09-11 归档）：描述的是已退役 Rust 后端 `celestea-studio.service` 的 systemd / nginx 部署（紧邻的原「已过时」提示仍然有效）。当前权威入口见 [/src/celestea_studio-ts/scripts/run-studio-ts.sh](/src/celestea_studio-ts/scripts/run-studio-ts.sh) 与 [/src/celestea_studio-ts/docs/README.md](/src/celestea_studio-ts/docs/README.md)。
+
 > 目标机器：`ubuntu-mc-server`，服务运行用户 `celestea`（uid 1003），仓库 `/src/celestea_studio`。
 > 本文所有内容都来自机器上的**实际配置**（systemd 单元、`scripts/run-studio.sh`、nginx 站点文件），不是设计稿。
 
