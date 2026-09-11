@@ -1,3 +1,5 @@
+> ⚠️ **已过时（仅存史）**：本文描述的是已退役的 Rust 后端 `celestea-studio.service`。生产现为 TypeScript 后端 `celestea-studio-ts.service`（127.0.0.1:3777）。退役与回滚见仓库根 `LEGACY-RUST-BACKEND.md`。
+
 # Celestea Studio · 部署与运维
 
 > 目标机器：`ubuntu-mc-server`，服务运行用户 `celestea`（uid 1003），仓库 `/src/celestea_studio`。
