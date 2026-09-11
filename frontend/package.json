@@ -9,8 +9,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "check": "tsc --noEmit && node tools/check-ui-copy.mjs",
-    "check:copy": "node tools/check-ui-copy.mjs"
+    "check": "tsc --noEmit && node tools/check-ui-copy.mjs && node tools/check-scope-hash.mjs",
+    "check:copy": "node tools/check-ui-copy.mjs",
+    "check:scope-hash": "node tools/check-scope-hash.mjs"
   },
   "dependencies": {
     "highlight.js": "^11.11.1",
