@@ -53,7 +53,7 @@ export function loadToolsSection(): Promise<void> {
     })
     .catch((err: unknown) => {
       countEl.textContent = '—';
-      off.appendChild(el('div', 'side-note err', '工具接口不可用'));
+      off.appendChild(el('div', 'side-note err', '工具列表暂不可用'));
       off.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
       boxEl.replaceChildren(...off.childNodes);
     });

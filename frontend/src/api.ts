@@ -32,13 +32,48 @@ import type {
 export class ApiError extends Error {
   readonly status: number;
   readonly data: unknown;
+  /**
+   * 原始技术细节（HTTP 状态行 / 服务端 error 原文 / 浏览器网络异常文本）。
+   * 只供 console 与日志排查，不得拼进任何会渲染给用户的字符串。
+   */
+  readonly technical: string;
 
-  constructor(message: string, status = 0, data: unknown = null) {
+  constructor(message: string, status = 0, data: unknown = null, technical = '') {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.data = data;
+    this.technical = technical;
   }
+}
+
+/**
+ * 状态码 → 面向用户的固定短语（不透传服务端/浏览器原文）。
+ * 各 UI 落点统一以「X失败：<短语>」呈现，后缀永远来自这里。
+ */
+function userPhrase(status: number): string {
+  if (status === 0) return '无法连接服务，请稍后重试';
+  if (status === 400 || status === 422) return '请求内容有误，请检查后重试';
+  if (status === 401 || status === 403) return '没有权限执行该操作';
+  if (status === 404 || status === 405) return '当前版本不支持该操作';
+  if (status === 409) return '当前状态暂时无法完成该操作，请稍后重试';
+  if (status === 429) return '操作过于频繁，请稍后重试';
+  if (status >= 500) return '服务暂时不可用，请稍后重试';
+  return '服务暂时无法完成请求，请稍后重试';
+}
+
+/**
+ * 服务端响应体 error 字段 / 任意底层异常 → 面向用户的固定短语。
+ * 原始细节只写 console（开发者排查用），绝不进入 UI 文案。
+ */
+export function userErrorText(detail: unknown, phrase = '服务暂时无法完成请求，请稍后重试'): string {
+  if (detail instanceof ApiError) {
+    if (detail.technical) console.warn('[api] 服务端详情：' + detail.technical);
+    return detail.message;
+  }
+  const raw = detail instanceof Error ? detail.message : typeof detail === 'string' ? detail : '';
+  if (raw.trim() !== '') console.warn('[api] 服务端详情：' + raw);
+  return phrase;
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -46,7 +81,9 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     res = await fetch(path, init);
   } catch (e) {
-    throw new ApiError('网络不可达（' + (e instanceof Error ? e.message : String(e)) + '）', 0);
+    const detail = e instanceof Error ? e.message : String(e);
+    console.warn('[api] ' + path + ' 网络层失败：' + detail);
+    throw new ApiError(userPhrase(0), 0, null, detail);
   }
   let data: unknown = null;
   try {
@@ -56,13 +93,12 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const obj = data as { error?: unknown } | null;
-    const msg =
-      obj && typeof obj.error === 'string'
+    const detail =
+      obj && typeof obj.error === 'string' && obj.error.trim() !== ''
         ? obj.error
-        : res.status === 405 || res.status === 404
-          ? 'HTTP ' + res.status + ' · 后端未开放该接口'
-          : 'HTTP ' + res.status;
-    throw new ApiError(msg, res.status, data);
+        : 'HTTP ' + res.status;
+    console.warn('[api] ' + path + ' → HTTP ' + res.status + '：' + detail);
+    throw new ApiError(userPhrase(res.status), res.status, data, detail);
   }
   return (data ?? {}) as T;
 }

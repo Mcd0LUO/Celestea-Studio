@@ -211,7 +211,7 @@ function onStatus(ctx: SessionPane, p: StatusPayload): void {
     }
   }
   if (p.phase === 'lagged') {
-    renderInfoBlock(ctx, '检测到慢客户端事件（lagged），已合并跳过', 'warn');
+    renderInfoBlock(ctx, '部分输出因网络延迟被合并', 'warn');
   }
   if (p.hint) {
     renderInfoBlock(ctx, String(p.hint), 'warn');
@@ -408,7 +408,7 @@ async function runCompact(ctx: SessionPane): Promise<void> {
       return;
     }
     localCompactAt = Date.now();
-    flashStatus(r.note || '已压缩：摘要轮 + 最近4轮', 'ok');
+    flashStatus(r.note || '历史已压缩', 'ok');
     await restoreSessionHistory(ctx); // 消息区 reload
   } catch (err) {
     flashStatus('压缩失败：' + msgOf(err), 'err', 8_000);
@@ -561,7 +561,7 @@ async function injectInput(ctx: SessionPane, t: string, mode: SubmitMode): Promi
         const r2 = await api.turn(t, sid(ctx), 'steer');
         if (r2.injected !== false) {
           const lane = laneLabel(r2.inbox_target ?? 'next-step');
-          ok('后端未支持排队 → 已按插话送达' + (lane ? '（' + lane + '）' : ''));
+          ok('当前版本不支持排队 → 已按插话送达' + (lane ? '（' + lane + '）' : ''));
           return;
         }
       } catch {

@@ -14,12 +14,12 @@
       <div class="topbar-left">
         <span class="logo" aria-hidden="true"><span></span></span>
         <span class="brand">Celestea Studio</span>
-        <span class="brand-tag" id="brandVersion" title="Celestea Studio 前端构建版本">Studio v…</span>
+        <span class="brand-tag" id="brandVersion" title="Celestea Studio 构建版本">Studio v…</span>
       </div>
       <div class="topbar-right">
         <button id="btnTheme" class="btn btn-quiet btn-theme" title="主题（黑白 · 唯一主题）">黑白</button>
         <button id="btnSidebar" class="btn btn-quiet" title="收起/展开左侧面板">收起</button>
-        <button id="btnConfig" class="btn btn-quiet" title="运行配置（热调 model/推理档位/密钥等）">配置</button>
+        <button id="btnConfig" class="btn btn-quiet" title="运行配置（模型 / 推理档位 / 密钥等）">配置</button>
       </div>
     </header>
 
@@ -54,7 +54,7 @@
         <div id="messages" tabindex="-1"></div>
 
         <!-- ---------- statusline（模型 / 上下文环 / 吞吐，发送栏正上方） ---------- -->
-        <div id="statusline" class="statusline" title="上下文占用 · 模型 · 思考强度 · 吞吐 · 缓存命中（GET /api/status + SSE 增量）">
+        <div id="statusline" class="statusline" title="上下文占用 · 模型 · 思考强度 · 吞吐 · 缓存命中">
           <div class="sl-row sl-row-main">
             <span class="sl-ring" id="slRing" title="上下文占用">
               <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true">
@@ -79,7 +79,7 @@
             <span class="sl-sep">·</span>
             <span class="sl-cache" id="slCache" title="缓存命中：最近一次请求">缓存 —</span>
             <span class="sl-sep">·</span>
-            <span class="sl-steps" id="slSteps">step —</span>
+            <span class="sl-steps" id="slSteps">— 步</span>
           </div>
         </div>
 
@@ -89,9 +89,9 @@
             <span id="statusText">连接中…</span>
           </div>
           <div class="sb-right">
-            <span id="statusTurn">turn —</span>
+            <span id="statusTurn">第 — 轮</span>
             <span class="sb-sep">·</span>
-            <span id="statusStep">step —</span>
+            <span id="statusStep">— 步</span>
             <span class="sb-sep">·</span>
             <span id="statusTime">00:00</span>
           </div>
@@ -132,7 +132,7 @@
           <section class="settings-pane active" data-pane="config">
             <header class="settings-pane-head">
               <h4>运行配置</h4>
-              <span class="settings-sec-note">热调 · 保存后下一轮生效</span>
+              <span class="settings-sec-note">保存后下一轮生效</span>
             </header>
             <div class="settings-pane-body" id="settingsConfig"><div class="side-note">加载中…</div></div>
             <div class="cfg-hintline" id="settingsHint"></div>

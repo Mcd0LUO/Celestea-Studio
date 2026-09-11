@@ -36,13 +36,13 @@ function refreshHealthChip(): void {
   void api
     .health()
     .then((h) => {
-      need<HTMLElement>('#sideFoot').textContent = (h.base_url || '') + ' · ' + h.model;
+      need<HTMLElement>('#sideFoot').textContent = h.model || '';
       // /api/status 未上线前，用 health 的模型填补 statusline
       if (h.model) statusline.merge({ model: h.model });
       if (!S.streaming) setStatus('就绪 · 在线', 'ok');
     })
     .catch(() => {
-      if (!S.streaming) setStatus('后端不可达', 'err');
+      if (!S.streaming) setStatus('无法连接服务', 'err');
     });
 }
 
@@ -71,7 +71,7 @@ function init(): void {
   const verEl = document.getElementById('brandVersion');
   if (verEl) {
     verEl.textContent = 'Studio v' + APP_VERSION;
-    verEl.title = 'Celestea Studio 前端 · 构建于 ' + BUILD_TIME;
+    verEl.title = 'Celestea Studio · 构建于 ' + BUILD_TIME;
   }
 
   // 7) 消息 rail（左侧灵动长条）+ 聊天主循环 + 启动恢复（按活跃会话） + SSE

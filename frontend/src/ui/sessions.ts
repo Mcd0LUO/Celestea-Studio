@@ -13,7 +13,7 @@
 //         会话行显示运行态点，运行态变化只做局部 class 更新（铁律 6）。
 //   图标：内联 SVG（不引图标库）。端点缺失（W243 并行开发）优雅降级。
 // ============================================================================
-import { api, ApiError } from '../api';
+import { api, ApiError, userErrorText } from '../api';
 import { el, need } from '../utils/dom';
 import { popOverlay, pushOverlay, type OverlayHandle } from '../utils/overlays';
 import type { SessionInfo, WorkspaceInfo } from '../types';
@@ -232,23 +232,23 @@ function openSessionRow(
   S.selSession = id;
   updateActiveHighlight(container);
   updateBusyDots(container);
-  note('已切换到会话：' + id);
+  note(meta?.title ? '已切换到会话：' + meta.title : '已切换会话');
   void api
     .activateSession(id)
     .then((r) => {
-      if (r.ok === false) note('视图已打开 · 激活失败：' + (r.error || '—'));
+      if (r.ok === false) note('视图已打开 · 未能激活');
     })
     .catch((err: unknown) => {
       if (err instanceof ApiError && err.status === 409) {
         note('该会话运行中（视图已打开 · 实时流可见）');
       } else {
-        note('视图已打开 · 激活接口不可用：' + (err instanceof Error ? err.message : String(err)));
+        note('视图已打开 · 未能激活');
       }
     });
 }
 
-async function archiveSession(container: HTMLElement, id: string): Promise<void> {
-  const ok = await confirmDialog({ title: '归档会话', message: '确认归档会话「' + id + '」？', okLabel: '归档' });
+async function archiveSession(container: HTMLElement, id: string, label: string): Promise<void> {
+  const ok = await confirmDialog({ title: '归档会话', message: '确认归档会话「' + label + '」？', okLabel: '归档' });
   if (!ok) return;
   try {
     await api.archiveSession(id);
@@ -258,9 +258,9 @@ async function archiveSession(container: HTMLElement, id: string): Promise<void>
   }
 }
 
-async function deleteSession(container: HTMLElement, id: string): Promise<void> {
+async function deleteSession(container: HTMLElement, id: string, label: string): Promise<void> {
   const ok = await confirmDialog({
-    title: '删除会话「' + id + '」',
+    title: '删除会话「' + label + '」',
     message: '删除后可在回收目录恢复，确认？',
     okLabel: '删除',
     danger: true,
@@ -293,12 +293,12 @@ async function branchSession(container: HTMLElement, id: string): Promise<void> 
   try {
     const r = await api.branchSession(id, t.trim() === '' ? undefined : t.trim());
     if (r.ok === false) {
-      note('分支失败：' + (r.error || '—'));
+      note('分支失败，请稍后重试');
       return;
     }
     const newId = r.id ?? r.branch;
     if (newId) S.selSession = newId; // 高亮新分支
-    note('已创建分支' + (newId ? '：' + newId : ''));
+    note('已创建分支');
     void loadTreeInto(container, null);
   } catch (err) {
     note('分支失败：' + (err instanceof Error ? err.message : String(err)));
@@ -366,7 +366,7 @@ function renderToolbar(container: HTMLElement): void {
   sortBtn.type = 'button';
   sortBtn.appendChild(svgIcon('sort'));
   sortBtn.appendChild(el('span', 'ws-toolbtn-label', sortMode === 'active' ? '活跃' : '名称'));
-  sortBtn.title = '排序：' + (sortMode === 'active' ? '最近活跃（modified）' : '名称') + ' · 点击切换';
+  sortBtn.title = '排序：' + (sortMode === 'active' ? '最近活跃' : '名称') + ' · 点击切换';
   sortBtn.addEventListener('click', () => {
     sortMode = sortMode === 'active' ? 'name' : 'active';
     void loadTreeInto(container, null);
@@ -428,7 +428,8 @@ function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
     leaf.appendChild(cb);
   }
   leaf.appendChild(svgIcon('file'));
-  const name = el('span', 'sess-leaf-name', s.title || truncateName(id) || '(未命名)');
+  const displayName = s.title || truncateName(id) || '(未命名)';
+  const name = el('span', 'sess-leaf-name', displayName);
   leaf.appendChild(name);
   const kidCount = workersByParent.get(id) ?? 0;
   if (kidCount > 0) {
@@ -437,10 +438,9 @@ function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
     leaf.appendChild(badge);
   }
   const bits: string[] = [];
-  if (s.events !== undefined) bits.push('ev:' + s.events);
-  bits.push(truncateName(id));
-  leaf.appendChild(el('span', 'sess-leaf-meta', bits.join(' · ')));
-  leaf.title = id + (s.file ? ' · ' + s.file : '');
+  if (s.events !== undefined) bits.push(s.events + ' 次事件');
+  if (bits.length) leaf.appendChild(el('span', 'sess-leaf-meta', bits.join(' · ')));
+  leaf.title = displayName + '（点击打开）';
 
   if (!batchMode) {
     const kebab = el('button', 'sess-kebab', '⋯') as HTMLButtonElement;
@@ -456,9 +456,9 @@ function renderLeaf(container: HTMLElement, s: SessionInfo): HTMLElement {
             openSessionRow(container, id, { kind: s.kind === 'worker' ? 'worker' : 'session', title: s.title }),
         },
         { label: '重命名', onPick: () => void renameSession(container, id, s.title || truncateName(id)) },
-        { label: '归档', onPick: () => void archiveSession(container, id) },
+        { label: '归档', onPick: () => void archiveSession(container, id, displayName) },
         { label: '分支', onPick: () => void branchSession(container, id) },
-        { label: '删除', danger: true, onPick: () => void deleteSession(container, id) },
+        { label: '删除', danger: true, onPick: () => void deleteSession(container, id, displayName) },
       ]);
     });
     leaf.appendChild(kebab);
@@ -574,9 +574,9 @@ function renderWorkerRow(host: HTMLElement, w: SessionInfo, child: boolean): HTM
   row.appendChild(st);
   const bits: string[] = [];
   if (w.model) bits.push(String(w.model));
-  if (w.events !== undefined) bits.push('ev:' + w.events);
-  row.appendChild(el('span', 'ws-worker-meta', bits.join(' · ')));
-  row.title = id + (w.model ? ' · ' + w.model : '') + '（点击打开该 worker 会话视图：只读）';
+  if (w.events !== undefined) bits.push(w.events + ' 次事件');
+  if (bits.length) row.appendChild(el('span', 'ws-worker-meta', bits.join(' · ')));
+  row.title = workerTitleOf(w) + (w.model ? ' · ' + w.model : '') + '（点击打开该 worker 会话视图：只读）';
   row.addEventListener('click', () => {
     const hostEl = document.getElementById('sessionTree') ?? host;
     openSessionRow(hostEl, id, { kind: 'worker', title: w.title || id });
@@ -596,7 +596,7 @@ function renderWorkerGroup(host: HTMLElement, workers: SessionInfo[], open: bool
   det.open = open;
   const sum = document.createElement('summary');
   sum.className = 'ws-worker-summary';
-  sum.appendChild(el('span', null, '引擎 Worker'));
+  sum.appendChild(el('span', null, '后台任务'));
   sum.appendChild(el('span', 'ws-worker-count', String(workers.length)));
   det.appendChild(sum);
 
@@ -631,7 +631,7 @@ function renderWorkerGroup(host: HTMLElement, workers: SessionInfo[], open: bool
       const pname = el('span', 'ws-worker-parent-name', parentSession?.title || truncateName(parentId));
       head.appendChild(pname);
       head.appendChild(el('span', 'ws-worker-count', String(kids.length)));
-      head.title = '父会话：' + parentId + '（点击打开父会话视图）';
+      head.title = '点击打开父会话视图';
       head.addEventListener('click', () => {
         const hostEl = document.getElementById('sessionTree') ?? host;
         openSessionRow(hostEl, parentId, { kind: 'session', title: parentSession?.title });
@@ -838,7 +838,7 @@ export function newSession(presetWs?: string): void {
       })
       .then(async (r) => {
         if (r.ok === false) {
-          throw new Error(r.error || '后端拒绝');
+          throw new Error(userErrorText(r.error, '服务拒绝了该操作'));
         }
         // 定位新会话 id（响应优先；缺失则按标题取最新）
         let id = r.id;
@@ -854,7 +854,7 @@ export function newSession(presetWs?: string): void {
         }
         if (!id) {
           status.className = 'ws-fs-status err';
-          status.textContent = '会话已创建，但无法定位其 id——请刷新会话树后手动激活';
+          status.textContent = '会话已创建，请刷新列表后手动打开';
           close();
           void loadSessions();
           return;
@@ -863,14 +863,14 @@ export function newSession(presetWs?: string): void {
         openSession(id, { kind: 'session', title: t });
         activeSession = id;
         S.selSession = id;
-        note('已创建并打开会话：' + id);
+        note('已创建并打开会话：' + t);
         void api
           .activateSession(id)
           .then((ar) => {
-            if (ar.ok === false) note('视图已打开 · 激活失败：' + (ar.error || '—'));
+            if (ar.ok === false) note('视图已打开 · 未能激活');
           })
           .catch((err: unknown) => {
-            note('视图已打开 · 激活接口不可用：' + (err instanceof Error ? err.message : String(err)));
+            note('视图已打开 · ' + userErrorText(err, '未能激活'));
           });
         close();
         void loadSessions();
@@ -949,7 +949,7 @@ export function newWorkspace(): void {
       r = await api.fsBrowse(path);
     } catch (err) {
       status.className = 'ws-fs-status err';
-      status.textContent = '文件浏览暂不可用（' + (err instanceof Error ? err.message : String(err)) + '）· 请直接在下方输入路径';
+      status.textContent = '文件浏览暂不可用 · 请直接在下方输入路径';
       const off = document.createElement('div');
       off.appendChild(el('div', 'side-note', '可编辑底部路径后点「跳转」，或直接填写名称+路径创建'));
       tree.replaceChildren(...off.childNodes);
@@ -959,7 +959,7 @@ export function newWorkspace(): void {
     }
     if (r.error) {
       status.className = 'ws-fs-status err';
-      status.textContent = '浏览失败：' + r.error;
+      status.textContent = '浏览失败：' + userErrorText(r.error, '请手动输入目录路径');
     } else {
       status.textContent = '已选择目录：' + (r.path || '/');
       status.className = 'ws-fs-status ok';
@@ -1024,7 +1024,7 @@ export function newWorkspace(): void {
       .then((r) => {
         if (r.ok === false) {
           status.className = 'ws-fs-status err';
-          status.textContent = '注册失败：' + (r.error || '—');
+          status.textContent = '注册失败：' + userErrorText(r.error, '请检查目录路径');
           create.disabled = false;
           create.textContent = '注册';
           return;
@@ -1092,7 +1092,7 @@ export async function loadTreeInto(container: HTMLElement, countEl: HTMLElement 
     else if (act?.id) activeSession = act.id;
   } catch (err) {
     stopWorkerPoll();
-    off.appendChild(el('div', 'side-note err', '会话接口不可用'));
+    off.appendChild(el('div', 'side-note err', '会话列表暂不可用'));
     off.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
     container.replaceChildren(...off.childNodes);
     if (countEl) countEl.textContent = '—';

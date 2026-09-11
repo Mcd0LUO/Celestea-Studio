@@ -224,7 +224,7 @@ export async function restoreSessionHistory(
     if (!ctx.streaming) {
       appendNote(
         ctx,
-        '历史恢复暂不可用（' + (err instanceof Error ? err.message : String(err)) + '）',
+        '历史恢复暂不可用',
       );
     }
     return;
@@ -254,7 +254,7 @@ export async function restoreSessionHistory(
   if (recent.length) {
     const sep = el('div', 'live-sep');
     sep.appendChild(el('span', null, '以下为本次会话'));
-    sep.title = '上方为刷新前恢复的存量消息';
+    sep.title = '上方为更早的消息';
     off.appendChild(sep);
   }
   if (guard && !guard()) return;

@@ -13,7 +13,7 @@
 //   新增自定义档位（Enter/失焦确认、Esc 取消、重名去重提示）；自定义片与固定片
 //   同 class 同行为，存量非标准档位也以选中片呈现于「+」左侧。
 // ============================================================================
-import { api } from '../api';
+import { api, userErrorText } from '../api';
 import { el, need } from '../utils/dom';
 import { popOverlay, pushOverlay, type OverlayHandle } from '../utils/overlays';
 import type { ProviderInfo, ProviderModelSpec } from '../types';
@@ -131,7 +131,7 @@ function renderDefaultPicker(container: HTMLElement): void {
   const wrap = el('div', 'prov-default-card');
   const head = el('div', 'prov-default-head');
   head.appendChild(el('span', 'prov-default-title', '默认模型'));
-  head.appendChild(el('span', 'prov-default-note', '切换即热应用（POST /api/providers/default）'));
+  head.appendChild(el('span', 'prov-default-note', '切换后立即生效'));
   wrap.appendChild(head);
   const body = el('div', 'prov-default-body');
   body.appendChild(el('span', 'prov-default-label', '当前默认'));
@@ -164,7 +164,7 @@ function renderDefaultPicker(container: HTMLElement): void {
       .setDefaultModel(v)
       .then(() => {
         defaultModel = v;
-        msg.textContent = '已切换默认模型 · 热应用';
+        msg.textContent = '已切换默认模型';
         msg.className = 'prov-default-msg ok';
         void loadProviders();
       })
@@ -196,7 +196,7 @@ export async function loadProviders(): Promise<void> {
     providers = d.providers ?? [];
     defaultModel = d.default_model ?? null;
   } catch (err) {
-    off.appendChild(el('div', 'side-note err', '提供商接口暂不可用'));
+    off.appendChild(el('div', 'side-note err', '提供商列表暂不可用'));
     off.appendChild(el('div', 'side-note', fmtErr(err)));
     boxEl.replaceChildren(...off.childNodes);
     return;
@@ -537,7 +537,7 @@ function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs
   modelsHead.appendChild(el('span', 'prov-models-title', '模型'));
   const fetchBtn = el('button', 'btn btn-soft btn-mini', '获取模型') as HTMLButtonElement;
   fetchBtn.type = 'button';
-  fetchBtn.title = '据请求地址+Key 调用 models/fetch 快速填入（将先保存该提供商）';
+  fetchBtn.title = '从服务商拉取可用模型（会先保存当前填写内容）';
   modelsHead.appendChild(fetchBtn);
   root.appendChild(modelsHead);
   const modelsBox = el('div', 'prov-models');
@@ -578,7 +578,7 @@ function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs
       .then((r) => {
         if (r.ok === false || (r.ok === undefined && r.error)) {
           status.className = 'prov-editor-status err';
-          status.textContent = '测试失败：' + (r.error || '—');
+          status.textContent = '测试失败：' + userErrorText(r.error, '请检查请求地址与 Key');
           return;
         }
         status.className = 'prov-editor-status ok';
@@ -610,14 +610,14 @@ function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs
         if (seq !== fetchSeq) return; // 旧响应：丢弃，不覆盖新状态
         if (r.ok === false || (r.ok === undefined && r.error)) {
           status.className = 'prov-editor-status err';
-          status.textContent = '获取失败：' + (r.error || '—');
+          status.textContent = '获取模型失败：' + userErrorText(r.error, '请检查请求地址与 Key');
           return;
         }
         // W258 任务 4：fetch 结果只缓存在局部变量（got），不自动写入表单
         const got = r.models ?? [];
         if (!got.length) {
           status.className = 'prov-editor-status';
-          status.textContent = '上游未返回任何模型';
+          status.textContent = '未获取到任何模型';
           return;
         }
         const existing = new Set(e.rows.map((x) => x.id.value.trim()).filter(Boolean));
@@ -658,7 +658,7 @@ function buildProviderForm(p: ProviderInfo | null, hooks: FormHooks): EditorRefs
       .then((r) => {
         if (r.ok === false) {
           status.className = 'prov-editor-status err';
-          status.textContent = '保存失败：' + (r.error || '后端拒绝');
+          status.textContent = '保存失败：' + userErrorText(r.error, '请检查填写内容');
           save.disabled = false;
           return;
         }

@@ -7,7 +7,7 @@
 //   GET /api/prompts?workspace= · POST /api/prompts (upsert) · /{id}/delete · /{id}/default。
 //   第 11 轮铁律：列表刷新全部离屏构建 + 单次替换。
 // ============================================================================
-import { api } from '../api';
+import { api, userErrorText } from '../api';
 import { el, need } from '../utils/dom';
 import type { PromptInfo, PromptSection } from '../types';
 import { confirmDialog } from './confirm';
@@ -83,7 +83,7 @@ function renderList(): void {
       void api
         .setDefaultPrompt(p.id, scope === 'global' ? undefined : curWs || undefined)
         .then(() => {
-          note('已设为默认并热应用：' + (p.name || p.id));
+          note('已设为默认：' + (p.name || p.id));
           void loadPrompts();
         })
         .catch((err: unknown) => note('设为默认失败：' + fmtErr(err)));
@@ -101,7 +101,7 @@ function renderList(): void {
         void api
           .deletePrompt(p.id, scope === 'global' ? undefined : curWs || undefined)
           .then(() => {
-            note('已删除并热应用：' + (p.name || p.id));
+            note('已删除：' + (p.name || p.id));
             void loadPrompts();
           })
           .catch((err: unknown) => note('删除失败：' + fmtErr(err)));
@@ -162,7 +162,7 @@ function openEditor(existing: PromptInfo | null): void {
   const secWrap = el('div', 'prompt-secs');
   card.appendChild(secWrap);
   if (!sections.length) {
-    secWrap.appendChild(el('div', 'side-note', '（后端未返回段定义，覆盖编辑暂不可用；可直接保存名称级提示词）'));
+    secWrap.appendChild(el('div', 'side-note', '暂不支持分段编辑，可直接保存整体提示词'));
   }
   // 覆盖编辑器：未覆盖段 = 继承；textarea 非空 = 覆盖。
   // P0-4 回填：编辑已存在提示词时，必须把该 prompt 的 section_overrides
@@ -260,7 +260,7 @@ function openEditor(existing: PromptInfo | null): void {
       .then((r) => {
         if (r.ok === false) {
           status.className = 'ws-fs-status err';
-          status.textContent = '保存失败：' + (r.error || '—');
+          status.textContent = '保存失败：' + userErrorText(r.error, '请检查填写内容');
           save.disabled = false;
           save.textContent = '保存';
           return;
@@ -268,7 +268,7 @@ function openEditor(existing: PromptInfo | null): void {
         close();
         // persist+prepare+swap 全部成功后才会走到这里（409/500 都会抛错），
         // 所以此时提示「已热应用」是真实语义。
-        note('已保存并热应用：' + name);
+        note('已保存：' + name);
         void loadPrompts();
       })
       .catch((err: unknown) => {
@@ -299,7 +299,7 @@ export async function loadPrompts(): Promise<void> {
     resp = await api.prompts(scope === 'workspace' ? curWs || undefined : undefined);
   } catch (err) {
     if (seq !== loadSeq) return; // 旧 scope 的失败结果，丢弃
-    off.appendChild(el('div', 'side-note err', '后端未开放提示词注册'));
+    off.appendChild(el('div', 'side-note err', '当前版本不支持提示词管理'));
     off.appendChild(el('div', 'side-note', fmtErr(err)));
     boxEl.replaceChildren(...off.childNodes);
     return;

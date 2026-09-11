@@ -7,7 +7,7 @@
 // W227：模型/推理档位改为可点击按钮 → 紧凑下拉面板快速切换（POST /api/config），
 //   409（轮次进行中）→ 提示并挂起，SSE done 后自动重试一次；400/500 → 内联报错。
 // ============================================================================
-import { api, ApiError } from './api';
+import { api, ApiError, userErrorText } from './api';
 import { el, fmtCompact, need } from './utils/dom';
 import { popOverlay, pushOverlay, type OverlayHandle } from './utils/overlays';
 import type {
@@ -77,7 +77,7 @@ export class Statusline {
     this.stepsEl = need<HTMLElement>('#slSteps', this.el);
     this.hintEl = need<HTMLElement>('#slHint', this.el);
     this.ringProg.style.strokeDasharray = String(RING_C);
-    this.el.title = '上下文占用 · 模型 · 思考强度 · 吞吐 · 缓存命中（GET /api/status + SSE 增量）';
+    this.el.title = '上下文占用 · 模型 · 思考强度 · 吞吐 · 缓存命中';
 
     // W227：模型/档位点击快速切换
     this.modelEl.addEventListener('click', () => this.togglePopup('model'));
@@ -205,7 +205,7 @@ export class Statusline {
     } catch (err) {
       if (this.popup !== popup) return;
       body.replaceChildren(
-        el('div', 'sl-popup-error', '无法读取 /api/config：' + (err instanceof Error ? err.message : String(err))),
+        el('div', 'sl-popup-error', userErrorText(err, '无法读取当前配置，请稍后重试')),
       );
       return;
     }
@@ -234,7 +234,7 @@ export class Statusline {
       // 清单缺失 → 内联文本输入降级
       const row = el('div', 'sl-popup-textrow');
       const input = el('input', 'sl-popup-input') as HTMLInputElement;
-      input.placeholder = '模型 id（后端未提供可选清单）';
+      input.placeholder = '模型名称';
       input.value = cur;
       row.appendChild(input);
       const applyBtn = el('button', 'btn btn-accent btn-mini', '应用') as HTMLButtonElement;
@@ -244,7 +244,7 @@ export class Statusline {
       });
       row.appendChild(applyBtn);
       off.appendChild(row);
-      off.appendChild(el('div', 'sl-popup-note', '后端未返回 available.models，手动输入'));
+      off.appendChild(el('div', 'sl-popup-note', '请输入模型名称'));
       body.replaceChildren(...off.childNodes);
       return;
     }
@@ -368,10 +368,9 @@ export class Statusline {
     } catch (err) {
       // /api/status 未上线或后端不可达：保持占位符，不打断聊天
       this.el.classList.add('sl-stale');
-      this.staleMsg = '状态接口暂不可用';
+      this.staleMsg = '状态信息暂不可用';
       this.renderHint();
-      const msg = err instanceof Error ? err.message : String(err);
-      this.el.title = 'GET /api/status 失败：' + msg;
+      this.el.title = userErrorText(err, '状态信息暂不可用');
     }
   }
 
@@ -406,7 +405,7 @@ export class Statusline {
     this.renderCache(s.usage);
 
     const steps = s.steps;
-    this.stepsEl.textContent = typeof steps === 'number' && steps >= 1 ? 'step ' + steps : 'step —';
+    this.stepsEl.textContent = typeof steps === 'number' && steps >= 1 ? '第 ' + steps + ' 步' : '— 步';
 
     // W514：后端 busy 字段（多会话状态显示）——只切 class，不改布局
     this.el.classList.toggle('sl-live', s.busy === true);
@@ -420,7 +419,7 @@ export class Statusline {
   private renderCache(u: UsageSnapshot | undefined): void {
     if (!u || !(u.prompt_tokens > 0)) {
       this.cacheEl.textContent = '缓存 —';
-      this.cacheEl.title = '缓存命中：暂无引擎用量数据（GET /api/status 的 usage）';
+      this.cacheEl.title = '暂无缓存命中数据';
       return;
     }
     const pct = Math.round(clamp01(u.cache_hit_ratio) * 100);
@@ -429,11 +428,11 @@ export class Statusline {
     this.cacheEl.title =
       '最近一次请求：命中 ' +
       u.cache_read +
-      ' / 提示 ' +
+      ' / 输入 ' +
       u.prompt_tokens +
       ' tokens' +
       (t
-        ? '（累计 ' + (clamp01(t.cache_hit_ratio) * 100).toFixed(1) + '%，命中 ' + t.cache_read + ' / 提示 ' + t.prompt_tokens + ' tokens）'
+        ? '（累计 ' + (clamp01(t.cache_hit_ratio) * 100).toFixed(1) + '%，命中 ' + t.cache_read + ' / 输入 ' + t.prompt_tokens + ' tokens）'
         : '');
   }
 }

@@ -17,11 +17,11 @@ export function setStatus(text: string, cls?: string): void {
 }
 
 export function setStatusTurn(n: number | null): void {
-  StatusTurn.textContent = typeof n === 'number' && n >= 1 ? 'turn ' + n : 'turn —';
+  StatusTurn.textContent = typeof n === 'number' && n >= 1 ? '第 ' + n + ' 轮' : '第 — 轮';
 }
 
 export function setStatusStep(n: number | string | null): void {
-  StatusStep.textContent = 'step ' + (n && String(n) !== '' ? String(n) : '—');
+  StatusStep.textContent = '第 ' + (n && String(n) !== '' ? String(n) : '—') + ' 步';
 }
 
 function tickTimer(): void {

@@ -72,7 +72,7 @@ export function buildToolCard(d: ToolCardData): ToolCardRef {
   head.className = 'toolcard-head';
   head.setAttribute('aria-expanded', 'false');
   const row1 = el('div', 'toolcard-row1');
-  row1.appendChild(el('span', 'step-tag', 'step ' + d.step));
+  row1.appendChild(el('span', 'step-tag', '第 ' + d.step + ' 步'));
   row1.appendChild(el('span', 'toolcard-name', d.name));
   const state = el('span', 'toolcard-state');
   state.innerHTML = '<span class="ts-dot"></span><span class="ts-label">运行中</span>';

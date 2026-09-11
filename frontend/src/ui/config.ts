@@ -84,21 +84,21 @@ function renderForm(cfg: ConfigInfo, statusWindow: number | null, container: HTM
 
   const modelCtl: HTMLSelectElement | HTMLInputElement = models.length
     ? ctl.select(models.map((m) => ({ value: m.id, label: m.name })), cfg.model ?? null)
-    : ctl.text(cfg.model ?? '', '模型名（后端未提供可选清单，手动输入）');
-  form.appendChild(ctl.field('模型', modelCtl, models.length ? '' : '后端未返回 available.models'));
+    : ctl.text(cfg.model ?? '', '模型名称');
+  form.appendChild(ctl.field('模型', modelCtl, models.length ? '' : '请手动填写模型名称'));
 
   const effortOptions: { value: string; label: string }[] = [{ value: '', label: '标准（清除）' }];
   for (const e of efforts.length ? efforts : EFFORT_FALLBACK) {
     effortOptions.push({ value: e, label: e });
   }
   const effortCtl = ctl.select(effortOptions, cfg.reasoning_effort ?? null);
-  form.appendChild(ctl.field('推理档位', effortCtl, efforts.length ? '空 = 标准档' : '后端未返回 available.efforts'));
+  form.appendChild(ctl.field('推理档位', effortCtl, efforts.length ? '空 = 标准档' : '请手动填写档位'));
 
   const baseUrlCtl = ctl.text(cfg.base_url ?? '', 'https://…/v1');
   form.appendChild(ctl.field('Base URL', baseUrlCtl));
 
-  const apiKeyCtl = ctl.text('', '留空保持不变（后端不会回传密钥）', 'password');
-  form.appendChild(ctl.field('API Key', apiKeyCtl, '仅用于热调；不会从后端读取明文'));
+  const apiKeyCtl = ctl.text('', '留空则保持当前密钥不变', 'password');
+  form.appendChild(ctl.field('API Key', apiKeyCtl, '不会读取或显示已保存的密钥明文'));
 
   const ctxWin = cfg.context_window ?? cfg.context_window_tokens ?? statusWindow;
   const ctxCtl = ctl.num(ctxWin, '默认 1M（1000000 tokens）');
@@ -164,16 +164,16 @@ function renderForm(cfg: ConfigInfo, statusWindow: number | null, container: HTM
       .saveConfig(patch)
       .then((d) => {
         status.className = 'cfg-status ok';
-        status.textContent = d.ok === false ? '保存失败：' + (d.error || '后端拒绝') : '已保存 · 后端已应用';
+        status.textContent = d.ok === false ? '保存失败，请重试' : '已保存';
         if (d.ok !== false) window.dispatchEvent(new Event('studio:config-saved'));
       })
       .catch((err: unknown) => {
         status.className = 'cfg-status err';
         const e = err as Error;
         if (err instanceof ApiError && err.status === 409) {
-          status.textContent = '轮次进行中（409）：配置将在本轮结束后生效，请稍后重新保存。';
+          status.textContent = '本轮对话仍在进行，请在结束后再保存。';
         } else if (err instanceof ApiError && (err.status === 405 || err.status === 404)) {
-          status.textContent = '后端未开放配置保存（HTTP ' + err.status + '）：当前后端无 POST /api/config 端点，请更新后端或编辑 celestea.toml 重启。';
+          status.textContent = '当前版本不支持在线保存配置，请升级后重试';
         } else {
           status.textContent = '保存失败：' + (e.message || String(err));
         }
@@ -200,7 +200,7 @@ export async function loadConfig(): Promise<void> {
   try {
     cfg = await api.config();
   } catch (err) {
-    off.appendChild(el('div', 'side-note err', '配置接口不可用'));
+    off.appendChild(el('div', 'side-note err', '配置暂不可用'));
     off.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
     box.replaceChildren(...off.childNodes);
     statusHint.textContent = '';
@@ -219,7 +219,7 @@ export async function loadConfig(): Promise<void> {
     statusHint.textContent = '';
     box.replaceChildren(...off.childNodes);
   } catch (err) {
-    off.appendChild(el('div', 'side-note err', '配置接口不可用'));
+    off.appendChild(el('div', 'side-note err', '配置暂不可用'));
     off.appendChild(el('div', 'side-note', err instanceof Error ? err.message : String(err)));
     box.replaceChildren(...off.childNodes);
     statusHint.textContent = '';
