@@ -74,7 +74,7 @@ function toNum(v: string): number | null {
 // ---- 表单 ---------------------------------------------------------------------
 
 function renderForm(cfg: ConfigInfo, statusWindow: number | null, container: HTMLElement): void {
-  container.innerHTML = '';
+  container.replaceChildren();
   const form = el('form', 'cfg-form');
 
   // W227 修复：available.models 是 {id,name,reasoning} 对象数组——

@@ -8,6 +8,7 @@
 //   缓存命中时直接写回 HTML，未命中才调 hljs；超大单块（>32KB）跳过。
 // ============================================================================
 import hljs from 'highlight.js/lib/core';
+import { renderHtmlSafe } from './sanitize';
 import bash from 'highlight.js/lib/languages/bash';
 import cpp from 'highlight.js/lib/languages/cpp';
 import css from 'highlight.js/lib/languages/css';
@@ -103,8 +104,10 @@ export function highlightCode(container: Element): void {
     const key = langOf(block) + '\u0000' + code;
     const hit = cacheGet(key);
     if (hit) {
-      // 命中：直接写回缓存 HTML + class（与 hljs.highlightElement 产出等价）
-      block.innerHTML = hit.html;
+      // 命中：写回缓存 HTML + class（与 hljs.highlightElement 产出等价）
+      // W739：写回同样过 utils/sanitize 白名单（缓存内容派生自不可信代码文本，
+      //       且 hljs 的 class 名（hljs-* / language-*）在白名单内 → 不丢高亮）
+      renderHtmlSafe(block, hit.html);
       block.className = hit.cls;
       block.dataset.hlDone = '1';
       continue;

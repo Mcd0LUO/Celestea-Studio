@@ -75,7 +75,9 @@ export function buildToolCard(d: ToolCardData): ToolCardRef {
   row1.appendChild(el('span', 'step-tag', '第 ' + d.step + ' 步'));
   row1.appendChild(el('span', 'toolcard-name', d.name));
   const state = el('span', 'toolcard-state');
-  state.innerHTML = '<span class="ts-dot"></span><span class="ts-label">运行中</span>';
+  // W739：改用离屏构建（原静态 innerHTML 赋值是纯字面量，无注入面，但收敛写入点）
+  state.appendChild(el('span', 'ts-dot'));
+  state.appendChild(el('span', 'ts-label', '运行中'));
   row1.appendChild(state);
   const copyBtn = el('button', 'toolcard-copy', '复制') as HTMLButtonElement;
   copyBtn.type = 'button';

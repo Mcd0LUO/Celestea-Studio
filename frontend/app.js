@@ -126,9 +126,109 @@ if (window.marked) {
   try { marked.setOptions({ breaks: true, gfm: true }); } catch (e) { /* keep defaults */ }
 }
 
+// ---- W739：不可信 HTML 白名单消毒（与 src/utils/sanitize.ts 同一策略） -------
+// 本文件是 Vite 之前的旧版 UI（现行入口是 src/main.ts → dist/），保留作回滚参考；
+// 但它的 markdown 出口同样会把模型输出写进 innerHTML，故一并消毒，策略与
+// src/utils/sanitize.ts 对齐：标签白名单 + 属性白名单 + URL scheme 白名单。
+var ALLOWED_TAGS = {
+  p: 1, div: 1, span: 1, br: 1, hr: 1, blockquote: 1, pre: 1,
+  h1: 1, h2: 1, h3: 1, h4: 1, h5: 1, h6: 1,
+  ul: 1, ol: 1, li: 1, dl: 1, dt: 1, dd: 1,
+  table: 1, thead: 1, tbody: 1, tfoot: 1, tr: 1, th: 1, td: 1, caption: 1, colgroup: 1, col: 1,
+  details: 1, summary: 1, figure: 1, figcaption: 1,
+  a: 1, img: 1, strong: 1, b: 1, em: 1, i: 1, u: 1, s: 1, del: 1, ins: 1, mark: 1,
+  small: 1, sub: 1, sup: 1, kbd: 1, samp: 1, var: 1, abbr: 1, cite: 1, q: 1, dfn: 1,
+  code: 1, time: 1, bdi: 1, bdo: 1, wbr: 1, ruby: 1, rt: 1, rp: 1, input: 1
+};
+var DROP_TAGS = {
+  script: 1, style: 1, noscript: 1, template: 1, iframe: 1, frame: 1, frameset: 1, noframes: 1,
+  object: 1, embed: 1, applet: 1, param: 1, link: 1, meta: 1, base: 1, basefont: 1,
+  svg: 1, math: 1, canvas: 1, audio: 1, video: 1, source: 1, track: 1, picture: 1,
+  plaintext: 1, xmp: 1, listing: 1, marquee: 1, portal: 1, slot: 1, dialog: 1,
+  form: 1, fieldset: 1, legend: 1, select: 1, option: 1, optgroup: 1, textarea: 1, button: 1,
+  title: 1, head: 1, html: 1, body: 1
+};
+var TAG_ATTRS = {
+  a: { href: 1 }, img: { src: 1, alt: 1, width: 1, height: 1 },
+  ol: { start: 1, reversed: 1, type: 1 }, li: { value: 1 },
+  td: { colspan: 1, rowspan: 1, align: 1, scope: 1 }, th: { colspan: 1, rowspan: 1, align: 1, scope: 1 },
+  col: { span: 1, width: 1 }, colgroup: { span: 1 }, time: { datetime: 1 },
+  details: { open: 1 }, input: { type: 1, checked: 1, disabled: 1 }
+};
+var SAFE_SCHEMES = { http: 1, https: 1, mailto: 1, tel: 1 };
+
+function safeUrl(raw) {
+  var squeezed = String(raw).replace(/[\u0000-\u0020\u007f-\u009f]/g, '');
+  if (squeezed === '') return null;
+  var m = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(squeezed);
+  if (m && !SAFE_SCHEMES[m[1].toLowerCase()]) return null;
+  return raw;
+}
+
+/** 惰性文档白名单清洗：危险容器连同内容丢弃，其余未知元素解包保留文字。 */
+function sanitizeTree(root) {
+  var kids = Array.prototype.slice.call(root.childNodes);
+  for (var i = 0; i < kids.length; i += 1) {
+    var node = kids[i];
+    if (node.nodeType === 3) continue;
+    if (node.nodeType !== 1) { root.removeChild(node); continue; }
+    var tag = node.tagName.toLowerCase();
+    if (!ALLOWED_TAGS[tag]) {
+      if (DROP_TAGS[tag]) { root.removeChild(node); continue; }
+      sanitizeTree(node);
+      while (node.firstChild) root.insertBefore(node.firstChild, node);
+      root.removeChild(node);
+      continue;
+    }
+    var attrs = Array.prototype.slice.call(node.attributes);
+    for (var j = 0; j < attrs.length; j += 1) {
+      var name = attrs[j].name.toLowerCase();
+      var extra = TAG_ATTRS[tag];
+      var listed = name === 'class' || name === 'id' || name === 'title' || name === 'dir' || name === 'lang' ||
+        (extra ? !!extra[name] : false);
+      if (!listed || name.indexOf('on') === 0) { node.removeAttribute(attrs[j].name); continue; }
+      var v = attrs[j].value;
+      if (name === 'class') {
+        var kept = v.split(/[\s\u0000-\u001f]+/).filter(function (t) { return /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(t); }).slice(0, 32);
+        if (kept.length) node.setAttribute('class', kept.join(' ')); else node.removeAttribute(attrs[j].name);
+      } else if (name === 'id') {
+        if (!/^[\p{L}\p{N}][\p{L}\p{N}_.:-]{0,63}$/u.test(v)) node.removeAttribute(attrs[j].name);
+      } else if (name === 'href' || name === 'src') {
+        var u = safeUrl(v);
+        if (u === null) node.removeAttribute(attrs[j].name); else node.setAttribute(name, u);
+      } else if (name === 'width' || name === 'height') {
+        if (!/^\d{1,4}$/.test(v)) node.removeAttribute(attrs[j].name);
+      } else if (name === 'colspan' || name === 'rowspan' || name === 'span' || name === 'start' || name === 'value') {
+        if (!/^-?\d{1,6}$/.test(v)) node.removeAttribute(attrs[j].name);
+      } else if (name === 'align') {
+        if (['left', 'center', 'right', 'justify'].indexOf(v.toLowerCase()) === -1) node.removeAttribute(attrs[j].name);
+      } else if (name === 'dir') {
+        if (['ltr', 'rtl', 'auto'].indexOf(v.toLowerCase()) === -1) node.removeAttribute(attrs[j].name);
+      } else if (name === 'type') {
+        var okType = tag === 'ol' ? ['1', 'a', 'A', 'i', 'I'].indexOf(v) !== -1
+          : (tag === 'input' && v.toLowerCase() === 'checkbox');
+        if (!okType) node.removeAttribute(attrs[j].name);
+      }
+    }
+    if (tag === 'input') {
+      if (String(node.getAttribute('type') || '').toLowerCase() !== 'checkbox') { root.removeChild(node); continue; }
+      node.setAttribute('type', 'checkbox');
+      node.setAttribute('disabled', '');
+    }
+    sanitizeTree(node);
+  }
+}
+
+function sanitizeHtml(html) {
+  var tpl = document.createElement('template');
+  tpl.innerHTML = html; // 惰性文档：脚本不执行、资源不加载
+  sanitizeTree(tpl.content);
+  return tpl.innerHTML;
+}
+
 function md(text) {
   if (window.marked) {
-    try { return marked.parse(text); } catch (e) { /* fall through */ }
+    try { return sanitizeHtml(marked.parse(text)); } catch (e) { /* fall through */ }
   }
   return '<pre>' + esc(text) + '</pre>';
 }

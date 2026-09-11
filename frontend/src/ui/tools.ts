@@ -13,7 +13,7 @@ const countEl = need<HTMLElement>('#toolsCount');
 function renderTools(tools: ToolInfo[] | undefined, container: HTMLElement): void {
   const arr = tools ?? [];
   countEl.textContent = String(arr.length);
-  container.innerHTML = '';
+  container.replaceChildren();
   if (!arr.length) {
     container.appendChild(el('div', 'side-note', '未获取到工具'));
     return;

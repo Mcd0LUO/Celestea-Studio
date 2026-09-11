@@ -345,7 +345,7 @@ export function initPromptsSection(): void {
     .workspaces()
     .then((d) => {
       const list = d.workspaces ?? [];
-      wsSel.innerHTML = '';
+      wsSel.replaceChildren();
       for (const ws of list) {
         const o = document.createElement('option');
         o.value = ws.name;
