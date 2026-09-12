@@ -107,10 +107,12 @@
 .interject-note {
   align-self: flex-start;
   margin: -10px 0 0;
-  padding: 2px 10px; border-radius: 999px;
-  border: 1px solid var(--c-border-subtle);
-  background: var(--c-surface);
-  font-size: 11px; color: var(--c-text-3); font-family: var(--mono);
+  /* W764：队列注记与信息块/卡片同族 —— 次级层底 + 发丝边 + Pill 圆角 + 紧凑行高 */
+  padding: 1px 10px; border-radius: 999px;
+  border: 1px solid var(--c-hairline-l2);
+  background: var(--c-layer-2);
+  font-size: 11px; line-height: var(--code-lh);
+  color: var(--c-text-3); font-family: var(--mono);
 }
 .interject-note.ok { color: var(--c-text-2); }
 .interject-note.err { color: var(--c-err); border-color: var(--c-border-strong); }

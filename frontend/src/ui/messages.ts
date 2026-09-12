@@ -67,6 +67,16 @@ export function setThinkCollapsed(seg: ThinkSegDom, collapsed: boolean): void {
 }
 
 /**
+ * W764：流式态标记 —— 头行扫光带与行首图标自转由 `[data-state="running"]` 驱动
+ * （对齐 DSH 推理行：`[data-state=running] .row::after` 的扫光）。只写一个属性，
+ * 视觉全在 CSS；段结束必须撤掉，否则旧段会一直"跑着"。
+ */
+export function setThinkStreaming(seg: ThinkSegDom, on: boolean): void {
+  if (on) seg.msg.dataset.state = 'running';
+  else delete seg.msg.dataset.state;
+}
+
+/**
  * 构建思考段 —— live 追加与历史恢复**共用这一处**（默认态的唯一真源）。
  * collapsed 缺省 = true（默认折叠）；只有 live 流式期间显式传 false 自动展开。
  */
@@ -116,7 +126,9 @@ export function foldThinkSeg(ctx: SessionPane): void {
   const seg = ctx.thinkSeg;
   if (!seg) return;
   const parts = thinkFolds.get(seg.root);
-  if (!parts || thinkUserFolded.has(seg.root)) return;
+  if (!parts) return;
+  setThinkStreaming(parts, false); // W764：段已结束，先撤流式信号（扫光/自转）
+  if (thinkUserFolded.has(seg.root)) return;
   setThinkCollapsed(parts, true);
 }
 
@@ -146,9 +158,14 @@ export function appendThinking(ctx: SessionPane, delta: string): void {
   const seg = ctx.thinkSeg;
   // W752：流式期间保持展开（用户手动收起的除外）——重连补发可能让本段先以折叠态
   // 建好，随后的增量不该悄悄写进看不见的折叠块里。
-  if (seg && ctx.streaming && !thinkUserFolded.has(seg.root)) {
+  if (seg) {
     const parts = thinkFolds.get(seg.root);
-    if (parts && parts.msg.classList.contains('collapsed')) setThinkCollapsed(parts, false);
+    if (parts) {
+      setThinkStreaming(parts, ctx.streaming === true); // W764：流式扫光/自转的开关
+      if (ctx.streaming && !thinkUserFolded.has(seg.root) && parts.msg.classList.contains('collapsed')) {
+        setThinkCollapsed(parts, false);
+      }
+    }
   }
   const target = ctx.assistant?.root ?? ctx.lastTextCol;
   if (

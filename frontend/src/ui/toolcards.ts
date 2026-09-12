@@ -108,7 +108,7 @@ export function buildToolCard(d: ToolCardData): ToolCardRef {
   head.appendChild(resultPv);
   card.appendChild(head);
   const body = el('div', 'toolcard-body');
-  body.appendChild(el('div', 'tool-args', d.argsText));
+  body.appendChild(el('pre', 'tool-args', d.argsText)); // W764：等宽 pre（不换行 + 横向滚动）
   card.appendChild(body);
   // aria-expanded 与真实展开态同步（键盘/鼠标/程序化切换都会触发 toggle）
   card.addEventListener('toggle', () => {
@@ -139,7 +139,7 @@ export function setToolResult(ref: ToolCardRef, resultText: string, failed: bool
   ref.resultPv.textContent = r ? '结果：' + r : '';
   if (r) ref.resultPv.classList.add('has');
   if (!ref.body.querySelector('.tool-out')) {
-    ref.body.appendChild(el('div', 'tool-out' + (failed ? ' err-c' : ''), resultText));
+    ref.body.appendChild(el('pre', 'tool-out' + (failed ? ' err-c' : ''), resultText));
   }
 }
 
