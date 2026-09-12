@@ -9,260 +9,84 @@
 //   令牌流程：POST 前先取一次性确认令牌（TTL 60s），带 X-Celestea-Grant-Confirm 头提交（§5.5）。
 //   降级：能力位 capabilities.grants !== true → 入口**隐藏**（不置灰报错，§6.5）。
 //
-//   文案纪律（安全不变量）：本文件所有面向用户的字符串都是**固定常量**，
+//   文案纪律（安全不变量）：所有面向用户的字符串都是**固定常量**，
 //   绝不采用工具输出或模型文本中的任何字符串 —— 否则模型可伪造一个无害的
 //   「确认」按钮。范围值（路径/站点/工具名）只作为**数据**填入固定句式。
+//
+//   W748：按职责拆到 ./grants/*，本文件只保留**编排入口**（能力位探针 / 聚焦会话
+//   刷新 / 轮询 / 装配）并原样再导出对外 API（import 路径与拆分前兼容）。
+//   拆分是纯搬家：无行为变更。
+//     ./grants/caps.ts    能力位定义（CAPS/TTL/危险集）与生效快照的纯读取
+//     ./grants/scope.ts   范围输入校验（纯函数、零 DOM）
+//     ./grants/marks.ts   侧栏叶子标记（按需查询 + 缓存 + 变更事件）
+//     ./grants/state.ts   模块级状态（data/panel/inlineError/…）与 GrantsHost 契约
+//     ./grants/panel.ts   盾牌三态 + 权限面板（渲染）
+//     ./grants/flow.ts    授予流程（令牌 + 二次确认）与撤销
 // ============================================================================
-import { api, ApiError, userErrorText } from '../api';
-import { canonicalScopeJson, scopeHashOf } from '../security/scope-hash';
+import { api, ApiError } from '../api';
+import { canonicalScopeJson } from '../security/scope-hash';
 import { S } from '../state';
-import type {
-  EffectiveGrants,
-  GrantCap,
-  GrantEntry,
-  GrantReq,
-  GrantScope,
-  GrantsResp,
-} from '../types';
-import { el } from '../utils/dom';
-import { popOverlay, pushOverlay, type OverlayHandle } from '../utils/overlays';
-import { confirmDialog } from './confirm';
-import { pickDirectory } from './fsbrowser';
-import { flashStatus } from './statusbar';
 import { activeSessionId, onPaneChange } from './viewctx';
+import type { GrantCap } from '../types';
+import { DANGER_CAPS, isExpired, type CapDef } from './grants/caps';
+import { startGrant, revoke } from './grants/flow';
+import { noteProbed, setMark, setMarksEnabled } from './grants/marks';
+import { closePanel, renderPanel, renderShield, togglePanel } from './grants/panel';
+import {
+  getCapability,
+  getCapProbeAt,
+  getData,
+  getDataSession,
+  getPanelEl,
+  getShieldButton,
+  inlineError,
+  setCapability,
+  setCapProbeAt,
+  setData,
+  setPanelNote,
+  setShieldBadge,
+  setShieldButton,
+  type GrantsHost,
+} from './grants/state';
 
 /** 兼容再导出：形状契约见 security/scope-hash.ts（漂移守护在 tools/check-scope-hash.mjs）。 */
 export { canonicalScopeJson };
 
 /** 放宽标记变化事件（侧栏会话叶子订阅；只做局部更新）。 */
-export const GRANTS_CHANGED_EVENT = 'studio:grants-changed';
+export { GRANTS_CHANGED_EVENT } from './grants/marks';
 
-/** 即将失效阈值（秒）：盾牌上的小圆点（设计 §3.1）。 */
-const EXPIRING_SEC = 120;
+/** 侧栏标记读取 / 按需查询（W748：实现见 ./grants/marks.ts）。 */
+export { ensureGrantMarks, grantMarkOf } from './grants/marks';
+
+/** 放宽标记结构（侧栏会话叶子消费）。 */
+export type { GrantMark } from './grants/caps';
+
 /** 面板打开时的刷新节奏（秒）；只更新盾牌与面板，不触碰其它视图。 */
 const POLL_MS = 20000;
-/** 侧栏标记的按需查询结果缓存时长。 */
-const MARK_TTL_MS = 120000;
-const SCAN_CONCURRENCY = 3;
-const SCAN_MAX = 40;
 
-/** 危险能力（侧栏红色小盾 + 二次确认 + 确认词，设计 §3.1/§3.3）。 */
-const DANGER_CAPS: ReadonlySet<string> = new Set(['network', 'write_roots', 'unsandboxed']);
-
-/** 每项能力的用户语言定义（名称 / 一句话影响 / 表单形态；文案逐字取自设计 §3.2）。 */
-interface CapDef {
-  cap: GrantCap;
-  label: string;
-  impact: string;
-  /** 追加的影响说明（如「撤销前一直有效」）。 */
-  extra?: string;
-  /** bool = 无范围；dirs = 选目录；hosts = 站点文本框；tools = 工具名文本框。 */
-  kind: 'bool' | 'dirs' | 'hosts' | 'tools';
-  danger: boolean;
-  /** 需要逐字输入的确认词（设计 §3.3）；空串 = 只需点击确认。 */
-  confirmWord: string;
-  /** 文档默认有效期与上限（秒）；服务返回 max_ttl_sec 时以上限为准（§2.3）。 */
-  defaultTtl: number;
-  maxTtl: number;
-}
-
-const CAPS: readonly CapDef[] = [
-  {
-    cap: 'network',
-    label: '访问网络',
-    impact: '允许会话中运行的命令访问互联网与内网（含本机服务）。',
-    extra: '⚠ 撤销前一直有效。',
-    kind: 'bool',
-    danger: true,
-    confirmWord: '允许',
-    defaultTtl: 1800,
-    maxTtl: 3600,
-  },
-  {
-    cap: 'write_roots',
-    label: '额外可写目录',
-    impact: '允许会话在所选目录中创建与修改文件。',
-    kind: 'dirs',
-    danger: true,
-    confirmWord: '允许',
-    defaultTtl: 1800,
-    maxTtl: 86400,
-  },
-  {
-    cap: 'read_roots',
-    label: '额外只读目录',
-    impact: '允许会话读取该目录内的文件（不能修改）。',
-    kind: 'dirs',
-    danger: false,
-    confirmWord: '',
-    defaultTtl: 1800,
-    maxTtl: 86400,
-  },
-  {
-    cap: 'net_hosts',
-    label: '访问指定网站',
-    impact: '放宽会话可访问的站点范围：只对下面列出的站点生效。',
-    kind: 'hosts',
-    danger: false,
-    confirmWord: '',
-    defaultTtl: 1800,
-    maxTtl: 86400,
-  },
-  {
-    cap: 'tool_extra',
-    label: '启用额外工具',
-    impact: '启用默认未开放的额外工具（不放行已被拒绝的操作）。',
-    kind: 'tools',
-    danger: false,
-    confirmWord: '',
-    defaultTtl: 1800,
-    maxTtl: 86400,
-  },
-  {
-    cap: 'unsandboxed',
-    label: '降低隔离运行',
-    impact: '允许会话中的命令不经额外隔离运行。',
-    kind: 'bool',
-    danger: true,
-    confirmWord: '降低隔离',
-    defaultTtl: 900,
-    maxTtl: 900,
-  },
-];
-
-const CAP_BY_NAME = new Map<string, CapDef>(CAPS.map((c) => [c.cap, c]));
-
-/** 有效期选项（秒 → 用户语言标签）。 */
-const TTL_CHOICES: readonly { sec: number; label: string }[] = [
-  { sec: 900, label: '15 分钟' },
-  { sec: 1800, label: '30 分钟' },
-  { sec: 3600, label: '1 小时' },
-  { sec: 86400, label: '24 小时' },
-];
-
-// ---- 会话状态 ------------------------------------------------------------------
-
-export interface GrantMark {
-  /** 生效条数（已过期的不计，设计 §3.2）。 */
-  count: number;
-  /** 是否含危险能力（侧栏红盾）。 */
-  danger: boolean;
-  caps: string[];
-}
-
-/** 能力位：unknown = 尚未探测（此期间不显示入口、不发起任何请求）。 */
-let capability: 'unknown' | 'on' | 'off' = 'unknown';
-let capProbeAt = 0;
 let probeTimer: number | null = null;
 let pollTimer: number | null = null;
 let wired = false;
 
-let button: HTMLButtonElement | null = null;
-let badgeEl: HTMLElement | null = null;
-
-/** 当前聚焦会话的完整权限数据（盾牌/面板的真源）。 */
-let data: GrantsResp | null = null;
-let dataSession = '';
-/** 面板打开状态。 */
-let panel: HTMLElement | null = null;
-let panelOverlay: OverlayHandle | null = null;
-/** 面板级状态行（成功/失败提示）。 */
-let panelNote: { text: string; cls: string } | null = null;
-/** 就地校验错误（按能力位）。 */
-const inlineError = new Map<string, string>();
-/** 站点/工具文本框草稿（按能力位；重渲染不丢字）。 */
-const drafts = new Map<string, string>();
-/** 有效期选择（按能力位）。 */
-const ttlPick = new Map<string, number>();
-
-/** 侧栏标记缓存 + 已探测时刻（失败也计时，避免反复打同一个会话）。 */
-const marks = new Map<string, GrantMark>();
-const probedAt = new Map<string, number>();
-
-// ---- 小工具 --------------------------------------------------------------------
-
-function nowSec(): number {
-  return Math.floor(Date.now() / 1000);
-}
-
-/** unix 秒 → 本地 HH:MM（面板徽标与确认文案共用）。 */
-function hhmm(unixSec: number): string {
-  const d = new Date(unixSec * 1000);
-  const p = (n: number) => (n < 10 ? '0' : '') + n;
-  return p(d.getHours()) + ':' + p(d.getMinutes());
-}
-
-/** 生效条数：已过期的不计入（§3.2 / §3.1）。 */
-function isExpired(g: GrantEntry): boolean {
-  if (g.expired === true) return true;
-  if (typeof g.expires_at === 'number' && g.expires_at > 0) return g.expires_at <= nowSec();
-  return false;
-}
-
-function activeGrants(): GrantEntry[] {
-  return (data?.grants ?? []).filter((g) => typeof g.cap === 'string' && !isExpired(g));
-}
-
-function activeFor(cap: GrantCap): GrantEntry | null {
-  const list = activeGrants().filter((g) => g.cap === cap);
-  return list.length ? list[list.length - 1]! : null;
-}
-
-function expiredFor(cap: GrantCap): GrantEntry[] {
-  return (data?.grants ?? []).filter((g) => g.cap === cap && isExpired(g));
-}
-
-function scopeOf(g: GrantEntry | null): GrantScope {
-  return g && g.scope && typeof g.scope === 'object' ? g.scope : {};
-}
-
-function listOf(v: unknown): string[] {
-  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x !== '') : [];
-}
-
-/** 生效快照 → 侧栏标记（不含过期项）。 */
-function markFromEffective(eff: EffectiveGrants | undefined): GrantMark {
-  const caps: string[] = [];
-  if (!eff) return { count: 0, danger: false, caps };
-  if (eff.network === true) caps.push('network');
-  if (listOf(eff.read_roots).length) caps.push('read_roots');
-  if (listOf(eff.write_roots).length) caps.push('write_roots');
-  if (listOf(eff.net_hosts).length) caps.push('net_hosts');
-  if (listOf(eff.tool_extra).length) caps.push('tool_extra');
-  if (eff.unsandboxed === true) caps.push('unsandboxed');
-  return { count: caps.length, danger: caps.some((c) => DANGER_CAPS.has(c)), caps };
-}
-
-/** 某会话的放宽标记（未探测到 = null，不显示标记）。 */
-export function grantMarkOf(sessionId: string): GrantMark | null {
-  const m = marks.get(sessionId);
-  return m && m.count > 0 ? m : null;
-}
-
-function emitChanged(): void {
-  window.dispatchEvent(new Event(GRANTS_CHANGED_EVENT));
-}
-
-function setMark(sessionId: string, mark: GrantMark): void {
-  if (sessionId === '') return;
-  const prev = marks.get(sessionId);
-  const same =
-    prev !== undefined &&
-    prev.count === mark.count &&
-    prev.danger === mark.danger &&
-    prev.caps.join(',') === mark.caps.join(',');
-  if (mark.count > 0) marks.set(sessionId, mark);
-  else marks.delete(sessionId);
-  if (!same) emitChanged();
-}
+/** 子模块回调进编排入口（避免子模块反向 import 本文件造成循环引用）。 */
+const HOST: GrantsHost = {
+  refresh: (force?: boolean) => refresh(force),
+  focusedSession: () => focusedSession(),
+  renderPanel: () => renderPanel(HOST),
+  startGrant: (def: CapDef) => startGrant(HOST, def),
+  revoke: (cap: GrantCap | null) => revoke(HOST, cap),
+};
 
 // ---- 能力位（§6.5 降级） --------------------------------------------------------
 
 function applyCapability(on: boolean): void {
   const next = on ? 'on' : 'off';
-  if (capability === next) return;
-  capability = next;
-  if (button) button.classList.toggle('hidden', !on);
+  if (getCapability() === next) return;
+  setCapability(next);
+  // 侧栏标记的「能力位未就绪即空操作」判定沿用同一状态（单向镜像）
+  setMarksEnabled(on);
+  const btn = getShieldButton();
+  if (btn) btn.classList.toggle('hidden', !on);
   if (!on) {
     closePanel();
     stopPoll();
@@ -275,57 +99,14 @@ function applyCapability(on: boolean): void {
 
 async function probeCapability(force = false): Promise<void> {
   const now = Date.now();
-  if (!force && capability !== 'unknown' && now - capProbeAt < 60000) return;
-  capProbeAt = now;
+  if (!force && getCapability() !== 'unknown' && now - getCapProbeAt() < 60000) return;
+  setCapProbeAt(now);
   try {
     const h = await api.health();
     applyCapability(h.capabilities?.grants === true);
   } catch {
     // 探测失败 = 不能确认可用 → 按不可用处理（不报错、不崩溃）
     applyCapability(false);
-  }
-}
-
-// ---- 侧栏标记（按需查询，局部更新） ---------------------------------------------
-
-/** 按需查询若干会话的放宽标记（并发受控；能力位未就绪时为空操作）。 */
-export function ensureGrantMarks(ids: readonly string[]): void {
-  if (capability !== 'on' || ids.length === 0) return;
-  const now = Date.now();
-  const queue: string[] = [];
-  for (const id of ids) {
-    if (!id || queue.includes(id)) continue;
-    const at = probedAt.get(id);
-    if (at !== undefined && now - at < MARK_TTL_MS) continue;
-    queue.push(id);
-    if (queue.length >= SCAN_MAX) break;
-  }
-  if (!queue.length) return;
-  let i = 0;
-  const run = async (): Promise<void> => {
-    for (;;) {
-      const idx = i++;
-      if (idx >= queue.length) return;
-      await fetchMark(queue[idx]!);
-    }
-  };
-  for (let k = 0; k < Math.min(SCAN_CONCURRENCY, queue.length); k++) void run();
-}
-
-async function fetchMark(sessionId: string): Promise<void> {
-  probedAt.set(sessionId, Date.now());
-  try {
-    const r = await api.grants(sessionId);
-    if (r.error) return;
-    const active = (r.grants ?? []).filter((g) => typeof g.cap === 'string' && !isExpired(g));
-    const caps = active.map((g) => String(g.cap));
-    setMark(sessionId, {
-      count: active.length,
-      danger: caps.some((c) => DANGER_CAPS.has(c)),
-      caps,
-    });
-  } catch {
-    // 该会话不可查（已删除 / 能力未就绪）：保持现状，不显示标记、不报错
   }
 }
 
@@ -338,16 +119,15 @@ function focusedSession(): string {
 }
 
 async function refresh(force = false): Promise<void> {
-  if (capability !== 'on') return;
+  if (getCapability() !== 'on') return;
   const id = focusedSession();
   if (id === '') {
-    data = null;
-    dataSession = '';
+    setData(null, '');
     renderShield();
-    if (panel) renderPanel();
+    if (getPanelEl()) renderPanel(HOST);
     return;
   }
-  if (!force && panel === null && id === dataSession && data !== null) {
+  if (!force && getPanelEl() === null && id === getDataSession() && getData() !== null) {
     renderShield();
     return;
   }
@@ -355,20 +135,18 @@ async function refresh(force = false): Promise<void> {
   try {
     const r = await api.grants(asked);
     if (asked !== focusedSession()) return; // 竞态：期间已切换会话，丢弃
-    data = r;
-    dataSession = asked;
-    probedAt.set(asked, Date.now());
+    setData(r, asked);
+    noteProbed(asked);
     const active = (r.grants ?? []).filter((g) => typeof g.cap === 'string' && !isExpired(g));
     const caps = active.map((g) => String(g.cap));
     setMark(asked, { count: active.length, danger: caps.some((c) => DANGER_CAPS.has(c)), caps });
   } catch (err) {
     if (asked !== focusedSession()) return;
     if (err instanceof ApiError && err.status === 0) return; // 不可达：静默保留上次数据
-    data = null;
-    dataSession = asked;
+    setData(null, asked);
   }
   renderShield();
-  if (panel) renderPanel();
+  if (getPanelEl()) renderPanel(HOST);
 }
 
 function startPoll(): void {
@@ -385,546 +163,9 @@ function stopPoll(): void {
   }
 }
 
-// ---- 盾牌按钮（§3.1 三态） -----------------------------------------------------
-
-function renderShield(): void {
-  if (!button) return;
-  const active = activeGrants();
-  const count = active.length;
-  const expiring = active.some(
-    (g) =>
-      typeof g.expires_at === 'number' && g.expires_at > 0 && g.expires_at - nowSec() < EXPIRING_SEC,
-  );
-  button.classList.toggle('granted', count > 0);
-  button.classList.toggle('has-expiring', count > 0 && expiring);
-  if (badgeEl) badgeEl.textContent = count > 0 ? String(count) : '';
-  button.title =
-    count === 0
-      ? '本会话权限：默认（仅工作区，无网络）'
-      : expiring
-        ? '本会话有权限即将失效 · 点击查看'
-        : '本会话已放宽 ' + count + ' 项权限 · 点击查看';
-  button.setAttribute('aria-label', button.title);
-}
-
-// ---- 面板（§3.2） --------------------------------------------------------------
-
-function closePanel(): void {
-  if (panelOverlay) {
-    popOverlay(panelOverlay);
-    panelOverlay = null;
-  }
-  if (panel) {
-    panel.remove();
-    panel = null;
-  }
-}
-
-function togglePanel(): void {
-  if (panel) {
-    closePanel();
-    return;
-  }
-  void openPanel();
-}
-
-async function openPanel(): Promise<void> {
-  closePanel();
-  inlineError.clear();
-  panelNote = null;
-  const host = document.getElementById('statusline');
-  if (!host) return;
-  const popup = el('div', 'sl-popup grant-popup');
-  popup.setAttribute('role', 'dialog');
-  panel = popup;
-  host.appendChild(popup);
-  panelOverlay = pushOverlay(() => closePanel());
-
-  popup.appendChild(el('div', 'sl-popup-title', '本会话权限'));
-  const body = el('div', 'sl-popup-body');
-  popup.appendChild(body);
-  body.appendChild(el('div', 'sl-popup-loading', '正在读取当前权限…'));
-
-  if (focusedSession() === '') {
-    body.replaceChildren(
-      el('div', 'sl-popup-note', '尚未打开任何会话：请先在左侧选择一个会话。'),
-    );
-    return;
-  }
-  await refresh(true);
-  if (panel !== popup) return; // 期间被关闭
-  renderPanel();
-}
-
-/** 面板整体重绘：离屏构建 + 单次替换（铁律 1）。 */
-function renderPanel(): void {
-  const popup = panel;
-  if (!popup) return;
-  const body = popup.querySelector<HTMLElement>('.sl-popup-body');
-  if (!body) return;
-  const off = document.createElement('div');
-
-  off.appendChild(
-    el('div', 'grant-intro', '默认情况下，本会话只能读写工作区目录，不能访问网络。'),
-  );
-  off.appendChild(
-    el(
-      'div',
-      'grant-intro',
-      '以下授权只对当前会话生效，可随时撤销；变更将在会话下一轮开始时生效。',
-    ),
-  );
-
-  // 结果预览（§3.4）：把「能力」翻译成「这个会话接下来能做什么」。
-  const preview = el('div', 'grant-preview');
-  preview.appendChild(el('span', 'grant-preview-label', '结果预览'));
-  preview.appendChild(el('span', null, previewText()));
-  off.appendChild(preview);
-
-  if (data === null) {
-    off.appendChild(
-      el('div', 'sl-popup-note', '当前无法读取本会话权限，请稍后重试。'),
-    );
-  } else {
-    for (const def of CAPS) {
-      if (def.cap === 'unsandboxed' && data.unsandboxed_available !== true) continue;
-      off.appendChild(renderRow(def));
-    }
-  }
-
-  const foot = el('div', 'grant-foot');
-  foot.appendChild(
-    el('div', 'grant-foot-note', '变更将在会话下一轮开始时生效。'),
-  );
-  const all = el('button', 'btn-mini grant-danger-btn', '全部撤销') as HTMLButtonElement;
-  all.type = 'button';
-  all.disabled = activeGrants().length === 0;
-  all.addEventListener('click', () => void revoke(null));
-  foot.appendChild(all);
-  off.appendChild(foot);
-
-  if (panelNote) off.appendChild(el('div', 'sl-popup-status ' + panelNote.cls, panelNote.text));
-  body.replaceChildren(...off.childNodes);
-}
-
-/** 当前生效集 → 一句话预览（固定常量句式，范围值只作数据填入）。 */
-function previewText(): string {
-  const active = activeGrants();
-  if (!active.length) return '本会话现在只能读写工作区目录，不能访问网络。';
-  const parts: string[] = [];
-  for (const def of CAPS) {
-    const g = activeFor(def.cap);
-    if (!g) continue;
-    parts.push(phraseFor(def, scopeOf(g)));
-  }
-  if (!parts.length) return '本会话现在只能读写工作区目录，不能访问网络。';
-  return '本会话现在可以：' + parts.join('；') + '。除此之外的权限与现在相同。';
-}
-
-/** 单项能力的「可以做什么」短语（固定句式 + 范围数据）。 */
-function phraseFor(def: CapDef, scope: GrantScope): string {
-  switch (def.cap) {
-    case 'network':
-      return '访问互联网与内网';
-    case 'write_roots':
-      return '在 ' + listOf(scope.roots).join('、') + ' 中创建与修改文件';
-    case 'read_roots':
-      return '读取 ' + listOf(scope.roots).join('、') + ' 中的文件';
-    case 'net_hosts':
-      return '访问 ' + listOf(scope.hosts).join('、');
-    case 'tool_extra':
-      return '使用额外工具 ' + listOf(scope.tools).join('、');
-    case 'unsandboxed':
-      return '不经额外隔离运行命令';
-  }
-}
-
-function maxTtlOf(def: CapDef): number {
-  const v = data?.max_ttl_sec?.[def.cap];
-  return typeof v === 'number' && v > 0 ? v : def.maxTtl;
-}
-
-function ttlOf(def: CapDef): number {
-  const picked = ttlPick.get(def.cap);
-  const max = maxTtlOf(def);
-  const v = picked ?? Math.min(def.defaultTtl, max);
-  return Math.min(v, max);
-}
-
-/** 一行 = 能力名 + 状态徽标 + 一句话影响 + （范围明细）+ 动作按钮（§3.2）。 */
-function renderRow(def: CapDef): HTMLElement {
-  const active = activeFor(def.cap);
-  const expired = expiredFor(def.cap);
-  const row = el('div', 'grant-row' + (active === null && expired.length ? ' expired' : ''));
-  row.dataset.cap = def.cap;
-
-  const head = el('div', 'grant-row-head');
-  head.appendChild(el('span', 'grant-row-name', def.label));
-  head.appendChild(badgeFor(def, active, expired));
-  row.appendChild(head);
-
-  row.appendChild(el('div', 'grant-impact', def.impact));
-  if (def.extra) row.appendChild(el('div', 'grant-impact', def.extra));
-
-  const scope = scopeOf(active);
-  const values = listOf(scope.roots).concat(listOf(scope.hosts), listOf(scope.tools));
-  if (active && values.length) {
-    row.appendChild(el('div', 'grant-detail', detailFor(def, active, values)));
-  }
-  for (const g of expired) {
-    const v = listOf(scopeOf(g).roots).concat(listOf(scopeOf(g).hosts), listOf(scopeOf(g).tools));
-    row.appendChild(
-      el('div', 'grant-detail', '已过期：' + (v.length ? v.join('、') : def.label)),
-    );
-  }
-
-  if ((def.kind === 'hosts' || def.kind === 'tools') && !active) {
-    const box = el('div', 'grant-hosts-row');
-    const input = el('input', 'grant-input cfg-input') as HTMLInputElement;
-    input.type = 'text';
-    input.spellcheck = false;
-    input.placeholder =
-      def.kind === 'hosts' ? '站点或网段，用逗号或换行分隔' : '工具名，用逗号或换行分隔';
-    input.value = drafts.get(def.cap) ?? '';
-    input.addEventListener('input', () => {
-      drafts.set(def.cap, input.value);
-      inlineError.delete(def.cap);
-      const err = row.querySelector<HTMLElement>('.grant-err');
-      if (err) err.remove();
-    });
-    box.appendChild(input);
-    row.appendChild(box);
-  }
-
-  const actions = el('div', 'grant-row-actions');
-  if (active) {
-    const rev = el('button', 'btn-mini', '撤销') as HTMLButtonElement;
-    rev.type = 'button';
-    rev.addEventListener('click', () => void revoke(def.cap));
-    actions.appendChild(rev);
-  } else {
-    actions.appendChild(ttlSelect(def));
-    const grant = el(
-      'button',
-      'btn-mini' + (def.danger ? ' grant-danger-btn' : ''),
-      def.kind === 'dirs' ? '选择目录' : '授予',
-    ) as HTMLButtonElement;
-    grant.type = 'button';
-    grant.addEventListener('click', () => void startGrant(def));
-    actions.appendChild(grant);
-    if (def.cap === 'unsandboxed') {
-      actions.appendChild(el('span', 'grant-impact', '15 分钟后失效，且只能使用一次'));
-    }
-  }
-  row.appendChild(actions);
-
-  const err = inlineError.get(def.cap);
-  if (err) row.appendChild(el('div', 'grant-err', err));
-  return row;
-}
-
-function badgeFor(def: CapDef, active: GrantEntry | null, expired: GrantEntry[]): HTMLElement {
-  if (active) {
-    const badge = el('span', 'grant-badge on', badgeText(def, active));
-    return badge;
-  }
-  if (expired.length) return el('span', 'grant-badge expired', '已过期');
-  return el('span', 'grant-badge', '未授予');
-}
-
-function badgeText(def: CapDef, g: GrantEntry): string {
-  const exp = typeof g.expires_at === 'number' && g.expires_at > 0 ? '至 ' + hhmm(g.expires_at) : '';
-  if (def.kind === 'hosts' || def.kind === 'tools') {
-    const n = listOf(scopeOf(g)[def.kind === 'hosts' ? 'hosts' : 'tools']).length;
-    return '已授予 ' + (n || 1) + ' 项';
-  }
-  return exp ? '已授予' + exp : '已授予';
-}
-
-function detailFor(def: CapDef, g: GrantEntry, values: string[]): string {
-  const exp = typeof g.expires_at === 'number' && g.expires_at > 0 ? '（至 ' + hhmm(g.expires_at) + '）' : '';
-  switch (def.cap) {
-    case 'write_roots':
-      return values.join('、') + ' — 已允许在其中创建与修改文件' + exp;
-    case 'read_roots':
-      return values.join('、') + ' — 已允许读取（不能修改）' + exp;
-    case 'net_hosts':
-      return values.join('、') + exp;
-    case 'tool_extra':
-      return values.join('、') + exp;
-    default:
-      return values.join('、') + exp;
-  }
-}
-
-function ttlSelect(def: CapDef): HTMLElement {
-  const max = maxTtlOf(def);
-  const sel = document.createElement('select');
-  sel.className = 'cfg-input grant-ttl';
-  const cur = ttlOf(def);
-  let matched = false;
-  for (const c of TTL_CHOICES) {
-    if (c.sec > max) continue;
-    const o = document.createElement('option');
-    o.value = String(c.sec);
-    o.textContent = '有效期 ' + c.label;
-    if (c.sec === cur) matched = true;
-    sel.appendChild(o);
-  }
-  if (!matched) {
-    const o = document.createElement('option');
-    o.value = String(max);
-    o.textContent = '有效期 ' + Math.max(1, Math.round(max / 60)) + ' 分钟';
-    sel.appendChild(o);
-    sel.value = String(max);
-  } else {
-    sel.value = String(cur);
-  }
-  sel.addEventListener('change', () => ttlPick.set(def.cap, Number(sel.value)));
-  return sel;
-}
-
-// ---- 授予流程（令牌 + 二次确认 + 结果预览；§3.3/§3.4/§5.5） ----------------------
-
-async function startGrant(def: CapDef): Promise<void> {
-  const session = focusedSession();
-  if (session === '') return;
-  inlineError.delete(def.cap);
-
-  let scope: GrantScope = {};
-  if (def.kind === 'dirs') {
-    const path = await pickDirectory('选择要放宽的目录', '只能选择目录；有效期结束后权限自动收回');
-    if (path === null || path.trim() === '') return;
-    scope = { roots: [path.trim()] };
-  } else if (def.kind === 'hosts') {
-    const v = validateHosts(drafts.get(def.cap) ?? '');
-    if (v.error !== '') {
-      inlineError.set(def.cap, v.error);
-      renderPanel();
-      return;
-    }
-    scope = { hosts: v.values };
-  } else if (def.kind === 'tools') {
-    const v = validateTools(drafts.get(def.cap) ?? '');
-    if (v.error !== '') {
-      inlineError.set(def.cap, v.error);
-      renderPanel();
-      return;
-    }
-    scope = { tools: v.values };
-  }
-
-  const ttl = ttlOf(def);
-  const expiresAt = nowSec() + ttl;
-  const ok = await confirmDialog({
-    title: '确认放宽权限 · ' + def.label,
-    message: confirmMessageFor(def, scope, expiresAt),
-    note: previewForPending(def, scope) + '\n变更将在会话下一轮开始时生效。',
-    snapshot: JSON.stringify(data?.effective ?? {}, null, 2),
-    snapshotLabel: '结果预览 · 生效快照（原样取自服务）',
-    requireText: def.confirmWord,
-    okLabel: '授予',
-    danger: true,
-  });
-  if (!ok) return;
-
-  const req: GrantReq = { cap: def.cap, scope, ttl_sec: ttl };
-  if (def.cap === 'unsandboxed') req.uses_left = 1;
-
-  panelNote = { text: '正在提交…', cls: 'busy' };
-  renderPanel();
-  try {
-    const r = await submitGrant(session, def, req, scope);
-    if (r === null) return;
-    drafts.delete(def.cap);
-    panelNote = { text: successText(def, r), cls: 'busy' };
-    flashStatus(successText(def, r), 'ok', 6000);
-    if (r.effective) setMark(session, markFromEffective(r.effective));
-    await refresh(true);
-  } catch (err) {
-    const text = '放宽失败：' + userErrorText(err, '请稍后重试');
-    panelNote = { text, cls: 'err' };
-    flashStatus(text, 'err', 8000);
-    renderPanel();
-  }
-}
-
-/** 取一次性令牌（有效期 60 秒）→ POST；令牌失效时重取一枚再试一次。 */
-async function submitGrant(
-  session: string,
-  def: CapDef,
-  req: GrantReq,
-  scope: GrantScope,
-): Promise<{ effective?: EffectiveGrants; grant?: GrantEntry } | null> {
-  const scopeHash = await scopeHashOf(def.cap, scope);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const t = await api.grantToken(session, def.cap, scopeHash);
-    if (!t.token) throw new ApiError(userErrorText(t.error, '无法发起授权，请稍后重试'));
-    try {
-      const r = await api.grantCap(session, req, t.token);
-      if (r.ok === false) throw new ApiError(userErrorText(r.error, '放宽失败，请稍后重试'));
-      return { effective: r.effective, grant: r.grant };
-    } catch (err) {
-      // 令牌过期/已被使用：重新取一枚再试一次（确认动作本身已经完成）
-      if (err instanceof ApiError && (err.status === 403 || err.status === 409) && attempt === 0) {
-        continue;
-      }
-      throw err;
-    }
-  }
-  return null;
-}
-
-function successText(
-  def: CapDef,
-  r: { effective?: EffectiveGrants; grant?: GrantEntry },
-): string {
-  const exp =
-    typeof r.grant?.expires_at === 'number' && r.grant.expires_at > 0
-      ? '（至 ' + hhmm(r.grant.expires_at) + '）'
-      : '';
-  return '已放宽：' + def.label + exp;
-}
-
-/** 二次确认正文：逐字取自设计 §3.3 的固定句式，范围值只作数据填入。 */
-function confirmMessageFor(def: CapDef, scope: GrantScope, expiresAt: number): string {
-  const at = hhmm(expiresAt);
-  switch (def.cap) {
-    case 'network':
-      return (
-        '允许本会话中运行的命令访问互联网与内网（包括本机运行的服务）。' +
-        '撤销前一直有效（或至 ' +
-        at +
-        '）。仅在你信任即将运行的命令时授予。'
-      );
-    case 'write_roots':
-      return (
-        '允许本会话在 ' +
-        listOf(scope.roots).join('、') +
-        ' 中创建与修改文件。该目录之外的写入仍然被拒绝。此授权至 ' +
-        at +
-        '。'
-      );
-    case 'unsandboxed':
-      return (
-        '允许本会话中运行的命令绕过文件系统与网络的额外隔离。' +
-        '恶意或被注入的命令可能读取或修改你的文件。此授权 15 分钟后失效，且只能使用一次。'
-      );
-    case 'read_roots':
-      return (
-        '允许本会话读取 ' + listOf(scope.roots).join('、') + '（不能修改）。此授权至 ' + at + '。'
-      );
-    case 'net_hosts':
-      return '允许本会话访问 ' + listOf(scope.hosts).join('、') + '。';
-    case 'tool_extra':
-      return '允许本会话使用 ' + listOf(scope.tools).join('、') + '。';
-  }
-}
-
-/** 授予后的效果预览（§3.4 的固定句式；范围值只作数据填入）。 */
-function previewForPending(def: CapDef, scope: GrantScope): string {
-  return '授予后，本会话可以：' + phraseFor(def, scope) + '。除此之外的权限与现在相同。';
-}
-
-// ---- 撤销（不需要二次确认；§3.3 末段） ------------------------------------------
-
-async function revoke(cap: GrantCap | null): Promise<void> {
-  const session = focusedSession();
-  if (session === '') return;
-  const def = cap ? CAP_BY_NAME.get(cap) : undefined;
-  panelNote = { text: '正在撤销…', cls: 'busy' };
-  renderPanel();
-  try {
-    const r = await api.revokeCap(session, cap ? { cap } : {});
-    const n = (r.revoked ?? []).length;
-    const text = cap && def ? '已撤销：' + def.label : n > 1 ? '已撤销 ' + n + ' 项放宽权限' : '已撤销放宽权限';
-    panelNote = { text, cls: 'busy' };
-    flashStatus(text, 'ok', 6000);
-    if (r.effective) setMark(session, markFromEffective(r.effective));
-    await refresh(true);
-  } catch (err) {
-    const text = '撤销失败：' + userErrorText(err, '请稍后重试');
-    panelNote = { text, cls: 'err' };
-    flashStatus(text, 'err', 8000);
-    renderPanel();
-  }
-}
-
-// ---- 范围校验（本地、提交前；§3.2） --------------------------------------------
-
-/** 疑似凭据（与设计 §5.4 同口径）：命中即拒绝提交，且不回显该值。 */
-function looksLikeCredential(v: string): boolean {
-  return /sk-/.test(v) || /Bearer\s/.test(v) || v.includes('\n') || v.length > 200;
-}
-
-const HOSTNAME_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
-
-function isIPv4(v: string): boolean {
-  const [addr, bits] = v.split('/');
-  if (bits !== undefined && !/^\d{1,2}$/.test(bits)) return false;
-  if (bits !== undefined && Number(bits) > 32) return false;
-  const parts = (addr ?? '').split('.');
-  if (parts.length !== 4) return false;
-  return parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
-}
-
-function isIPv6(v: string): boolean {
-  const [addr, bits] = v.split('/');
-  if (bits !== undefined && (!/^\d{1,3}$/.test(bits) || Number(bits) > 128)) return false;
-  if (!addr || !addr.includes(':')) return false;
-  return /^[0-9a-fA-F:.]+$/.test(addr);
-}
-
-function isHostOrCidr(v: string): boolean {
-  if (v.length > 253) return false;
-  if (isIPv4(v) || isIPv6(v)) return true;
-  return HOSTNAME_RE.test(v);
-}
-
-function splitList(raw: string): string[] {
-  return raw
-    .split(/[\s,，;；]+/)
-    .map((s) => s.trim())
-    .filter((s) => s !== '');
-}
-
-function validateHosts(raw: string): { values: string[]; error: string } {
-  const parts = splitList(raw);
-  if (!parts.length) return { values: [], error: '请至少填写一个站点' };
-  const out: string[] = [];
-  for (let i = 0; i < parts.length; i++) {
-    const v = parts[i]!;
-    if (looksLikeCredential(v)) {
-      return { values: [], error: '第 ' + (i + 1) + ' 项疑似包含凭据，不能作为站点提交' };
-    }
-    if (!isHostOrCidr(v)) {
-      return { values: [], error: '第 ' + (i + 1) + ' 项不是有效的主机名、IP 或网段' };
-    }
-    out.push(v);
-  }
-  return { values: Array.from(new Set(out)), error: '' };
-}
-
-const TOOL_RE = /^[a-zA-Z0-9_.:-]{1,64}$/;
-
-function validateTools(raw: string): { values: string[]; error: string } {
-  const parts = splitList(raw);
-  if (!parts.length) return { values: [], error: '请至少填写一个工具名' };
-  const out: string[] = [];
-  for (let i = 0; i < parts.length; i++) {
-    const v = parts[i]!;
-    if (looksLikeCredential(v)) {
-      return { values: [], error: '第 ' + (i + 1) + ' 项疑似包含凭据，不能提交' };
-    }
-    if (!TOOL_RE.test(v)) return { values: [], error: '第 ' + (i + 1) + ' 项不是有效的工具名' };
-    out.push(v);
-  }
-  return { values: Array.from(new Set(out)), error: '' };
-}
-
 // ---- 范围哈希（必须与服务端逐字一致 —— 契约见设计 §6.4） ----------------------
 //
-// 纯函数已抽到 `security/scope-hash.ts`（零 import、零 DOM，可在 node 里直接加载
+// 纯函数在 `security/scope-hash.ts`（零 import、零 DOM，可在 node 里直接加载
 // 做对拍）。形状/算法与服务端 `apps/studio/src/store/grants.ts` 的
 // `canonicalScopeJson` / `canonicalScopeHash` 必须**逐字一致**：任一侧改了形状而
 // 另一侧没跟上，就会重现 692f19c 之前「每次授予都 403」的事故。
@@ -939,27 +180,28 @@ function validateTools(raw: string): { values: string[]; error: string } {
 export function initGrants(): void {
   if (wired) return;
   wired = true;
-  button = document.getElementById('slGrant') as HTMLButtonElement | null;
-  badgeEl = document.getElementById('slGrantBadge');
-  if (button) {
-    button.addEventListener('click', (e) => {
+  setShieldButton(document.getElementById('slGrant') as HTMLButtonElement | null);
+  setShieldBadge(document.getElementById('slGrantBadge'));
+  const btn = getShieldButton();
+  if (btn) {
+    btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      togglePanel();
+      togglePanel(HOST);
     });
   }
   // 点击面板外 / 盾牌外 → 收起（与 statusline 的弹层行为一致）
   document.addEventListener('click', (e) => {
-    if (!panel) return;
+    if (!getPanelEl()) return;
     const t = e.target as Node;
-    if (panel.contains(t)) return;
-    if (button && button.contains(t)) return;
+    if (getPanelEl()!.contains(t)) return;
+    if (btn && btn.contains(t)) return;
     closePanel();
   });
   // 切换聚焦会话 → 换一份数据（盾牌与面板同步）
   onPaneChange(() => {
     inlineError.clear();
-    panelNote = null;
-    if (capability === 'on') void refresh(true);
+    setPanelNote(null);
+    if (getCapability() === 'on') void refresh(true);
   });
   // 回到页面时补一次（长时间后台期间可能已过期）
   document.addEventListener('visibilitychange', () => {
@@ -968,13 +210,13 @@ export function initGrants(): void {
   void probeCapability(true);
   // 能力位可能随后续部署就绪：低频复探（不可用时不做任何其它请求）
   probeTimer = window.setInterval(() => {
-    if (capability === 'off') void probeCapability(true);
+    if (getCapability() === 'off') void probeCapability(true);
   }, 60000);
 }
 
 /** 测试/自检用：当前能力位。 */
 export function grantsCapability(): 'unknown' | 'on' | 'off' {
-  return capability;
+  return getCapability();
 }
 
 /** 测试用：清理定时器（页面卸载/自检）。 */
