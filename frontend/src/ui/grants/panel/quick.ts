@@ -8,7 +8,7 @@
 //   W760 只搬家：DOM 结构、类名、文案、禁用规则逐字未改。
 // ============================================================================
 import { el } from '../../../utils/dom';
-import { CAPS, TTL_CHOICES, listOf, scopeOf } from '../caps';
+import { CAPS, PERMANENT_LABEL, TTL_CHOICES, listOf, scopeOf } from '../caps';
 import { PRESETS, presetSatisfied, type ActiveCapView, type GrantPreset } from '../presets';
 import { getPresetRun, getPresetRunner, setPanelNote, type GrantsHost } from '../state';
 import { activeFor } from './active';
@@ -29,8 +29,12 @@ function activeViews(): ActiveCapView[] {
   return out;
 }
 
-/** 预设的统一 TTL → 用户语言（面板上直接显示「有效期 X」）。 */
+/**
+ * 预设的统一有效期 → 用户语言。
+ * W773：预设一律永久（`ttlSec: 0`）⇒ 显示「永久」；保留非 0 分支以防将来出现限时预设。
+ */
 export function presetTtlLabel(preset: GrantPreset): string {
+  if (preset.ttlSec <= 0) return PERMANENT_LABEL;
   const hit = TTL_CHOICES.find((c) => c.sec === preset.ttlSec);
   if (hit) return '有效期 ' + hit.label;
   return '有效期 ' + Math.max(1, Math.round(preset.ttlSec / 60)) + ' 分钟';

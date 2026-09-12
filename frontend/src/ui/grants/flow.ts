@@ -15,20 +15,22 @@
 // ============================================================================
 import { api, ApiError, userErrorText } from '../../api';
 import { scopeHashOf } from '../../security/scope-hash';
-import type {
-  EffectiveGrants,
-  GrantCap,
-  GrantEntry,
-  GrantReq,
-  GrantScope,
-} from '../../types';
+import type { EffectiveGrants, GrantCap, GrantEntry, GrantReq, GrantScope } from '../../types';
 import { confirmDialog } from '../confirm';
 import { pickDirectory } from '../fsbrowser';
 import { flashStatus } from '../statusbar';
-import { CAP_BY_NAME, hhmm, listOf, markFromEffective, nowSec, type CapDef } from './caps';
+import { CAP_BY_NAME, PERMANENT_TEXT, markFromEffective, nowSec, type CapDef } from './caps';
+import {
+  confirmMessageFor,
+  presetConfirmMessage,
+  previewForPending,
+  successText,
+  type PlannedGrant,
+} from './copy';
 import { setMark } from './marks';
-import { maxTtlOf, phraseFor, ttlOf } from './panel';
+import { phraseFor } from './panel';
 import { presetTtlSec, type GrantPreset, type PresetStep } from './presets';
+import { maxTtlOf, reqFor, ttlOf } from './request';
 import { validateHosts, validateTools } from './scope';
 import {
   drafts,
@@ -50,7 +52,7 @@ export async function startGrant(host: GrantsHost, def: CapDef): Promise<void> {
 
   let scope: GrantScope = {};
   if (def.kind === 'dirs') {
-    const path = await pickDirectory('选择要放宽的目录', '只能选择目录；有效期结束后权限自动收回');
+    const path = await pickDirectory('选择要放宽的目录', '只能选择目录；' + PERMANENT_TEXT);
     if (path === null || path.trim() === '') return;
     scope = { roots: [path.trim()] };
   } else if (def.kind === 'hosts') {
@@ -72,7 +74,9 @@ export async function startGrant(host: GrantsHost, def: CapDef): Promise<void> {
   }
 
   const ttl = ttlOf(def);
-  const expiresAt = nowSec() + ttl;
+  // W773：主路径 ttl=0 ⇒ 永久（expiresAt=null），确认文案走「撤销前一直有效」；
+  // 只有用户在「临时授权…」里显式选了时长，才会出现具体到期时刻。
+  const expiresAt = ttl === 0 ? null : nowSec() + ttl;
   const ok = await confirmDialog({
     title: '确认放宽权限 · ' + def.label,
     message: confirmMessageFor(def, scope, expiresAt),
@@ -101,13 +105,6 @@ export async function startGrant(host: GrantsHost, def: CapDef): Promise<void> {
     flashStatus(text, 'err', 8000);
     host.renderPanel();
   }
-}
-
-/** 授予请求体（unsandboxed 只允许使用一次；§3.2 注）。 */
-function reqFor(def: CapDef, scope: GrantScope, ttl: number): GrantReq {
-  const req: GrantReq = { cap: def.cap, scope, ttl_sec: ttl };
-  if (def.cap === 'unsandboxed') req.uses_left = 1;
-  return req;
 }
 
 // ---- 快捷授权预设（W751 任务 1c） -----------------------------------------------
@@ -146,9 +143,15 @@ export async function startPreset(host: GrantsHost, preset: GrantPreset): Promis
   if (planned.length === 0) return;
 
   const at = nowSec();
+  // W773：预设一律永久（presets.ts 的 ttlSec=0）⇒ 各步 expiresAt=null。
+  const plannedGrants: PlannedGrant[] = planned.map((step) => ({
+    def: step.def,
+    scope: step.scope,
+    expiresAt: step.ttl === 0 ? null : at + step.ttl,
+  }));
   const ok = await confirmDialog({
     title: '确认快捷授权 · ' + preset.label,
-    message: presetConfirmMessage(preset, planned, at),
+    message: presetConfirmMessage(preset.label, plannedGrants),
     note:
       '授予后一次生效：' +
       planned.map((p) => phraseFor(p.def, p.scope)).join('；') +
@@ -209,7 +212,7 @@ async function planStep(preset: GrantPreset, step: PresetStep): Promise<PlannedS
   if (step.scopeKind === 'dir') {
     const path = await pickDirectory(
       '选择要放宽的目录 · ' + preset.label,
-      '本次快捷授权只会用到这一个目录；有效期结束后权限自动收回',
+      '本次快捷授权只会用到这一个目录；' + PERMANENT_TEXT,
     );
     if (path === null || path.trim() === '') {
       setPanelNote({ text: '已取消快捷授权：没有选择目录。', cls: 'err' });
@@ -228,19 +231,6 @@ async function planStep(preset: GrantPreset, step: PresetStep): Promise<PlannedS
     scope = { hosts: v.values };
   }
   return { def, scope, ttl: presetTtlSec(preset, maxTtlOf(def)) };
-}
-
-/** 预设的确认正文：逐项后果（沿用单项的固定句式）+ 统一到期时间。 */
-function presetConfirmMessage(preset: GrantPreset, planned: PlannedStep[], at: number): string {
-  const head = '本次快捷授权（' + preset.label + '）会依次放宽 ' + planned.length + ' 项权限：';
-  const body = planned.map(
-    (p) => '· ' + p.def.label + '：' + confirmMessageFor(p.def, p.scope, at + p.ttl),
-  );
-  const tail =
-    '到期时间：' +
-    planned.map((p) => p.def.label + ' 至 ' + hhmm(at + p.ttl)).join('；') +
-    '。';
-  return [head, ...body, tail].join('\n');
 }
 
 /** 取一次性令牌（有效期 60 秒）→ POST；令牌失效时重取一枚再试一次。 */
@@ -267,57 +257,6 @@ async function submitGrant(
     }
   }
   return null;
-}
-
-function successText(
-  def: CapDef,
-  r: { effective?: EffectiveGrants; grant?: GrantEntry },
-): string {
-  const exp =
-    typeof r.grant?.expires_at === 'number' && r.grant.expires_at > 0
-      ? '（至 ' + hhmm(r.grant.expires_at) + '）'
-      : '';
-  return '已放宽：' + def.label + exp;
-}
-
-/** 二次确认正文：逐字取自设计 §3.3 的固定句式，范围值只作数据填入。 */
-function confirmMessageFor(def: CapDef, scope: GrantScope, expiresAt: number): string {
-  const at = hhmm(expiresAt);
-  switch (def.cap) {
-    case 'network':
-      return (
-        '允许本会话中运行的命令访问互联网与内网（包括本机运行的服务）。' +
-        '撤销前一直有效（或至 ' +
-        at +
-        '）。仅在你信任即将运行的命令时授予。'
-      );
-    case 'write_roots':
-      return (
-        '允许本会话在 ' +
-        listOf(scope.roots).join('、') +
-        ' 中创建与修改文件。该目录之外的写入仍然被拒绝。此授权至 ' +
-        at +
-        '。'
-      );
-    case 'unsandboxed':
-      return (
-        '允许本会话中运行的命令绕过文件系统与网络的额外隔离。' +
-        '恶意或被注入的命令可能读取或修改你的文件。此授权 15 分钟后失效，且只能使用一次。'
-      );
-    case 'read_roots':
-      return (
-        '允许本会话读取 ' + listOf(scope.roots).join('、') + '（不能修改）。此授权至 ' + at + '。'
-      );
-    case 'net_hosts':
-      return '允许本会话访问 ' + listOf(scope.hosts).join('、') + '。';
-    case 'tool_extra':
-      return '允许本会话使用 ' + listOf(scope.tools).join('、') + '。';
-  }
-}
-
-/** 授予后的效果预览（§3.4 的固定句式；范围值只作数据填入）。 */
-function previewForPending(def: CapDef, scope: GrantScope): string {
-  return '授予后，本会话可以：' + phraseFor(def, scope) + '。除此之外的权限与现在相同。';
 }
 
 // 面板 → 本模块的单向注册（面板不 import 本模块，避免与 panel.ts 成环）。

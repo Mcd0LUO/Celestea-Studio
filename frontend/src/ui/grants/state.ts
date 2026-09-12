@@ -28,8 +28,16 @@ let panelNote: { text: string; cls: string } | null = null;
 export const inlineError = new Map<string, string>();
 /** 站点/工具文本框草稿（按能力位；重渲染不丢字）。 */
 export const drafts = new Map<string, string>();
-/** 有效期选择（按能力位）。 */
+/**
+ * 有效期选择（按能力位）：**0 = 永久（默认，也是主路径）**；
+ * 只有用户在「临时授权…」里显式改了时长，这里才会出现非 0 的值（W773）。
+ */
 export const ttlPick = new Map<string, number>();
+/**
+ * 「临时授权…」的展开态（按能力位）。W773：主按钮是「授予」（永久），
+ * 时长选项收在这一次级入口里，默认不展开；它只影响面板形态，不影响请求体。
+ */
+export const tempOpen = new Set<string>();
 
 /**
  * 快捷授权预设的执行进度（W751 任务 1c）；null = 没有在跑。

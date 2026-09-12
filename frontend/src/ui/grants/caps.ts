@@ -25,8 +25,12 @@ export interface CapDef {
    *   本字段恒为空串，仅为结构兼容保留；新代码不要读取它，也不要再填值。
    */
   confirmWord: string;
-  /** 文档默认有效期与上限（秒）；服务返回 max_ttl_sec 时以上限为准（§2.3）。 */
+  /**
+   * 授权的默认有效期（秒）；**0 = 永久（W773 起的默认路径）**。
+   * 只有用户在「临时授权…」里显式选了时长，请求体才带非 0 的 `ttl_sec`。
+   */
   defaultTtl: number;
+  /** 临时授权的时长上限（秒）；服务返回 max_ttl_sec 时以服务端值为准（§2.3）。 */
   maxTtl: number;
 }
 
@@ -39,7 +43,7 @@ export const CAPS: readonly CapDef[] = [
     kind: 'bool',
     danger: true,
     confirmWord: '',
-    defaultTtl: 1800,
+    defaultTtl: 0,
     maxTtl: 3600,
   },
   {
@@ -49,7 +53,7 @@ export const CAPS: readonly CapDef[] = [
     kind: 'dirs',
     danger: true,
     confirmWord: '',
-    defaultTtl: 1800,
+    defaultTtl: 0,
     maxTtl: 86400,
   },
   {
@@ -59,7 +63,7 @@ export const CAPS: readonly CapDef[] = [
     kind: 'dirs',
     danger: false,
     confirmWord: '',
-    defaultTtl: 1800,
+    defaultTtl: 0,
     maxTtl: 86400,
   },
   {
@@ -71,7 +75,7 @@ export const CAPS: readonly CapDef[] = [
     kind: 'hosts',
     danger: false,
     confirmWord: '',
-    defaultTtl: 1800,
+    defaultTtl: 0,
     maxTtl: 86400,
   },
   {
@@ -81,7 +85,7 @@ export const CAPS: readonly CapDef[] = [
     kind: 'tools',
     danger: false,
     confirmWord: '',
-    defaultTtl: 1800,
+    defaultTtl: 0,
     maxTtl: 86400,
   },
   {
@@ -91,20 +95,41 @@ export const CAPS: readonly CapDef[] = [
     kind: 'bool',
     danger: true,
     confirmWord: '',
-    defaultTtl: 900,
+    defaultTtl: 0,
     maxTtl: 900,
   },
 ];
 
 export const CAP_BY_NAME = new Map<string, CapDef>(CAPS.map((c) => [c.cap, c]));
 
-/** 有效期选项（秒 → 用户语言标签）。 */
+/**
+ * 有效期选项（秒 → 用户语言标签）。**0 = 永久，且是第一位**（W773：主路径直接授予，
+ * 不再强迫用户先选时长）。
+ */
 export const TTL_CHOICES: readonly { sec: number; label: string }[] = [
+  { sec: 0, label: '永久' },
   { sec: 900, label: '15 分钟' },
   { sec: 1800, label: '30 分钟' },
   { sec: 3600, label: '1 小时' },
   { sec: 86400, label: '24 小时' },
 ];
+
+/** 临时授权可选的时长（不含永久）——只出现在「临时授权…」次级入口里（W773）。 */
+export const TTL_TEMP_CHOICES: readonly { sec: number; label: string }[] = TTL_CHOICES.filter(
+  (c) => c.sec > 0,
+);
+
+/** 「临时授权」展开时的初始时长（分钟档里最常用的 30 分钟，再按该能力的上限收敛）。 */
+export const TEMP_DEFAULT_SEC = 1800;
+
+/** 永久授权的用户语言（唯一真源：面板徽标/明细/确认/回执都取自这里）。 */
+export const PERMANENT_LABEL = '永久';
+/** 永久授权的补充说明（「可随时撤销」：避免读者以为授权不可撤回）。 */
+export const PERMANENT_NOTE = '可随时撤销';
+/** 独立成句的永久短语：'永久（可随时撤销）'。 */
+export const PERMANENT_TEXT = PERMANENT_LABEL + '（' + PERMANENT_NOTE + '）';
+/** 跟在范围明细后面的括号短语：'（永久，可随时撤销）'。 */
+export const PERMANENT_PAREN = '（' + PERMANENT_LABEL + '，' + PERMANENT_NOTE + '）';
 export interface GrantMark {
   /** 生效条数（已过期的不计，设计 §3.2）。 */
   count: number;
@@ -121,6 +146,30 @@ export function hhmm(unixSec: number): string {
   const d = new Date(unixSec * 1000);
   const p = (n: number) => (n < 10 ? '0' : '') + n;
   return p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+/**
+ * 该条授权是否永久（W773）：`expires_at` 为空/非正 = 永久。
+ *
+ * 服务端 `ttl_sec: 0` 写的就是 `expires_at: null`（`handlers/grants.ts`），
+ * `isExpired` 对 null 永不为真 —— 所以永久条目只会被**撤销**收回。
+ */
+export function isPermanentExpiry(expiresAt: number | null | undefined): boolean {
+  return !(typeof expiresAt === 'number' && expiresAt > 0);
+}
+
+/**
+ * 到期短语（接在「此授权…」后面）：
+ *   永久 → 「撤销前一直有效」；有期限 → 「至 HH:MM」。
+ * 唯一真源：确认弹窗与面板明细都取这里，永久文案不会在某处退化成时间。
+ */
+export function untilPhrase(expiresAt: number | null | undefined): string {
+  return isPermanentExpiry(expiresAt) ? '撤销前一直有效' : '至 ' + hhmm(expiresAt as number);
+}
+
+/** 括号版到期短语（跟在范围明细后面）：永久 → 「（永久，可随时撤销）」。 */
+export function expiryParen(expiresAt: number | null | undefined): string {
+  return isPermanentExpiry(expiresAt) ? PERMANENT_PAREN : '（至 ' + hhmm(expiresAt as number) + '）';
 }
 
 /** 生效条数：已过期的不计入（§3.2 / §3.1）。 */

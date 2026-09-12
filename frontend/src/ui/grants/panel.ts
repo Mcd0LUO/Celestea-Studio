@@ -22,5 +22,6 @@
 export { renderShield } from './panel/shield';
 export { positionPanel } from './panel/position';
 export { closePanel, openPanel, renderPanel, togglePanel } from './panel/body';
-export { maxTtlOf, phraseFor, ttlOf } from './panel/phrase';
+export { phraseFor } from './panel/phrase';
+export { maxTtlOf, ttlOf } from './request';
 export { presetTtlLabel } from './panel/quick';

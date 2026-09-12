@@ -7,10 +7,20 @@
 // ============================================================================
 import { el } from '../../../utils/dom';
 import type { GrantEntry } from '../../../types';
-import { TTL_CHOICES, hhmm, listOf, scopeOf, type CapDef } from '../caps';
-import { drafts, inlineError, ttlPick, type GrantsHost } from '../state';
+import {
+  PERMANENT_LABEL,
+  PERMANENT_TEXT,
+  TTL_TEMP_CHOICES,
+  expiryParen,
+  hhmm,
+  isPermanentExpiry,
+  listOf,
+  scopeOf,
+  type CapDef,
+} from '../caps';
+import { drafts, inlineError, tempOpen, ttlPick, type GrantsHost } from '../state';
+import { maxTtlOf, tempDefaultTtl } from '../request';
 import { activeFor, expiredFor } from './active';
-import { maxTtlOf, ttlOf } from './phrase';
 import { netHostsIneffective } from './warnings';
 
 /** 一行 = 能力名 + 状态徽标 + 一句话影响 + （范围明细）+ 动作按钮（§3.2）。 */
@@ -70,20 +80,27 @@ export function renderRow(def: CapDef, host: GrantsHost): HTMLElement {
     rev.addEventListener('click', () => void host.revoke(def.cap));
     actions.appendChild(rev);
   } else {
-    actions.appendChild(ttlSelect(def));
+    // W773：主路径 = 直接授予（永久）。这一个按钮就发出 ttl_sec: 0，
+    // 不再强迫用户先选时长；时长选项收在旁边的「临时授权…」次级入口里。
     const grant = el(
       'button',
       'btn-mini' + (def.danger ? ' grant-danger-btn' : ''),
       def.kind === 'dirs' ? '选择目录' : '授予',
     ) as HTMLButtonElement;
     grant.type = 'button';
-    grant.addEventListener('click', () => void host.startGrant(def));
+    grant.title = '直接授予：' + PERMANENT_TEXT;
+    grant.addEventListener('click', () => {
+      ttlPick.set(def.cap, 0); // 显式回到永久（用户此前可能在「临时」里选过时长）
+      void host.startGrant(def);
+    });
     actions.appendChild(grant);
+    actions.appendChild(tempToggle(def, host));
     if (def.cap === 'unsandboxed') {
-      actions.appendChild(el('span', 'grant-impact', '15 分钟后失效，且只能使用一次'));
+      actions.appendChild(el('span', 'grant-impact', '只能使用一次；' + PERMANENT_TEXT));
     }
   }
   row.appendChild(actions);
+  if (!active && tempOpen.has(def.cap)) row.appendChild(tempBox(def, host));
 
   const err = inlineError.get(def.cap);
   if (err) row.appendChild(el('div', 'grant-err', err));
@@ -100,16 +117,19 @@ function badgeFor(def: CapDef, active: GrantEntry | null, expired: GrantEntry[])
 }
 
 function badgeText(def: CapDef, g: GrantEntry): string {
-  const exp = typeof g.expires_at === 'number' && g.expires_at > 0 ? '至 ' + hhmm(g.expires_at) : '';
   if (def.kind === 'hosts' || def.kind === 'tools') {
     const n = listOf(scopeOf(g)[def.kind === 'hosts' ? 'hosts' : 'tools']).length;
     return '已授予 ' + (n || 1) + ' 项';
   }
-  return exp ? '已授予' + exp : '已授予';
+  // W773：永久条目显示「永久」而不是时刻；有期限的仍显示到点时间。
+  return isPermanentExpiry(g.expires_at)
+    ? '已授予 · ' + PERMANENT_LABEL
+    : '已授予至 ' + hhmm(g.expires_at as number);
 }
 
 function detailFor(def: CapDef, g: GrantEntry, values: string[]): string {
-  const exp = typeof g.expires_at === 'number' && g.expires_at > 0 ? '（至 ' + hhmm(g.expires_at) + '）' : '';
+  // W773：永久条目在明细里写「（永久，可随时撤销）」，不出现时刻。
+  const exp = expiryParen(g.expires_at);
   switch (def.cap) {
     case 'write_roots':
       return values.join('、') + ' — 已允许在其中创建与修改文件' + exp;
@@ -124,26 +144,59 @@ function detailFor(def: CapDef, g: GrantEntry, values: string[]): string {
   }
 }
 
+/** 「临时授权…」的开关（W773）：面板默认不展开时长选项，展开态记在 state.tempOpen。 */
+function tempToggle(def: CapDef, host: GrantsHost): HTMLElement {
+  const open = tempOpen.has(def.cap);
+  const btn = el('button', 'btn-mini', open ? '收起时长' : '临时授权…') as HTMLButtonElement;
+  btn.type = 'button';
+  btn.addEventListener('click', () => {
+    if (open) tempOpen.delete(def.cap);
+    else tempOpen.add(def.cap);
+    host.renderPanel();
+  });
+  return btn;
+}
+
+/** 展开后的时长区：选一个时长 → 「按此时长授予」（此时才发出非 0 的 ttl_sec）。 */
+function tempBox(def: CapDef, host: GrantsHost): HTMLElement {
+  const box = el('div', 'grant-temp');
+  box.appendChild(el('div', 'grant-impact', '临时授权：到期后自动收回，可随时撤销。'));
+  const line = el('div', 'grant-hosts-row');
+  line.appendChild(ttlSelect(def));
+  const go = el('button', 'btn-mini', '按此时长授予') as HTMLButtonElement;
+  go.type = 'button';
+  go.addEventListener('click', () => void host.startGrant(def));
+  line.appendChild(go);
+  box.appendChild(line);
+  return box;
+}
+
+/**
+ * 时长选择器：**只出现在**「临时授权…」展开后（W773）——永久是默认路径，不经过这里。
+ * 取值：本次展开里选过的时长优先，否则给该能力的常用档（30 分钟，按上限收敛）。
+ */
 function ttlSelect(def: CapDef): HTMLElement {
   const max = maxTtlOf(def);
   const sel = document.createElement('select');
   sel.className = 'cfg-input grant-ttl';
-  const cur = ttlOf(def);
+  const picked = ttlPick.get(def.cap);
+  const cur = picked !== undefined && picked > 0 ? picked : tempDefaultTtl(def);
   let matched = false;
-  for (const c of TTL_CHOICES) {
+  for (const c of TTL_TEMP_CHOICES) {
     if (c.sec > max) continue;
     const o = document.createElement('option');
     o.value = String(c.sec);
-    o.textContent = '有效期 ' + c.label;
+    o.textContent = c.label;
     if (c.sec === cur) matched = true;
     sel.appendChild(o);
   }
   if (!matched) {
+    const fallback = Math.max(1, Math.min(cur, max));
     const o = document.createElement('option');
-    o.value = String(max);
-    o.textContent = '有效期 ' + Math.max(1, Math.round(max / 60)) + ' 分钟';
+    o.value = String(fallback);
+    o.textContent = Math.max(1, Math.round(fallback / 60)) + ' 分钟';
     sel.appendChild(o);
-    sel.value = String(max);
+    sel.value = String(fallback);
   } else {
     sel.value = String(cur);
   }
