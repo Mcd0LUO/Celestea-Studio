@@ -2,7 +2,7 @@
 
 > 🧭 **仓库角色（2026-09-11）**：本仓现役 = **线上前端（`frontend/`）+ 共享数据文件**（`workspaces.json` / `providers.json` / `prompts.json` / `sessions/`）。
 > Rust Studio 后端已于 2026-09-11 **退役**（见 [`../LEGACY-RUST-BACKEND.md`](../LEGACY-RUST-BACKEND.md)），因此本文描述的 Rust 后端架构 / 构建 / 测试属**历史参考**。
-> **后端开发请看 [`/src/celestea_studio-ts/docs/README.md`](/src/celestea_studio-ts/docs/README.md)**（TypeScript 后端，生产）；Rust 引擎见 [`/src/celestea_harness/docs/README.md`](/src/celestea_harness/docs/README.md)；本仓 `docs/` 索引见 [`README.md`](./README.md)。
+> **后端开发请看 [`/src/celestea_studio-ts/docs/README.md`](/src/celestea_studio-ts/docs/README.md)**（TypeScript 后端，生产）；Rust 引擎见 [`/src/celestea_studio/docs/archive/harness/README.md`](/src/celestea_studio/docs/archive/harness/README.md)；本仓 `docs/` 索引见 [`README.md`](./README.md)。
 
 > 本文是 Celestea Studio 的**开发者入口文档**，内容全部来自对 `/src/celestea_studio` 实际代码的核对（文件:行号可回溯）。
 > 契约字段名 / 代码标识符保留英文原文，其余以中文叙述。

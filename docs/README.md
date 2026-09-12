@@ -8,7 +8,7 @@
 - 本仓**现役** = **线上前端（`frontend/`）+ 共享数据文件**（`workspaces.json` / `providers.json` / `prompts.json` / `sessions/`）。
 - 本仓 **Rust Studio 后端已退役**（`celestea-studio.service` 已 masked）：见 [`../LEGACY-RUST-BACKEND.md`](../LEGACY-RUST-BACKEND.md)。
 - **后端开发（TypeScript，生产）在 [`/src/celestea_studio-ts`](/src/celestea_studio-ts/docs/README.md)**；
-  Rust **引擎**参考实现在 [`/src/celestea_harness`](/src/celestea_harness/docs/README.md)。
+  Rust **引擎**参考实现在 [`/src/celestea_harness`](/src/celestea_studio/docs/archive/harness/README.md)。
 - 因此本仓 `docs/` 里凡是描述 Rust 后端的文档一律归 **历史**（2026-09-11 归档进 [`archive/`](./archive/)，正文保留 + 顶部 📦 横幅），
   只有前端规则与数据文件格式仍属当前。
 
@@ -37,7 +37,7 @@
 | --- | --- | --- |
 | `/src/celestea_studio`（本仓） | 线上前端 + 共享数据文件（Rust 后端已退役） | 本页 / [`../README.md`](../README.md) |
 | `/src/celestea_studio-ts` | Studio 后端（TypeScript，**生产**） | [`/src/celestea_studio-ts/docs/README.md`](/src/celestea_studio-ts/docs/README.md) |
-| `/src/celestea_harness` | Rust **引擎**参考实现 | [`/src/celestea_harness/docs/README.md`](/src/celestea_harness/docs/README.md) |
+| `/src/celestea_harness` | Rust **引擎**参考实现 | [`/src/celestea_studio/docs/archive/harness/README.md`](/src/celestea_studio/docs/archive/harness/README.md) |
 
 ## 维护约定
 

@@ -31,7 +31,7 @@ ssh -L 3777:localhost:3777 <server>
 
 > 本仓现役 = **线上前端（`frontend/`）+ 共享数据文件**（`workspaces.json` / `providers.json` / `prompts.json` / `sessions/`）。
 > **Studio 后端开发（TypeScript，生产）见 [`/src/celestea_studio-ts/docs/README.md`](/src/celestea_studio-ts/docs/README.md)**；
-> Rust **引擎**（参考实现）见 [`/src/celestea_harness/docs/README.md`](/src/celestea_harness/docs/README.md)。
+> Rust **引擎**（参考实现）见 [`/src/celestea_studio/docs/archive/harness/README.md`](/src/celestea_studio/docs/archive/harness/README.md)。
 > 本仓 Rust 后端已于 2026-09-11 退役：见 [`LEGACY-RUST-BACKEND.md`](LEGACY-RUST-BACKEND.md)。
 
 - **[docs/README.md](docs/README.md)** — `docs/` 全量索引：每份文档的**状态（当前 / 设计 / 历史）**、一句话、权威入口。
