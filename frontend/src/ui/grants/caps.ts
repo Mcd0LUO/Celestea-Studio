@@ -65,7 +65,9 @@ export const CAPS: readonly CapDef[] = [
   {
     cap: 'net_hosts',
     label: '访问指定网站',
-    impact: '放宽会话可访问的站点范围：只对下面列出的站点生效。',
+    // W757：原文案「只对下面列出的站点生效」是错误暗示 —— 站点清单是**并集放宽**
+    // （并入放行清单，永不收窄），且在未配置站点策略的部署下完全不生效。
+    impact: '把下列站点加入会话的网络放行清单（并集放宽，不会收窄；是否生效取决于部署的站点策略）。',
     kind: 'hosts',
     danger: false,
     confirmWord: '',

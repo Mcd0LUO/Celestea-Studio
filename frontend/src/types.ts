@@ -560,6 +560,14 @@ export interface GrantsResp {
   max_ttl_sec?: Record<string, number>;
   /** 降低隔离运行是否在本部署中开放（设计 §2.2 注 3 / §8.1）。 */
   unsandboxed_available?: boolean;
+  /**
+   * W757：本次放宽的站点清单在当前部署下是否真的生效。
+   * false = 会话确实带着站点清单，但本部署未启用站点策略，这份清单不会改变可访问范围。
+   * 是否生效是部署事实，不随前端变化；旧服务不返回该字段（undefined）时按「不显示」处理。
+   */
+  net_hosts_effective?: boolean;
+  /** 服务返回的提示条目（条目被忽略 / 文件读不出 / 放宽不生效等）；可能缺失或为空。 */
+  warnings?: string[];
   error?: string;
 }
 
