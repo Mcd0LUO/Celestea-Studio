@@ -216,8 +216,99 @@ export function flushTextSegment(ctx: SessionPane): void {
 
 // ---- thinking（弱化独立段，按事件顺序出现，不再聚合进气泡） ----------------------
 
-/** 轮次结束/新轮开始：清除思考段归属与文本段锚点（跨轮不跨移；DOM 保留）。 */
+/* W752：思考段默认折叠。
+ * 折叠类挂在 **.msg.think-seg** 上（不是 .mcol 根）——CSS 选择器是
+ * `.msg.think-seg.collapsed …`；历史上 live 把类 toggle 到 .mcol 根上，选择器
+ * 永不命中，于是「点了没反应、永远展开」。setThinkCollapsed 是折叠态的唯一写入口
+ * （class + 箭头字形 + aria-expanded 三处同写）；live 追加与历史恢复共用
+ * buildThinkSeg，两条路径的默认态因此不可能分叉。 */
+
+/** 折叠（收起）标记字形。 */
+export const THINK_MARK_COLLAPSED = '▸';
+/** 展开标记字形。 */
+export const THINK_MARK_EXPANDED = '▾';
+/** 折叠占位行文案（收起时代替正文显示）。 */
+export const THINK_FOLDED_HINT = '思考已折叠，点击展开';
+
+/** 思考段的折叠零件（root = .mcol 容器）。 */
+export interface ThinkSegDom {
+  root: HTMLElement; // .mcol
+  msg: HTMLElement; // .msg.think-seg（折叠类挂它，CSS 依赖）
+  head: HTMLElement; // 标题行（点击 / 回车 / 空格切换）
+  body: HTMLElement; // 正文
+  foldMark: HTMLElement; // 折叠箭头
+  text: string; // 累积思考文本（与 ui/view.ts 的 ThinkSeg 同字段，便于直接挂到 ctx）
+}
+
+/** root → 折叠零件（不改 ui/view.ts 的 ThinkSeg 合同）。 */
+const thinkFolds = new WeakMap<HTMLElement, ThinkSegDom>();
+/** 用户手动切换过折叠态的段：段结束的自动折叠不再覆盖用户意图。 */
+const thinkUserFolded = new WeakSet<HTMLElement>();
+
+/** 折叠态唯一写入口：class + 箭头 + aria-expanded 同步。 */
+export function setThinkCollapsed(seg: ThinkSegDom, collapsed: boolean): void {
+  seg.msg.classList.toggle('collapsed', collapsed);
+  seg.foldMark.textContent = collapsed ? THINK_MARK_COLLAPSED : THINK_MARK_EXPANDED;
+  seg.head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
+/**
+ * 构建思考段 —— live 追加与历史恢复**共用这一处**（默认态的唯一真源）。
+ * collapsed 缺省 = true（默认折叠）；只有 live 流式期间显式传 false 自动展开。
+ */
+export function buildThinkSeg(
+  opts: { time?: string; text?: string; collapsed?: boolean } = {},
+): ThinkSegDom {
+  const root = el('div', 'mcol');
+  const msg = el('div', 'msg think-seg');
+  const cap = el('div', 'msg-caption think-head') as HTMLElement;
+  cap.appendChild(el('span', 'who', '思考'));
+  const foldMark = el('span', 'think-fold-mark', THINK_MARK_COLLAPSED);
+  cap.appendChild(foldMark);
+  cap.appendChild(el('span', 'think-time', opts.time ?? ''));
+  cap.setAttribute('role', 'button');
+  cap.setAttribute('aria-expanded', 'false');
+  cap.tabIndex = 0;
+  msg.appendChild(cap);
+  const bubble = el('div', 'bubble think-seg-bubble');
+  const body = el('div', 'think-seg-body');
+  if (opts.text !== undefined) body.textContent = opts.text;
+  bubble.appendChild(body);
+  bubble.appendChild(el('div', 'think-seg-folded', THINK_FOLDED_HINT));
+  msg.appendChild(bubble);
+  root.appendChild(msg);
+  const seg: ThinkSegDom = { root, msg, head: cap, body, foldMark, text: opts.text ?? '' };
+  thinkFolds.set(root, seg);
+  setThinkCollapsed(seg, opts.collapsed !== false);
+  const toggle = (): void => {
+    thinkUserFolded.add(seg.root); // 记下用户意图
+    setThinkCollapsed(seg, !seg.msg.classList.contains('collapsed'));
+  };
+  cap.addEventListener('click', toggle);
+  cap.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle();
+    }
+  });
+  return seg;
+}
+
+/**
+ * 段结束（流式结束 / 新轮开始）自动折叠回默认态；用户手动切换过则不打扰。
+ * ctx.thinkSeg 的静态类型不含折叠零件，故用 root 反查登记表。
+ */
+export function foldThinkSeg(ctx: SessionPane): void {
+  const seg = ctx.thinkSeg;
+  if (!seg) return;
+  const parts = thinkFolds.get(seg.root);
+  if (!parts || thinkUserFolded.has(seg.root)) return;
+  setThinkCollapsed(parts, true);
+}
+
+/** 轮次结束/新轮开始：思考段折回默认态，清除思考段归属与文本段锚点（DOM 保留）。 */
 export function endTurn(ctx: SessionPane): void {
+  foldThinkSeg(ctx); // W752：流式结束 → 思考段回到「默认折叠」终态
   ctx.thinkSeg = null;
   ctx.lastTextCol = null;
 }
@@ -226,37 +317,25 @@ export function endTurn(ctx: SessionPane): void {
  * Append a thinking delta（弱化块：左侧色条 + 浅色底 + 小字；独立成段）。
  * 重排规则：思考块的目标位置 = 同轮最近文本块的正上方（紧贴）；已在目标
  * 之前则不动。跨轮：endTurn() 清 thinkSeg/lastTextCol，绝不串位。
+ * W752：默认折叠；创建时若本轮流式进行中则自动展开，流式结束自动折回折叠态。
  */
 export function appendThinking(ctx: SessionPane, delta: string): void {
   if (!ctx.thinkSeg) {
     hideEmptyHint(ctx);
-    const root = el('div', 'mcol');
-    const msg = el('div', 'msg think-seg');
-    const cap = el('div', 'msg-caption think-head') as HTMLElement;
-    cap.appendChild(el('span', 'who', '思考'));
-    const foldMark = el('span', 'think-fold-mark', '▾');
-    cap.appendChild(foldMark);
-    cap.appendChild(el('span', 'think-time', fmtNow()));
-    msg.appendChild(cap);
-    const bubble = el('div', 'bubble think-seg-bubble');
-    const body = el('div', 'think-seg-body');
-    bubble.appendChild(body);
-    const folded = el('div', 'think-seg-folded', '思考已折叠，点击展开');
-    bubble.appendChild(folded);
-    msg.appendChild(bubble);
-    root.appendChild(msg);
-    ctx.el.appendChild(root);
-    const seg = { root, head: cap, body, text: '' };
+    // W752：默认折叠；仅当本轮流式进行中时自动展开（让用户实时看到思考内容），
+    // 流式结束（endTurn / 新轮开始）自动折回默认态。
+    const seg = buildThinkSeg({ time: fmtNow(), collapsed: !ctx.streaming });
+    ctx.el.appendChild(seg.root);
     ctx.thinkSeg = seg;
-    body.textContent = '思考中…'; // 流式思考占位态（弱化）
-    cap.addEventListener('click', () => {
-      const cur = ctx.thinkSeg;
-      if (cur !== null && ctx.streaming) return; // 流式思考中不折叠
-      root.classList.toggle('collapsed');
-      foldMark.textContent = root.classList.contains('collapsed') ? '▸' : '▾';
-    });
+    seg.body.textContent = '思考中…'; // 流式思考占位态（弱化）
   }
   const seg = ctx.thinkSeg;
+  // W752：流式期间保持展开（用户手动收起的除外）——重连补发可能让本段先以折叠态
+  // 建好，随后的增量不该悄悄写进看不见的折叠块里。
+  if (seg && ctx.streaming && !thinkUserFolded.has(seg.root)) {
+    const parts = thinkFolds.get(seg.root);
+    if (parts && parts.msg.classList.contains('collapsed')) setThinkCollapsed(parts, false);
+  }
   const target = ctx.assistant?.root ?? ctx.lastTextCol;
   if (
     seg !== null &&

@@ -457,6 +457,16 @@ export interface ModelInfo {
   name: string;
   /** W262：提供商显示名；静态兜底目录的条目为空串（前端归入「其他」组）。 */
   provider?: string;
+  /**
+   * W750：提供商稳定 id（切换时回传用）。与 `provider`（显示名）是两回事：
+   * 显示名可能被改、也可能与 id 不同，切 provider 必须用 id。
+   */
+  provider_id?: string;
+  /**
+   * W750：该 (provider, model) 组合就是当前生效项（后端按「同模型 + 同端点」判定）。
+   * 旧服务无此字段 → 前端退回按模型 id 匹配。
+   */
+  active?: boolean;
   reasoning?: boolean;
 }
 

@@ -6,6 +6,7 @@
 import type { GrantsResp } from '../../types';
 import type { OverlayHandle } from '../../utils/overlays';
 import type { CapDef } from './caps';
+import type { GrantPreset } from './presets';
 import type { GrantCap } from '../../types';
 
 /** 能力位：unknown = 尚未探测（此期间不显示入口、不发起任何请求）。 */
@@ -31,6 +32,18 @@ export const drafts = new Map<string, string>();
 export const ttlPick = new Map<string, number>();
 
 /**
+ * 快捷授权预设的执行进度（W751 任务 1c）；null = 没有在跑。
+ * 面板据此显示「进行中 i/n」并禁用其它预设按钮（避免并发授予搅乱顺序语义）。
+ */
+export interface PresetRun {
+  id: string;
+  /** 当前步骤下标（0 起）。 */
+  index: number;
+  total: number;
+}
+let presetRun: PresetRun | null = null;
+
+/**
  * 编排宿主：面板/授予流程调用回编排入口（本文件的调用方 grants.ts），
  * 避免子模块反向 import 入口造成循环引用。
  */
@@ -45,6 +58,26 @@ export interface GrantsHost {
   startGrant(def: CapDef): Promise<void>;
   /** 撤销（cap=null 表示全部撤销）。 */
   revoke(cap: GrantCap | null): Promise<void>;
+}
+
+/**
+ * 快捷授权预设的执行入口（W751 任务 1c）。
+ *
+ * 为什么用「注册」而不是给 GrantsHost 加一个方法：flow.ts 需要 panel.ts 的
+ * phraseFor/ttlOf，panel.ts 若反向 import flow.ts 就成环（W748 拆分时正是
+ * 用 state.ts 的读写访问器消掉这类环）。flow.ts 在模块加载时把自己的
+ * startPreset 注册进来，panel.ts 只经本文件取用 —— 方向仍然是单向的。
+ * 若以后允许改编排入口 ui/grants.ts，可把这里换成 GrantsHost.startPreset。
+ */
+export type PresetRunner = (host: GrantsHost, preset: GrantPreset) => Promise<void>;
+let presetRunner: PresetRunner | null = null;
+
+export function setPresetRunner(fn: PresetRunner | null): void {
+  presetRunner = fn;
+}
+
+export function getPresetRunner(): PresetRunner | null {
+  return presetRunner;
 }
 
 export function getCapability(): 'unknown' | 'on' | 'off' {
@@ -106,6 +139,14 @@ export function getPanelOverlay(): OverlayHandle | null {
 
 export function setPanelOverlay(v: OverlayHandle | null): void {
   panelOverlay = v;
+}
+
+export function getPresetRun(): PresetRun | null {
+  return presetRun;
+}
+
+export function setPresetRun(v: PresetRun | null): void {
+  presetRun = v;
 }
 
 export function getPanelNote(): { text: string; cls: string } | null {

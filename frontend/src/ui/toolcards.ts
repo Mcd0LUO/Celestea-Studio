@@ -68,6 +68,12 @@ export function buildToolCard(d: ToolCardData): ToolCardRef {
   const bubble = el('div', 'bubble');
   const card = document.createElement('details');
   card.className = 'toolcard running';
+  // W752：工具卡默认折叠（终态由 CSS 强制，见 styles/components.css 的
+  // `.toolcard:not([open]) > .toolcard-body`）——显式写 false 是把「默认折叠」
+  // 变成可断言的构建期事实，而不是依赖 <details> 的隐式默认值：
+  // 运行中折叠、结果到达也不自动展开（状态点 + 参数/结果预览都在 summary 上），
+  // 只有用户点 summary 才展开。
+  card.open = false;
   const head = document.createElement('summary');
   head.className = 'toolcard-head';
   head.setAttribute('aria-expanded', 'false');
@@ -104,6 +110,7 @@ export function buildToolCard(d: ToolCardData): ToolCardRef {
   const body = el('div', 'toolcard-body');
   body.appendChild(el('div', 'tool-args', d.argsText));
   card.appendChild(body);
+  // aria-expanded 与真实展开态同步（键盘/鼠标/程序化切换都会触发 toggle）
   card.addEventListener('toggle', () => {
     head.setAttribute('aria-expanded', card.open ? 'true' : 'false');
   });
@@ -119,7 +126,11 @@ export function buildToolCard(d: ToolCardData): ToolCardRef {
   };
 }
 
-/** 回填工具结果（结果预览行 + 展开区全文 + 完成/失败态）。 */
+/**
+ * 回填工具结果（结果预览行 + 展开区全文 + 完成/失败态）。
+ * W752：只改状态类与内容，**绝不触碰 card.open** —— 结果到达不自动展开；
+ * 用户此时已展开的卡片也不会被这次 DOM 更新折回去（原地更新，不重建节点）。
+ */
 export function setToolResult(ref: ToolCardRef, resultText: string, failed: boolean): void {
   ref.card.classList.remove('running');
   ref.card.classList.add(failed ? 'err' : 'ok');

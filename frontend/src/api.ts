@@ -218,8 +218,16 @@ export const api = {
   testProvider: (payload: unknown) => postJson<ProviderTestResp>('/api/providers/test', payload),
   fetchProviderModels: (id: string) =>
     postJson<ProviderFetchResp>('/api/providers/' + encodeURIComponent(id) + '/models/fetch', {}),
-  setDefaultModel: (model: string) =>
-    postJson<ClearResp>('/api/providers/default', { model }),
+  /**
+   * W750：切默认 (provider, model)。`providerId` 只在需要消歧时传 —— 模型 id 跨
+   * provider 会撞名（同一 id 由两个 provider 提供、端点不同），不带 id 时后端只能
+   * 沿用「第一个列出该模型 id 的 provider」，切不到想切的那个。
+   */
+  setDefaultModel: (model: string, providerId?: string) =>
+    postJson<ClearResp>(
+      '/api/providers/default',
+      providerId ? { model, provider_id: providerId } : { model },
+    ),
   // ---- 提示词（W245；缺失时 404 优雅降级） ----
   // P0-4 scope 契约：不传 workspace=全局（后端默认 scope）；workspace=名=该工作区。
   prompts: (workspace?: string) =>

@@ -11,3 +11,6 @@ providers.json
 
 # W237: workspace registry (no secrets; runtime state)
 workspaces.json
+/grants-audit.jsonl
+/usage-ledger.jsonl
+/worker-results/

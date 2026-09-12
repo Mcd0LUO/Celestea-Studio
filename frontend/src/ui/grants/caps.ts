@@ -6,7 +6,7 @@
 // ============================================================================
 import type { EffectiveGrants, GrantCap, GrantEntry, GrantScope } from '../../types';
 
-/** 危险能力（侧栏红色小盾 + 二次确认 + 确认词，设计 §3.1/§3.3）。 */
+/** 危险能力（侧栏红色小盾 + 二次确认，设计 §3.1/§3.3；W751 起不再要求逐字确认词）。 */
 export const DANGER_CAPS: ReadonlySet<string> = new Set(['network', 'write_roots', 'unsandboxed']);
 
 /** 每项能力的用户语言定义（名称 / 一句话影响 / 表单形态；文案逐字取自设计 §3.2）。 */
@@ -19,7 +19,11 @@ export interface CapDef {
   /** bool = 无范围；dirs = 选目录；hosts = 站点文本框；tools = 工具名文本框。 */
   kind: 'bool' | 'dirs' | 'hosts' | 'tools';
   danger: boolean;
-  /** 需要逐字输入的确认词（设计 §3.3）；空串 = 只需点击确认。 */
+  /**
+   * 需要逐字输入的确认词（设计 §3.3）；空串 = 只需点击确认。
+   * @deprecated W751：授予不再要求逐字输入确认词（只保留一次点击确认），
+   *   本字段恒为空串，仅为结构兼容保留；新代码不要读取它，也不要再填值。
+   */
   confirmWord: string;
   /** 文档默认有效期与上限（秒）；服务返回 max_ttl_sec 时以上限为准（§2.3）。 */
   defaultTtl: number;
@@ -34,7 +38,7 @@ export const CAPS: readonly CapDef[] = [
     extra: '⚠ 撤销前一直有效。',
     kind: 'bool',
     danger: true,
-    confirmWord: '允许',
+    confirmWord: '',
     defaultTtl: 1800,
     maxTtl: 3600,
   },
@@ -44,7 +48,7 @@ export const CAPS: readonly CapDef[] = [
     impact: '允许会话在所选目录中创建与修改文件。',
     kind: 'dirs',
     danger: true,
-    confirmWord: '允许',
+    confirmWord: '',
     defaultTtl: 1800,
     maxTtl: 86400,
   },
@@ -84,7 +88,7 @@ export const CAPS: readonly CapDef[] = [
     impact: '允许会话中的命令不经额外隔离运行。',
     kind: 'bool',
     danger: true,
-    confirmWord: '降低隔离',
+    confirmWord: '',
     defaultTtl: 900,
     maxTtl: 900,
   },

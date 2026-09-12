@@ -21,6 +21,7 @@ import {
 import {
   addUserMessage,
   autoscroll,
+  buildThinkSeg,
   ensureAssistant,
   finalizeAssistant,
   renderEmptyHint,
@@ -177,29 +178,12 @@ function renderOne(ctx: SessionPane, m: HistoryMsg, container: HTMLElement): voi
   renderToolMessage(ctx, m, container);
 }
 
-/** 历史思考条目：弱化块（.think-seg 样式，与 live 同款；折叠交互复用）。 */
+/**
+ * 历史思考条目：与 live **同一构建函数** buildThinkSeg（默认折叠态因此不可能分叉）。
+ * 历史恢复 = 静态内容，永远用默认态（collapsed: true），不随 live 流式状态变化。
+ */
 function renderThinkingHistory(content: string, container: HTMLElement): void {
-  const col = el('div', 'mcol');
-  const msg = el('div', 'msg think-seg');
-  const cap = el('div', 'msg-caption think-head');
-  cap.appendChild(el('span', 'who', '思考'));
-  const foldMark = el('span', 'think-fold-mark', '▾');
-  cap.appendChild(foldMark);
-  cap.appendChild(el('span', 'think-time', ''));
-  msg.appendChild(cap);
-  const bubble = el('div', 'bubble think-seg-bubble');
-  const body = el('div', 'think-seg-body');
-  body.textContent = content;
-  bubble.appendChild(body);
-  const folded = el('div', 'think-seg-folded', '思考已折叠，点击展开');
-  bubble.appendChild(folded);
-  msg.appendChild(bubble);
-  col.appendChild(msg);
-  container.appendChild(col);
-  cap.addEventListener('click', () => {
-    col.classList.toggle('collapsed');
-    foldMark.textContent = col.classList.contains('collapsed') ? '▸' : '▾';
-  });
+  container.appendChild(buildThinkSeg({ text: content, collapsed: true }).root);
 }
 
 function appendNote(ctx: SessionPane, text: string): void {

@@ -177,6 +177,11 @@
   padding: 6px 10px;
   display: flex; flex-direction: column; gap: 6px;
 }
+/* W752：作者样式里的 `display: flex` 会盖掉 UA 对关闭态 <details> 子节点的隐藏
+   （Firefox/Safari 的 UA 规则是普通规则，作者规则优先级更高；只有 Chromium 用
+   ::details-content 的 content-visibility 才天然免疫）——不补这条，工具卡在部分
+   引擎里「明明没 open 却把参数/结果全文摊开」。权重 (0,3,0) > (0,1,0)，稳赢。 */
+.toolcard:not([open]) > .toolcard-body { display: none; }
 .tool-details { border-radius: 6px; }
 .tool-details summary {
   cursor: pointer; padding: 4px 10px; font-size: 11.5px;
@@ -391,7 +396,7 @@
   0%   { background-position: -40% 0; }
   100% { background-position: 140% 0; }
 }
-/* 第 23 轮：思考块可折叠（标题行可点；流式思考中不折叠） */
+/* 第 23 轮：思考块可折叠（W752：默认折叠，流式期间自动展开、结束自动折回） */
 .msg.think-seg .think-head { cursor: pointer; user-select: none; }
 .msg.think-seg .think-head:hover { color: var(--c-text-1); }
 .think-fold-mark {
@@ -400,5 +405,7 @@
 }
 .think-time { margin-left: auto; font-size: 10px; color: var(--c-text-3); font-family: var(--mono); }
 .think-seg-folded { display: none; font-size: 11px; color: var(--c-text-3); padding: 2px 0; }
+/* 折叠态挂在 .msg.think-seg 本身（W752 修：此前 live 把类挂在 .mcol 根上，
+   这两条选择器永不命中 → 点了没反应、永远展开）。 */
 .msg.think-seg.collapsed .think-seg-body { display: none; }
 .msg.think-seg.collapsed .think-seg-folded { display: block; }

@@ -3,6 +3,17 @@
 //   （W748 从 ui/grants.ts 拆出；纯搬运，DOM 结构/类名/文案/事件未改。）
 //   面板 = 复用 statusline 的 .sl-popup 样式族 + utils/overlays 的 Esc 层级栈。
 //   授予/撤销动作本身不在本模块（见 ./flow.ts），经 GrantsHost 回调触发。
+//
+//   W751 任务 1a —— 面板改为**紧贴盾牌按钮上方**弹出：
+//     · 几何是纯函数（./geom.ts 的 panelGeom，可在 node 里直接断言）；
+//     · 坐标每次都由 getBoundingClientRect() 现算（打开时 / 每次重绘 / resize / 滚动），
+//       并以 position: fixed + 视口坐标落位，绝不是「猜一次就不更新」；
+//     · 面板过高时自身滚动（max-height = 盾牌上方可用空间 - 8px 间距），不顶出屏幕。
+//     · 锚点契约（给 statusline 侧）：锚点 = #slGrant（盾牌按钮）的视口矩形，经
+//       state.getShieldButton() 取得；盾牌缺失/不可见时兜底用 #statusline 的右端。
+//       **本模块不需要 statusline.ts 做任何改动**（index.html 里 #slGrant 已经存在）。
+//
+//   W751 任务 1c —— 面板顶部新增「快捷授权」区（预设组合见 ./presets.ts）。
 // ============================================================================
 import { el } from '../../utils/dom';
 import { popOverlay, pushOverlay } from '../../utils/overlays';
@@ -17,12 +28,21 @@ import {
   scopeOf,
   type CapDef,
 } from './caps';
+import { panelGeom, type RectLike, type SizeLike } from './geom';
+import {
+  PRESETS,
+  presetSatisfied,
+  type ActiveCapView,
+  type GrantPreset,
+} from './presets';
 import {
   drafts,
   getData,
   getPanelEl,
   getPanelNote,
   getPanelOverlay,
+  getPresetRun,
+  getPresetRunner,
   getShieldBadge,
   getShieldButton,
   inlineError,
@@ -74,9 +94,91 @@ export function renderShield(): void {
   btn.setAttribute('aria-label', btn.title);
 }
 
+// ---- 面板落位（W751 任务 1a） --------------------------------------------------
+
+/** 面板离开锚点/屏幕时要摘掉的监听（resize / 滚动）。 */
+let detachPosition: (() => void) | null = null;
+
+/** 锚点矩形 = 盾牌按钮；盾牌不可见（未就绪/被隐藏）时兜底为状态栏右端。 */
+function anchorRect(): RectLike | null {
+  const btn = getShieldButton();
+  if (btn && btn.isConnected) {
+    const r = btn.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) return r;
+  }
+  const host = document.getElementById('statusline');
+  if (!host) return null;
+  const sl = host.getBoundingClientRect();
+  return {
+    top: sl.top,
+    right: sl.right,
+    bottom: sl.top,
+    left: sl.right,
+    width: 0,
+    height: 0,
+  };
+}
+
+function viewportSize(): SizeLike {
+  return {
+    width: window.innerWidth || document.documentElement.clientWidth || 0,
+    height: window.innerHeight || document.documentElement.clientHeight || 0,
+  };
+}
+
+/**
+ * 现算坐标并落位：面板下沿贴盾牌上沿（间距 8px）、右沿与盾牌对齐、左右 clamp 进视口、
+ * 高度上限 = 盾牌上方可用空间 - 间距（超出则由面板内部滚动）。
+ */
+export function positionPanel(): void {
+  const popup = getPanelEl();
+  if (!popup) return;
+  const anchor = anchorRect();
+  if (!anchor) return;
+  // 先清掉上一轮的内联上限，量到**自然**尺寸，再交给纯函数算落位与上限。
+  popup.style.maxHeight = '';
+  const natural: SizeLike = { width: popup.offsetWidth, height: popup.offsetHeight };
+  const geom = panelGeom({ anchor, panel: natural, viewport: viewportSize() });
+  popup.style.maxHeight = geom.maxHeight + 'px';
+  popup.style.top = geom.top + 'px';
+  popup.style.left = geom.left + 'px';
+}
+
+/**
+ * 跟随重排：resize 与滚动（捕获，内层滚动容器也能收到）都重新落位 —— 选择「重新定位」
+ * 而不是「关闭」：面板是跟随盾牌的一次性弹层，跟着盾牌走比突然消失更可预期。
+ */
+function attachPosition(): void {
+  detachPosition?.();
+  let raf = 0;
+  const onMove = () => {
+    if (raf !== 0) return;
+    raf = window.requestAnimationFrame(() => {
+      raf = 0;
+      positionPanel();
+    });
+  };
+  window.addEventListener('resize', onMove);
+  document.addEventListener('scroll', onMove, true);
+  detachPosition = () => {
+    if (raf !== 0) {
+      window.cancelAnimationFrame(raf);
+      raf = 0;
+    }
+    window.removeEventListener('resize', onMove);
+    document.removeEventListener('scroll', onMove, true);
+  };
+}
+
+function detachPositionNow(): void {
+  detachPosition?.();
+  detachPosition = null;
+}
+
 // ---- 面板（§3.2） --------------------------------------------------------------
 
 export function closePanel(): void {
+  detachPositionNow();
   const overlay = getPanelOverlay();
   if (overlay) {
     popOverlay(overlay);
@@ -113,11 +215,15 @@ export async function openPanel(host: GrantsHost): Promise<void> {
   const body = el('div', 'sl-popup-body');
   popup.appendChild(body);
   body.appendChild(el('div', 'sl-popup-loading', '正在读取当前权限…'));
+  // 先按「加载中」的尺寸落位（同一帧内完成，不会闪一次未定位的面板）
+  positionPanel();
+  attachPosition();
 
   if (host.focusedSession() === '') {
     body.replaceChildren(
       el('div', 'sl-popup-note', '尚未打开任何会话：请先在左侧选择一个会话。'),
     );
+    positionPanel();
     return;
   }
   await host.refresh(true);
@@ -132,6 +238,9 @@ export function renderPanel(host: GrantsHost): void {
   const body = popup.querySelector<HTMLElement>('.sl-popup-body');
   if (!body) return;
   const off = document.createElement('div');
+
+  // 快捷授权（W751 任务 1c）：放在面板最顶部，先给「一键组合」，再是逐项明细。
+  off.appendChild(renderPresets(host));
 
   off.appendChild(
     el('div', 'grant-intro', '默认情况下，本会话只能读写工作区目录，不能访问网络。'),
@@ -175,6 +284,81 @@ export function renderPanel(host: GrantsHost): void {
   const note = getPanelNote();
   if (note) off.appendChild(el('div', 'sl-popup-status ' + note.cls, note.text));
   body.replaceChildren(...off.childNodes);
+  // 内容高度变了 → 重新落位（面板位置永远由当前 DOM 实测决定）
+  positionPanel();
+}
+
+// ---- 快捷授权预设（W751 任务 1c） ----------------------------------------------
+
+/** 生效集 → 供纯函数判定的只读视图（站点类带上生效站点，用于「等效已生效」）。 */
+function activeViews(): ActiveCapView[] {
+  const out: ActiveCapView[] = [];
+  for (const def of CAPS) {
+    const g = activeFor(def.cap);
+    if (!g) continue;
+    out.push({
+      cap: def.cap,
+      hosts: def.kind === 'hosts' ? listOf(scopeOf(g).hosts) : [],
+    });
+  }
+  return out;
+}
+
+/** 预设的统一 TTL → 用户语言（面板上直接显示「有效期 X」）。 */
+export function presetTtlLabel(preset: GrantPreset): string {
+  const hit = TTL_CHOICES.find((c) => c.sec === preset.ttlSec);
+  if (hit) return '有效期 ' + hit.label;
+  return '有效期 ' + Math.max(1, Math.round(preset.ttlSec / 60)) + ' 分钟';
+}
+
+/**
+ * 「快捷授权」区：一键组合按钮。
+ * 等效授权已生效时**显示已生效态**（按钮加 .on + 「已生效」标），但仍可点击 ——
+ * 重复点击是幂等的（后端同一 cap 本来就是 replace-by-cap，重授只会刷新到期时间）。
+ */
+function renderPresets(host: GrantsHost): HTMLElement {
+  const box = el('div', 'grant-presets');
+  const head = el('div', 'grant-presets-head');
+  head.appendChild(el('span', 'grant-presets-title', '快捷授权'));
+  head.appendChild(el('span', 'grant-presets-ttl-note', '一条组合 = 按顺序逐项放宽，每项都可单独撤销'));
+  box.appendChild(head);
+
+  const run = getPresetRun();
+  const active = activeViews();
+  for (const preset of PRESETS) {
+    const btn = el('button', 'grant-preset') as HTMLButtonElement;
+    btn.type = 'button';
+    const satisfied = presetSatisfied(preset, active);
+    const running = run !== null && run.id === preset.id;
+    btn.classList.toggle('on', satisfied);
+    btn.classList.toggle('busy', running);
+    btn.disabled = run !== null;
+    btn.title = preset.hint;
+
+    const top = el('span', 'grant-preset-top');
+    top.appendChild(el('span', 'grant-preset-label', preset.label));
+    if (running && run) {
+      top.appendChild(el('span', 'grant-preset-tag busy', '进行中 ' + (run.index + 1) + '/' + run.total));
+    } else if (satisfied) {
+      top.appendChild(el('span', 'grant-preset-tag', '已生效'));
+    }
+    top.appendChild(el('span', 'grant-preset-ttl', presetTtlLabel(preset)));
+    btn.appendChild(top);
+    btn.appendChild(el('span', 'grant-preset-hint', preset.hint));
+    btn.addEventListener('click', () => void runPreset(host, preset));
+    box.appendChild(btn);
+  }
+  return box;
+}
+
+async function runPreset(host: GrantsHost, preset: GrantPreset): Promise<void> {
+  const runner = getPresetRunner();
+  if (!runner) {
+    setPanelNote({ text: '快捷授权暂不可用，请改用下面的逐项授予。', cls: 'err' });
+    host.renderPanel();
+    return;
+  }
+  await runner(host, preset);
 }
 
 /** 当前生效集 → 一句话预览（固定常量句式，范围值只作数据填入）。 */
@@ -209,7 +393,8 @@ export function phraseFor(def: CapDef, scope: GrantScope): string {
   }
 }
 
-function maxTtlOf(def: CapDef): number {
+/** 该能力的有效期上限（服务端 max_ttl_sec 优先；供面板与快捷授权共用）。 */
+export function maxTtlOf(def: CapDef): number {
   const v = getData()?.max_ttl_sec?.[def.cap];
   return typeof v === 'number' && v > 0 ? v : def.maxTtl;
 }

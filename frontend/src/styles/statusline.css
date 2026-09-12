@@ -151,7 +151,7 @@
 }
 
 .sl-opt {
-  display: flex; align-items: baseline; gap: 8px;
+  display: flex; align-items: center; gap: 8px;
   width: 100%;
   background: transparent;
   border: 1px solid transparent;
@@ -186,6 +186,7 @@
 
 /* W262：模型清单的树状分组 —— 一级=提供商名（不可点击），二级=模型行缩进一级 */
 .sl-group {
+  display: flex; align-items: center; gap: 6px;
   padding: 7px 8px 2px;
   font-size: 10.5px; color: var(--c-text-3);
   letter-spacing: 1px;
@@ -194,6 +195,53 @@
 }
 .sl-group + .sl-group { border-top: 1px solid var(--c-border-subtle); margin-top: 4px; }
 .sl-group-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* W750：组内含当前生效项 → 标题加重 + 「当前」标记；显示名与稳定 id 不同名时淡显 id */
+.sl-group.cur .sl-group-name { color: var(--c-text-1); }
+.sl-group-id {
+  font-family: var(--mono); font-size: 9.5px; color: var(--c-text-3);
+  border: 1px solid var(--c-border-subtle); border-radius: 4px; padding: 0 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 14ch;
+}
+.sl-group-tag {
+  font-family: var(--mono); font-size: 9.5px; color: var(--c-accent);
+  border: 1px solid var(--c-accent-ring); border-radius: 4px; padding: 0 4px;
+}
+
+/* ============================================================================
+ * W750：内置模型图标（家族级，非商标）。
+ * 色彩语义例外（同 W701 权限盾牌先例）：图标要区分厂商家族，纯灰阶做不到，
+ * 因此单列 --mi-* token，组件层仍只引用 token、不写死颜色。
+ * 取值取中间调：浅底（白/浅灰）与深底（#111 级）上都留得住对比度。
+ * ============================================================================ */
+:root {
+  --mi-deepseek: #3f5cf0;
+  --mi-openai: #0f8a72;
+  --mi-glm: #6d4df0;
+  --mi-claude: #c26340;
+}
+/* 当前唯一主题（mono）把 color-scheme 钉在 light，这一支今天不会命中；
+   保留它是为了将来出现深色主题时图标自动换成亮一档的变体。 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --mi-deepseek: #8fa4ff;
+    --mi-openai: #4fc3a6;
+    --mi-glm: #a992ff;
+    --mi-claude: #e79b78;
+  }
+}
+.sl-micon {
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 12px; height: 12px;
+  margin-right: 4px;
+  vertical-align: -2px;
+  color: var(--c-text-3);
+}
+.sl-micon svg { display: block; }
+.sl-micon-deepseek { color: var(--mi-deepseek); }
+.sl-micon-openai { color: var(--mi-openai); }
+.sl-micon-glm { color: var(--mi-glm); }
+.sl-micon-claude { color: var(--mi-claude); }
 .sl-opt.sub { padding-left: 20px; position: relative; }
 .sl-opt.sub::before {
   content: '';
