@@ -422,14 +422,24 @@
   outline: 1px solid var(--c-accent-ring); outline-offset: 2px; border-radius: 6px;
 }
 /* 折叠箭头：与图标盒同心，hover / 键盘聚焦时淡入（DisclosureRow 的 100ms 交叉淡入）；
-   折叠态另有「思考已折叠，点击展开」占位行，状态不靠箭头单独承担 */
+   折叠态另有「思考已折叠，点击展开」占位行，状态不靠箭头单独承担。
+   W765：内容由 /▸▾ 字形改为**内联 SVG chevron**（对齐 DSH DisclosureRow 的 chevron
+   资源），方向由 data-fold 驱动 100ms 旋转：collapsed(0°) 指向右 ≡ 旧 ▸，
+   expanded(90°) 指向下 ≡ 旧 ▾；交叉淡入时长不变（仍是 100ms ease）。 */
 .think-fold-mark {
   position: absolute; left: 0; top: 50%; width: var(--lead-box); height: var(--lead-box);
   transform: translateY(-50%);
   display: flex; align-items: center; justify-content: center;
-  font-size: 11px; line-height: 1; color: var(--c-text-3);
+  line-height: 1; color: var(--c-text-3);
   opacity: 0; transition: opacity 100ms ease;
 }
+.think-fold-mark svg {
+  display: block; width: 14px; height: 14px;
+  transform-origin: 50% 50%;
+  transition: transform 100ms ease;
+}
+.think-fold-mark[data-fold='collapsed'] svg { transform: rotate(0deg); }
+.think-fold-mark[data-fold='expanded'] svg { transform: rotate(90deg); }
 .msg.think-seg .think-head:hover .think-fold-mark,
 .msg.think-seg .think-head:focus-visible .think-fold-mark { opacity: 1; }
 /* 流式思考：头行扫光带。页面底色本身就是 bg-base，叠一层 bg-base 色调的带子看不见，

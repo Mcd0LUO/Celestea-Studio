@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="mono">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Celestea Studio</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230d0f12'/%3E%3Crect x='5' y='5' width='6' height='6' rx='1.2' fill='none' stroke='%237f93b0' stroke-width='1.4'/%3E%3C/svg%3E" />
 </head>
@@ -44,6 +44,9 @@
 
       <!-- ---------- 侧栏/主区分隔条（可拖动调宽 · 双击复位） ---------- -->
       <div id="sidebarResizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" title="拖动调整侧栏宽度 · 双击复位"></div>
+
+      <!-- W765：移动端会话抽屉的遮罩（点它关闭抽屉；桌面端恒为 .hidden，不参与布局） -->
+      <div id="sidebarScrim" class="sidebar-scrim hidden" aria-hidden="true"></div>
 
       <!-- ---------- 主区 ---------- -->
       <main id="main">

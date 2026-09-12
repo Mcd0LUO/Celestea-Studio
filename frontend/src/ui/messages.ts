@@ -34,13 +34,24 @@ import { autoscroll, hideEmptyHint } from './messages/scroll';
  * 折叠类挂在 **.msg.think-seg** 上（不是 .mcol 根）——CSS 选择器是
  * `.msg.think-seg.collapsed …`；历史上 live 把类 toggle 到 .mcol 根上，选择器
  * 永不命中，于是「点了没反应、永远展开」。setThinkCollapsed 是折叠态的唯一写入口
- * （class + 箭头字形 + aria-expanded 三处同写）；live 追加与历史恢复共用
+ * （class + data-fold 箭头方向 + aria-expanded 三处同写）；live 追加与历史恢复共用
  * buildThinkSeg，两条路径的默认态因此不可能分叉。 */
 
-/** 折叠（收起）标记字形。 */
-export const THINK_MARK_COLLAPSED = '▸';
-/** 展开标记字形。 */
-export const THINK_MARK_EXPANDED = '▾';
+/**
+ * W765：折叠指示由「+ / ▸▾ 字形」改为**内联 SVG chevron**（对齐 DSH DisclosureRow
+ * 的 chevron 资源形态：14px 线性箭头，线宽 1.6、圆头圆角接头）。
+ * 方向不写死在 SVG 里，而由 `data-fold` 属性驱动 CSS 旋转：
+ *   collapsed（收起，等价旧字形 ▸）= chevron 指向右；expanded（等价旧字形 ▾）= 顺时针 90° 指向下。
+ * 源码是常量字面量、无任何用户输入参与拼接，innerHTML 在这里没有注入面。
+ */
+export const THINK_CHEVRON_SVG =
+  '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">' +
+  '<path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" ' +
+  'stroke-linecap="round" stroke-linejoin="round"></path></svg>';
+/** 折叠态取值（data-fold）：与旧「实心三角 ▸」等价。 */
+export const THINK_FOLD_COLLAPSED = 'collapsed';
+/** 展开态取值（data-fold）：与旧「空心三角 ▾」等价。 */
+export const THINK_FOLD_EXPANDED = 'expanded';
 /** 折叠占位行文案（收起时代替正文显示）。 */
 export const THINK_FOLDED_HINT = '思考已折叠，点击展开';
 
@@ -50,7 +61,7 @@ export interface ThinkSegDom {
   msg: HTMLElement; // .msg.think-seg（折叠类挂它，CSS 依赖）
   head: HTMLElement; // 标题行（点击 / 回车 / 空格切换）
   body: HTMLElement; // 正文
-  foldMark: HTMLElement; // 折叠箭头
+  foldMark: HTMLElement; // 折叠箭头（W765：内联 SVG chevron，方向由 data-fold 驱动）
   text: string; // 累积思考文本（与 ui/view.ts 的 ThinkSeg 同字段，便于直接挂到 ctx）
 }
 
@@ -59,10 +70,10 @@ const thinkFolds = new WeakMap<HTMLElement, ThinkSegDom>();
 /** 用户手动切换过折叠态的段：段结束的自动折叠不再覆盖用户意图。 */
 const thinkUserFolded = new WeakSet<HTMLElement>();
 
-/** 折叠态唯一写入口：class + 箭头 + aria-expanded 同步。 */
+/** 折叠态唯一写入口：class + data-fold（箭头方向）+ aria-expanded 同步。 */
 export function setThinkCollapsed(seg: ThinkSegDom, collapsed: boolean): void {
   seg.msg.classList.toggle('collapsed', collapsed);
-  seg.foldMark.textContent = collapsed ? THINK_MARK_COLLAPSED : THINK_MARK_EXPANDED;
+  seg.foldMark.setAttribute('data-fold', collapsed ? THINK_FOLD_COLLAPSED : THINK_FOLD_EXPANDED);
   seg.head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
 }
 
@@ -87,7 +98,8 @@ export function buildThinkSeg(
   const msg = el('div', 'msg think-seg');
   const cap = el('div', 'msg-caption think-head') as HTMLElement;
   cap.appendChild(el('span', 'who', '思考'));
-  const foldMark = el('span', 'think-fold-mark', THINK_MARK_COLLAPSED);
+  const foldMark = el('span', 'think-fold-mark');
+  foldMark.innerHTML = THINK_CHEVRON_SVG; // W765：SVG chevron（方向由 data-fold 驱动）
   cap.appendChild(foldMark);
   cap.appendChild(el('span', 'think-time', opts.time ?? ''));
   cap.setAttribute('role', 'button');

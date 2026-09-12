@@ -251,14 +251,17 @@ function truthy(v, name) {
 
 /* ------------------------------------------------------------------ 主流程 */
 
-const MARK_COLLAPSED = '\u25B8'; // 折叠箭头
-const MARK_EXPANDED = '\u25BE'; // 展开箭头
+/* W765：折叠指示由字形（▸/▾）改为内联 SVG chevron，方向落在 data-fold 上。
+   断言从「字形文本相等」等价迁移为「折叠态取值相等」+「确实是 SVG」，
+   语义一一对应：collapsed ≡ 旧 ▸（指向右），expanded ≡ 旧 ▾（指向下）。 */
+const FOLD_COLLAPSED = 'collapsed'; // 折叠态 data-fold（等价旧 ▸）
+const FOLD_EXPANDED = 'expanded'; // 展开态 data-fold（等价旧 ▾）
 
 async function loadBundle() {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'w752-fold-'));
   const out = path.join(tmp, 'bundle.mjs');
   const entry = `
-export { buildThinkSeg, appendThinking, endTurn, THINK_MARK_COLLAPSED, THINK_MARK_EXPANDED, THINK_FOLDED_HINT } from './src/ui/messages.ts';
+export { buildThinkSeg, appendThinking, endTurn, THINK_FOLD_COLLAPSED, THINK_FOLD_EXPANDED, THINK_FOLDED_HINT } from './src/ui/messages.ts';
 export { buildToolCard, setToolResult } from './src/ui/toolcards.ts';
 export { restoreSessionHistory } from './src/ui/restore.ts';
 `;
@@ -323,14 +326,17 @@ async function main() {
     '恢复路径：思考段根节点带 collapsed（默认折叠）',
   );
   eq(
-    restoredThink.querySelector('.think-fold-mark').textContent,
-    MARK_COLLAPSED,
-    '恢复路径：折叠箭头为实心三角',
+    restoredThink.querySelector('.think-fold-mark').getAttribute('data-fold'),
+    FOLD_COLLAPSED,
+    '恢复路径：折叠态 data-fold=collapsed（等价旧「实心三角 ▸」）',
   );
-  eq(
-    restoredThink.querySelector('.think-fold-mark').textContent,
-    M.THINK_MARK_COLLAPSED,
-    '恢复路径：箭头 = THINK_MARK_COLLAPSED 常量',
+  truthy(
+    /<svg/.test(String(restoredThink.querySelector('.think-fold-mark').innerHTML)) &&
+      M.THINK_FOLD_COLLAPSED === FOLD_COLLAPSED &&
+      /\.think-fold-mark\[data-fold='collapsed'\]\s+svg\s*\{[^}]*rotate\(0deg\)/.test(
+        readFileSync(path.join(ROOT, 'src/styles/components.css'), 'utf8'),
+      ),
+    '恢复路径：折叠指示是内联 SVG chevron（不再是字形），且 CSS 按 data-fold 定方向',
   );
   eq(
     restoredThink.querySelector('.think-head').getAttribute('aria-expanded'),
@@ -376,9 +382,9 @@ async function main() {
     'live 路径（流式中）：自动展开，让用户实时看到思考',
   );
   eq(
-    liveSeg.querySelector('.think-fold-mark').textContent,
-    MARK_EXPANDED,
-    'live 路径（流式中）：箭头为空心三角',
+    liveSeg.querySelector('.think-fold-mark').getAttribute('data-fold'),
+    FOLD_EXPANDED,
+    'live 路径（流式中）：data-fold=expanded（等价旧「空心三角 ▾」）',
   );
   eq(
     liveSeg.querySelector('.think-seg-body').textContent,
@@ -389,9 +395,9 @@ async function main() {
   M.endTurn(live); // 流式结束（段落封口 / 新轮开始都会走这里）
   truthy(liveSeg.classList.contains('collapsed'), 'live 路径（结束）：自动折回 collapsed 终态');
   eq(
-    liveSeg.querySelector('.think-fold-mark').textContent,
-    MARK_COLLAPSED,
-    'live 路径（结束）：箭头回到实心三角',
+    liveSeg.querySelector('.think-fold-mark').getAttribute('data-fold'),
+    FOLD_COLLAPSED,
+    'live 路径（结束）：data-fold 回到 collapsed（等价旧「实心三角 ▸」）',
   );
   eq(
     liveSeg.querySelector('.think-head').getAttribute('aria-expanded'),
@@ -406,16 +412,16 @@ async function main() {
     '交互：点击标题行展开（折叠类挂在 .msg.think-seg 上，CSS 能命中）',
   );
   eq(
-    liveSeg.querySelector('.think-fold-mark').textContent,
-    MARK_EXPANDED,
-    '交互：展开后箭头为空心三角',
+    liveSeg.querySelector('.think-fold-mark').getAttribute('data-fold'),
+    FOLD_EXPANDED,
+    '交互：展开后 data-fold=expanded',
   );
   liveSeg.querySelector('.think-head').click();
   truthy(liveSeg.classList.contains('collapsed'), '交互：再点收回');
   eq(
-    liveSeg.querySelector('.think-fold-mark').textContent,
-    MARK_COLLAPSED,
-    '交互：收回后箭头为实心三角',
+    liveSeg.querySelector('.think-fold-mark').getAttribute('data-fold'),
+    FOLD_COLLAPSED,
+    '交互：收回后 data-fold=collapsed',
   );
   liveSeg.querySelector('.think-head').click(); // 用户手动展开
   M.endTurn(live);
@@ -431,9 +437,9 @@ async function main() {
   const coldSeg = coldHost.querySelector('.msg.think-seg');
   truthy(coldSeg.classList.contains('collapsed'), 'live 路径（非流式）：创建即折叠');
   eq(
-    coldSeg.querySelector('.think-fold-mark').textContent,
-    MARK_COLLAPSED,
-    'live 路径（非流式）：箭头为实心三角',
+    coldSeg.querySelector('.think-fold-mark').getAttribute('data-fold'),
+    FOLD_COLLAPSED,
+    'live 路径（非流式）：data-fold=collapsed',
   );
 
   // 折叠态建好后转为流式（重连补发场景）→ 后续增量自动展开

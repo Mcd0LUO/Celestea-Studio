@@ -1,7 +1,10 @@
 // ============================================================================
-// ui/sidebar.ts — 侧栏布局（单一职责）：
+// ui/sidebar.ts — 侧栏布局：
 //   1) 收起/展开（顶栏按钮，localStorage 持久）
 //   2) 拖宽（与主区之间的分隔条，pointer 事件，min/max 约束，localStorage 持久）
+//   3) W765：**移动端抽屉**（≤640px）——顶栏按钮变汉堡，侧栏改为覆盖式抽屉 + 遮罩，
+//      点遮罩 / 按 Esc / 点某个会话行即关闭；桌面端的「收起/拖宽」语义与持久化完全不变。
+//      （断点数值口径登记在 styles/responsive.css 顶部，二者必须一致。）
 // ============================================================================
 import { need } from '../utils/dom';
 
@@ -61,6 +64,7 @@ export function initSidebar(): void {
   applyWidth(readStoredWidth());
 
   btn.addEventListener('click', () => {
+    if (isMobileViewport()) return; // W765：移动端由 initDrawer 接管（汉堡开合）
     collapsed = !collapsed;
     try {
       localStorage.setItem(STORAGE_COLLAPSED, collapsed ? '1' : '0');
@@ -107,4 +111,63 @@ export function initSidebar(): void {
     applyWidth(SIDEBAR_DEFAULT);
     persistWidth();
   });
+
+  // ---- W765：移动端抽屉（汉堡开合；桌面端一切照旧） ------------------------------
+  initDrawer(btn);
+}
+
+/** 移动端断点（与 styles/responsive.css 的 mobile 档一致）。 */
+const MOBILE_QUERY = '(max-width: 640px)';
+
+function isMobileViewport(): boolean {
+  try {
+    return window.matchMedia(MOBILE_QUERY).matches;
+  } catch {
+    return window.innerWidth <= 640;
+  }
+}
+
+/**
+ * 抽屉：只在移动端生效。桌面端的 collapsed 状态（localStorage 持久）不参与抽屉判定，
+ * 因此从桌面缩到手机、再放大回去，用户原来的收起/展开偏好不会被抽屉污染。
+ */
+function initDrawer(btn: HTMLButtonElement): void {
+  const app = need<HTMLElement>('#app');
+  const scrim = document.getElementById('sidebarScrim');
+  let open = false;
+
+  const apply = (): void => {
+    app.classList.toggle('drawer-open', open);
+    if (scrim) scrim.classList.toggle('hidden', !open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  };
+  const setOpen = (next: boolean): void => {
+    if (open === next) return;
+    open = next;
+    apply();
+  };
+  apply();
+
+  btn.addEventListener('click', () => {
+    if (!isMobileViewport()) return; // 桌面端走上面的收起/展开分支
+    setOpen(!open);
+  });
+  scrim?.addEventListener('click', () => setOpen(false));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && open) setOpen(false);
+  });
+  // 点会话行 = 已经选好了会话 → 收起抽屉（触摸端没有「鼠标移开」这一步）
+  document.getElementById('sessionTree')?.addEventListener('click', (e) => {
+    if (!open) return;
+    const t = e.target as HTMLElement | null;
+    if (t && t.closest('.sess-leaf')) setOpen(false);
+  });
+  // 视口跨过断点（旋屏/缩放）→ 抽屉状态不跨端残留
+  try {
+    window.matchMedia(MOBILE_QUERY).addEventListener('change', (ev) => {
+      if (!ev.matches) setOpen(false);
+    });
+  } catch {
+    /* 旧浏览器没有 addEventListener 版 MediaQueryList：抽屉仍可点遮罩关闭 */
+  }
 }

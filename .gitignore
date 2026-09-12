@@ -14,3 +14,4 @@ workspaces.json
 /grants-audit.jsonl
 /usage-ledger.jsonl
 /worker-results/
+studio-auth.secret
